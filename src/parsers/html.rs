@@ -100,7 +100,7 @@ mod edge_case_tests {
     async fn test_parse_empty_html() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///empty.html").unwrap();
-        
+
         let result = parse_html_document("", &uri, &manager).await;
         assert!(result.is_ok());
     }
@@ -109,7 +109,7 @@ mod edge_case_tests {
     async fn test_parse_html_with_multiple_style_blocks() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <html>
                 <head>
@@ -123,9 +123,9 @@ mod edge_case_tests {
                 </body>
             </html>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert!(vars.len() >= 3);
     }
@@ -134,18 +134,18 @@ mod edge_case_tests {
     async fn test_parse_html_with_inline_styles() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <div style="--inline1: red; color: var(--inline1);">
                 <span style="--inline2: blue;">Test</span>
             </div>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert!(vars.len() >= 2);
-        
+
         // Check that inline variables are marked as inline
         let inline_vars: Vec<_> = vars.iter().filter(|v| v.inline).collect();
         assert!(inline_vars.len() >= 2);
@@ -155,14 +155,14 @@ mod edge_case_tests {
     async fn test_parse_html_mixed_quotes() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <div style="--var1: blue;">Single</div>
             <div style='--var2: red;'>Double</div>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert!(vars.len() >= 2);
     }
@@ -171,7 +171,7 @@ mod edge_case_tests {
     async fn test_parse_html_with_comments() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <!-- HTML Comment -->
             <style>
@@ -180,9 +180,9 @@ mod edge_case_tests {
             </style>
             <div style="--inline: red;"><!-- Inline comment --></div>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert!(vars.len() >= 2);
     }
@@ -191,13 +191,13 @@ mod edge_case_tests {
     async fn test_parse_html_malformed() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         // Missing closing tags
         let html = r#"
             <div style="--var: blue;">
                 <style>:root { --color: red; }
         "#;
-        
+
         let result = parse_html_document(html, &uri, &manager).await;
         assert!(result.is_ok()); // Should still parse what it can
     }
@@ -206,7 +206,7 @@ mod edge_case_tests {
     async fn test_parse_html_script_tags_ignored() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <html>
                 <script>
@@ -215,9 +215,9 @@ mod edge_case_tests {
                 <style>:root { --real-color: blue; }</style>
             </html>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         // Should only find the real CSS variable, not the one in JavaScript
         let vars = manager.get_all_variables().await;
         assert_eq!(vars.len(), 1);
@@ -228,12 +228,12 @@ mod edge_case_tests {
     async fn test_parse_html_empty_style_attribute() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <div style="">Empty</div>
             <div style="  ">Whitespace</div>
         "#;
-        
+
         let result = parse_html_document(html, &uri, &manager).await;
         assert!(result.is_ok());
     }
@@ -242,7 +242,7 @@ mod edge_case_tests {
     async fn test_parse_html_style_with_media_queries() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <style>
                 :root { --base: blue; }
@@ -251,9 +251,9 @@ mod edge_case_tests {
                 }
             </style>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert!(vars.len() >= 2);
     }
@@ -262,7 +262,7 @@ mod edge_case_tests {
     async fn test_parse_html_nested_elements_with_styles() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <div style="--outer: blue;">
                 <div style="--middle: red;">
@@ -272,9 +272,9 @@ mod edge_case_tests {
                 </div>
             </div>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert_eq!(vars.len(), 3);
     }
@@ -283,7 +283,7 @@ mod edge_case_tests {
     async fn test_parse_html_special_characters_in_attributes() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.html").unwrap();
-        
+
         let html = r#"
             <div 
                 class="test-class" 
@@ -292,9 +292,9 @@ mod edge_case_tests {
                 Test
             </div>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert_eq!(vars.len(), 1);
     }
@@ -303,7 +303,7 @@ mod edge_case_tests {
     async fn test_parse_html_vue_component() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.vue").unwrap();
-        
+
         let html = r#"
             <template>
                 <div style="--vue-var: blue;">Vue Component</div>
@@ -312,9 +312,9 @@ mod edge_case_tests {
                 :root { --vue-style: red; }
             </style>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert!(vars.len() >= 2);
     }
@@ -323,7 +323,7 @@ mod edge_case_tests {
     async fn test_parse_html_svelte_component() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.svelte").unwrap();
-        
+
         let html = r#"
             <div style="--svelte-var: green;">
                 Svelte Component
@@ -332,9 +332,9 @@ mod edge_case_tests {
                 :global(:root) { --svelte-global: purple; }
             </style>
         "#;
-        
+
         parse_html_document(html, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert!(vars.len() >= 2);
     }

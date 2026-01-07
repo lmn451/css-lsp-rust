@@ -173,14 +173,14 @@ async fn test_color_resolution_chain() {
 #[tokio::test]
 async fn test_multiple_file_types() {
     let manager = CssVariableManager::new(Config::default());
-    
+
     // CSS file
     let css_uri = Url::parse("file:///styles.css").unwrap();
     let css_content = ":root { --css-var: blue; }";
     parse_css_document(css_content, &css_uri, &manager)
         .await
         .unwrap();
-    
+
     // HTML file
     let html_uri = Url::parse("file:///index.html").unwrap();
     let html_content = r#"
@@ -194,7 +194,7 @@ async fn test_multiple_file_types() {
     // Verify all variables from different sources
     let all_vars = manager.get_all_variables().await;
     assert!(all_vars.len() >= 3);
-    
+
     let var_names: Vec<String> = all_vars.iter().map(|v| v.name.clone()).collect();
     assert!(var_names.contains(&"--css-var".to_string()));
     assert!(var_names.contains(&"--html-var".to_string()));
@@ -222,14 +222,302 @@ async fn test_var_fallback_handling() {
     // Verify usages are tracked (but not nested fallbacks)
     let primary_usages = manager.get_usages("--primary-color").await;
     assert_eq!(primary_usages.len(), 1);
-    
+
     let bg_usages = manager.get_usages("--bg-color").await;
     assert_eq!(bg_usages.len(), 1);
-    
+
     let spacing_usages = manager.get_usages("--spacing").await;
     assert_eq!(spacing_usages.len(), 1);
-    
+
     // Nested fallback should not be tracked as separate usage
     let fallback_usages = manager.get_usages("--fallback").await;
     assert_eq!(fallback_usages.len(), 0);
+}
+
+/// Integration test: CSS variables in @media queries
+#[tokio::test]
+async fn test_css_variables_in_media_queries() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///media.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --breakpoint-md: 768px;
+            --theme-color: blue;
+        }
+
+        @media (min-width: var(--breakpoint-md)) {
+            .responsive {
+                --responsive-padding: 2rem;
+                color: var(--theme-color);
+            }
+        }
+
+        @media screen and (max-width: 480px) {
+            .mobile {
+                --mobile-spacing: var(--responsive-padding, 1rem);
+            }
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    // Verify variables defined in @media queries
+    let responsive_defs = manager.get_variables("--responsive-padding").await;
+    assert_eq!(responsive_defs.len(), 1);
+    // Variables in @media queries should be properly detected
+    assert!(!responsive_defs[0].selector.is_empty());
+
+    // Verify usages in @media queries
+    let theme_usages = manager.get_usages("--theme-color").await;
+    assert_eq!(theme_usages.len(), 1);
+
+    // Verify variables used within @media queries
+    let responsive_usages = manager.get_usages("--responsive-padding").await;
+    assert_eq!(responsive_usages.len(), 1);
+}
+
+/// Integration test: CSS variables in @keyframes
+#[tokio::test]
+async fn test_css_variables_in_keyframes() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///keyframes.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --animation-duration: 0.3s;
+            --start-color: red;
+            --end-color: blue;
+        }
+
+        @keyframes slide-in {
+            0% {
+                --current-color: var(--start-color);
+                transform: translateX(-100%);
+            }
+            100% {
+                --current-color: var(--end-color);
+                transform: translateX(0);
+            }
+        }
+
+        .animated {
+            animation: slide-in var(--animation-duration) ease-in-out;
+            color: var(--current-color, black);
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    // Verify variables in keyframes are tracked
+    let current_color_defs = manager.get_variables("--current-color").await;
+    assert_eq!(current_color_defs.len(), 2); // One for 0% and one for 100%
+
+    // Verify usages in keyframes
+    let start_color_usages = manager.get_usages("--start-color").await;
+    assert_eq!(start_color_usages.len(), 1);
+
+    let end_color_usages = manager.get_usages("--end-color").await;
+    assert_eq!(end_color_usages.len(), 1);
+}
+
+/// Integration test: Complex CSS selectors
+#[tokio::test]
+async fn test_complex_css_selectors() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///complex.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --primary: blue;
+        }
+
+        /* Complex selectors */
+        .component[data-theme="dark"] .header > h1:first-child,
+        .component[data-theme="light"] .header > h1:first-child {
+            --header-color: var(--primary);
+            color: var(--header-color);
+        }
+
+        .card:hover:not(.disabled)::before {
+            --border-color: #ccc;
+            border-color: var(--border-color);
+        }
+
+        /* Nested selectors with combinators */
+        .parent .child + .sibling {
+            --spacing: 1rem;
+            margin: var(--spacing);
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    // Verify variables are defined with complex selectors
+    let header_color_defs = manager.get_variables("--header-color").await;
+    assert_eq!(header_color_defs.len(), 1);
+    // The selector should be extracted correctly from the complex selector list
+
+    let border_color_defs = manager.get_variables("--border-color").await;
+    assert_eq!(border_color_defs.len(), 1);
+
+    // Verify usages
+    let primary_usages = manager.get_usages("--primary").await;
+    assert_eq!(primary_usages.len(), 1);
+}
+
+/// Integration test: CSS variables in calc() expressions
+#[tokio::test]
+async fn test_css_variables_in_calc_expressions() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///calc.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --base-spacing: 1rem;
+            --scale-factor: 1.5;
+        }
+
+        .element {
+            --computed-width: calc(100% - var(--base-spacing) * 2);
+            --scaled-size: calc(var(--base-spacing) * var(--scale-factor));
+            width: var(--computed-width);
+            font-size: var(--scaled-size);
+        }
+
+        .nested {
+            --complex-calc: calc(var(--base-spacing) + 0.5rem);
+            padding: var(--complex-calc);
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    // Verify variables with calc() expressions are parsed
+    let computed_defs = manager.get_variables("--computed-width").await;
+    assert_eq!(computed_defs.len(), 1);
+    assert!(computed_defs[0].value.contains("calc("));
+
+    // Verify usages in calc expressions
+    let base_spacing_usages = manager.get_usages("--base-spacing").await;
+    assert_eq!(base_spacing_usages.len(), 3); // Used in computed-width, scaled-size, and complex-calc
+
+    let scale_usages = manager.get_usages("--scale-factor").await;
+    assert_eq!(scale_usages.len(), 1);
+}
+
+/// Integration test: CSS variables in grid and flexbox properties
+#[tokio::test]
+async fn test_css_variables_in_layout_properties() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///layout.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --grid-columns: 1fr 2fr 1fr;
+            --flex-gap: 1rem;
+            --min-width: 200px;
+        }
+
+        .grid-container {
+            --grid-template: var(--grid-columns) / 1fr;
+            grid-template: var(--grid-template);
+            gap: var(--flex-gap);
+        }
+
+        .flex-container {
+            --flex-layout: row nowrap;
+            flex-flow: var(--flex-layout);
+            gap: var(--flex-gap);
+        }
+
+        .constrained {
+            --size-constraint: minmax(var(--min-width), 1fr);
+            grid-template-columns: var(--size-constraint);
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    // Verify complex layout variables
+    let grid_template_defs = manager.get_variables("--grid-template").await;
+    assert_eq!(grid_template_defs.len(), 1);
+
+    let flex_layout_defs = manager.get_variables("--flex-layout").await;
+    assert_eq!(flex_layout_defs.len(), 1);
+
+    // Verify usages in layout properties
+    let grid_columns_usages = manager.get_usages("--grid-columns").await;
+    assert_eq!(grid_columns_usages.len(), 1);
+
+    let flex_gap_usages = manager.get_usages("--flex-gap").await;
+    assert_eq!(flex_gap_usages.len(), 2); // Used in both grid and flex containers
+
+    let min_width_usages = manager.get_usages("--min-width").await;
+    assert_eq!(min_width_usages.len(), 1);
+}
+
+/// Integration test: CSS custom properties with special characters and escaping
+#[tokio::test]
+async fn test_css_custom_properties_edge_cases() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///edge-cases.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --simple: blue;
+            --with-dashes: red;
+            --with_underscores: green;
+            --with-numbers123: yellow;
+            --mixed-123_abc: purple;
+        }
+
+        .test {
+            color: var(--simple);
+            background: var(--with-dashes);
+            border-color: var(--with_underscores);
+            outline-color: var(--with-numbers123);
+            box-shadow: 0 0 10px var(--mixed-123_abc);
+        }
+
+        /* Variables that might be confused with other syntax */
+        .special {
+            --calc-like: calc(100% - 20px);
+            --url-like: url(https://example.com);
+            --function-like: rgba(255, 0, 0, 0.5);
+            background: var(--calc-like) var(--url-like) var(--function-like);
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    // Verify all variable names are parsed correctly
+    let all_vars = manager.get_all_variables().await;
+    assert_eq!(all_vars.len(), 8); // 5 definitions + 3 special ones
+
+    let var_names: Vec<String> = all_vars.iter().map(|v| v.name.clone()).collect();
+    assert!(var_names.contains(&"--simple".to_string()));
+    assert!(var_names.contains(&"--with-dashes".to_string()));
+    assert!(var_names.contains(&"--with_underscores".to_string()));
+    assert!(var_names.contains(&"--with-numbers123".to_string()));
+    assert!(var_names.contains(&"--mixed-123_abc".to_string()));
+
+    // Verify usages are tracked correctly
+    let simple_usages = manager.get_usages("--simple").await;
+    assert_eq!(simple_usages.len(), 1);
+
+    let mixed_usages = manager.get_usages("--mixed-123_abc").await;
+    assert_eq!(mixed_usages.len(), 1);
 }

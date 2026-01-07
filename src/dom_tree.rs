@@ -655,7 +655,7 @@ mod tests {
         let result = DomTree::parse(html);
         let tree = result.dom_tree;
         assert!(!tree.roots.is_empty());
-        
+
         // Should be able to find nodes
         let node = tree.find_node_at_position(50);
         assert!(node.is_some());
@@ -663,14 +663,15 @@ mod tests {
 
     #[test]
     fn test_dom_tree_nested_structure() {
-        let html = r#"<div class="outer"><div class="inner"><span id="item">Text</span></div></div>"#;
-        
+        let html =
+            r#"<div class="outer"><div class="inner"><span id="item">Text</span></div></div>"#;
+
         let result = DomTree::parse(html);
         let tree = result.dom_tree;
-        
+
         // Tree should have nodes
         assert!(!tree.roots.is_empty());
-        
+
         // We can verify the parse result has the expected structure
         assert_eq!(tree.nodes.len(), 3); // div, div, span
     }
@@ -678,7 +679,7 @@ mod tests {
     #[test]
     fn test_dom_tree_multiple_classes() {
         let html = r#"<div class="class1 class2 class3">Content</div>"#;
-        
+
         let result = DomTree::parse(html);
         assert!(!result.dom_tree.roots.is_empty());
         // Classes are parsed correctly
@@ -687,10 +688,10 @@ mod tests {
     #[test]
     fn test_dom_tree_self_closing_tags() {
         let html = r#"<div><img src="test.jpg" /><br /><input type="text" /></div>"#;
-        
+
         let result = DomTree::parse(html);
         let tree = result.dom_tree;
-        
+
         assert!(!tree.roots.is_empty());
         // Self-closing tags are handled
     }
@@ -698,10 +699,10 @@ mod tests {
     #[test]
     fn test_dom_tree_find_node_at_position() {
         let html = r#"<div class="outer"><p id="para">Text</p></div>"#;
-        
+
         let result = DomTree::parse(html);
         let tree = result.dom_tree;
-        
+
         // Position in div tag
         let node = tree.find_node_at_position(5);
         assert!(node.is_some());
@@ -727,10 +728,10 @@ mod tests {
     #[test]
     fn test_parse_inline_styles() {
         let html = r#"<div style="color: red; background: blue;"></div>"#;
-        
+
         let parsed = DomTree::parse(html);
         assert_eq!(parsed.inline_styles.len(), 1);
-        
+
         let inline = &parsed.inline_styles[0];
         assert!(inline.value.contains("color: red"));
         assert!(inline.value.contains("background: blue"));
@@ -752,10 +753,10 @@ mod tests {
                 </body>
             </html>
         "#;
-        
+
         let parsed = DomTree::parse(html);
         assert_eq!(parsed.style_blocks.len(), 2);
-        
+
         assert!(parsed.style_blocks[0].content.contains("color: red"));
         assert!(parsed.style_blocks[1].content.contains("background: blue"));
     }
@@ -763,7 +764,7 @@ mod tests {
     #[test]
     fn test_parse_nested_style_tags() {
         let html = r#"<style>outer { color: red; }<style>inner</style></style>"#;
-        
+
         let parsed = DomTree::parse(html);
         // Should handle nested style tags
         assert!(!parsed.style_blocks.is_empty());
@@ -772,10 +773,10 @@ mod tests {
     #[test]
     fn test_dom_tree_comment_handling() {
         let html = r#"<div><!-- This is a comment --><p>Text</p></div>"#;
-        
+
         let result = DomTree::parse(html);
         let tree = result.dom_tree;
-        
+
         // Comments should be handled properly
         assert!(!tree.roots.is_empty());
     }
@@ -783,10 +784,10 @@ mod tests {
     #[test]
     fn test_attributes_with_quotes() {
         let html = r#"<div class="test" id='myid' data-value=unquoted></div>"#;
-        
+
         let result = DomTree::parse(html);
         let tree = result.dom_tree;
-        
+
         // Should parse attributes correctly
         assert!(!tree.roots.is_empty());
     }

@@ -212,10 +212,10 @@ mod tests {
     #[tokio::test]
     async fn test_manager_multiple_definitions() {
         let manager = CssVariableManager::new(Config::default());
-        
+
         let var1 = create_test_variable("--color", "red", ":root", "file:///test.css");
         let var2 = create_test_variable("--color", "blue", ".class", "file:///test.css");
-        
+
         manager.add_variable(var1).await;
         manager.add_variable(var2).await;
 
@@ -239,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_get_references() {
         let manager = CssVariableManager::new(Config::default());
-        
+
         let var = create_test_variable("--spacing", "1rem", ":root", "file:///test.css");
         let usage = create_test_usage("--spacing", ".card", "file:///test.css");
 
@@ -255,7 +255,7 @@ mod tests {
     async fn test_manager_remove_document() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let var = create_test_variable("--primary", "blue", ":root", "file:///test.css");
         let usage = create_test_usage("--primary", ".button", "file:///test.css");
 
@@ -277,10 +277,31 @@ mod tests {
     #[tokio::test]
     async fn test_manager_get_all_variables() {
         let manager = CssVariableManager::new(Config::default());
-        
-        manager.add_variable(create_test_variable("--primary", "blue", ":root", "file:///test.css")).await;
-        manager.add_variable(create_test_variable("--secondary", "red", ":root", "file:///test.css")).await;
-        manager.add_variable(create_test_variable("--spacing", "1rem", ":root", "file:///test.css")).await;
+
+        manager
+            .add_variable(create_test_variable(
+                "--primary",
+                "blue",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
+        manager
+            .add_variable(create_test_variable(
+                "--secondary",
+                "red",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
+        manager
+            .add_variable(create_test_variable(
+                "--spacing",
+                "1rem",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
 
         let all_vars = manager.get_all_variables().await;
         assert_eq!(all_vars.len(), 3);
@@ -289,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_resolve_variable_color() {
         let manager = CssVariableManager::new(Config::default());
-        
+
         let var = create_test_variable("--primary-color", "#3b82f6", ":root", "file:///test.css");
         manager.add_variable(var).await;
 
@@ -300,11 +321,11 @@ mod tests {
     #[tokio::test]
     async fn test_manager_cross_file_references() {
         let manager = CssVariableManager::new(Config::default());
-        
+
         // Variable defined in one file
         let var = create_test_variable("--theme", "dark", ":root", "file:///variables.css");
         manager.add_variable(var).await;
-        
+
         // Used in another file
         let usage = create_test_usage("--theme", ".app", "file:///app.css");
         manager.add_usage(usage).await;
@@ -320,9 +341,23 @@ mod tests {
         let manager = CssVariableManager::new(Config::default());
         let uri1 = Url::parse("file:///file1.css").unwrap();
         let _uri2 = Url::parse("file:///file2.css").unwrap();
-        
-        manager.add_variable(create_test_variable("--color", "red", ":root", "file:///file1.css")).await;
-        manager.add_variable(create_test_variable("--color", "blue", ":root", "file:///file2.css")).await;
+
+        manager
+            .add_variable(create_test_variable(
+                "--color",
+                "red",
+                ":root",
+                "file:///file1.css",
+            ))
+            .await;
+        manager
+            .add_variable(create_test_variable(
+                "--color",
+                "blue",
+                ":root",
+                "file:///file2.css",
+            ))
+            .await;
 
         // Should have both definitions
         assert_eq!(manager.get_variables("--color").await.len(), 2);
@@ -341,10 +376,10 @@ mod tests {
     #[tokio::test]
     async fn test_manager_important_flag() {
         let manager = CssVariableManager::new(Config::default());
-        
+
         let mut var = create_test_variable("--color", "red", ":root", "file:///test.css");
         var.important = true;
-        
+
         manager.add_variable(var).await;
 
         let vars = manager.get_variables("--color").await;
@@ -355,10 +390,15 @@ mod tests {
     #[tokio::test]
     async fn test_manager_inline_flag() {
         let manager = CssVariableManager::new(Config::default());
-        
-        let mut var = create_test_variable("--inline-color", "green", "inline-style", "file:///test.html");
+
+        let mut var = create_test_variable(
+            "--inline-color",
+            "green",
+            "inline-style",
+            "file:///test.html",
+        );
         var.inline = true;
-        
+
         manager.add_variable(var).await;
 
         let vars = manager.get_variables("--inline-color").await;
@@ -369,14 +409,14 @@ mod tests {
     #[tokio::test]
     async fn test_manager_empty_queries() {
         let manager = CssVariableManager::new(Config::default());
-        
+
         // Query for non-existent variable
         let vars = manager.get_variables("--does-not-exist").await;
         assert_eq!(vars.len(), 0);
-        
+
         let usages = manager.get_usages("--does-not-exist").await;
         assert_eq!(usages.len(), 0);
-        
+
         let (defs, usages) = manager.get_references("--does-not-exist").await;
         assert_eq!(defs.len(), 0);
         assert_eq!(usages.len(), 0);

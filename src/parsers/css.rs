@@ -73,6 +73,8 @@ async fn extract_definitions(
     let mut i = 0;
     let mut in_comment = false;
     let mut in_string: Option<u8> = None;
+    let mut brace_depth = 0;
+    let mut in_at_rule = false;
 
     while i < len {
         if in_comment {
@@ -107,6 +109,23 @@ async fn extract_definitions(
             in_string = Some(bytes[i]);
             i += 1;
             continue;
+        }
+
+        // Track braces for scope
+        if bytes[i] == b'{' {
+            brace_depth += 1;
+        } else if bytes[i] == b'}' {
+            brace_depth -= 1;
+            if brace_depth < 0 {
+                brace_depth = 0;
+            }
+        }
+
+        // Track @-rules
+        if bytes[i] == b'@' && !in_comment && in_string.is_none() {
+            in_at_rule = true;
+        } else if bytes[i] == b'{' && in_at_rule {
+            in_at_rule = false;
         }
 
         if bytes[i] == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
@@ -196,7 +215,7 @@ async fn extract_definitions(
             let value = css_text[value_start..value_end_trim].trim().to_string();
             let selector = selector_override
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| find_selector_before(css_text, name_start));
+                .unwrap_or_else(|| find_selector_before(css_text, name_start, in_at_rule));
 
             let abs_name_start = base_offset + name_start;
             let abs_name_end = base_offset + name_end;
@@ -248,6 +267,8 @@ async fn extract_usages(
     let mut i = 0;
     let mut in_comment = false;
     let mut in_string: Option<u8> = None;
+    let mut brace_depth = 0;
+    let mut in_at_rule = false;
 
     while i < len {
         if in_comment {
@@ -282,6 +303,23 @@ async fn extract_usages(
             in_string = Some(bytes[i]);
             i += 1;
             continue;
+        }
+
+        // Track braces for scope
+        if bytes[i] == b'{' {
+            brace_depth += 1;
+        } else if bytes[i] == b'}' {
+            brace_depth -= 1;
+            if brace_depth < 0 {
+                brace_depth = 0;
+            }
+        }
+
+        // Track @-rules
+        if bytes[i] == b'@' && !in_comment && in_string.is_none() {
+            in_at_rule = true;
+        } else if bytes[i] == b'{' && in_at_rule {
+            in_at_rule = false;
         }
 
         if is_var_function(bytes, i) {
@@ -364,7 +402,7 @@ async fn extract_usages(
                 let name = css_text[ns..ne].to_string();
                 let usage_context = usage_context_override
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| find_selector_before(css_text, var_start));
+                    .unwrap_or_else(|| find_selector_before(css_text, var_start, in_at_rule));
                 let abs_start = base_offset + var_start;
                 let abs_end = base_offset + var_end;
                 let abs_name_start = base_offset + ns;
@@ -415,25 +453,62 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
-fn find_selector_before(text: &str, offset: usize) -> String {
+fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
     let before = &text[..offset];
+
+    if in_at_rule {
+        // For variables defined in @-rules, find the @-rule context
+        if let Some(at_pos) = before.rfind('@') {
+            let at_rule_end = before[at_pos..]
+                .find('{')
+                .map(|pos| pos + at_pos)
+                .unwrap_or(before.len());
+            let at_rule = before[at_pos..at_rule_end].trim();
+            return format!("@{}", at_rule);
+        }
+        return "@unknown".to_string();
+    }
+
     if let Some(brace_pos) = before.rfind('{') {
         let start = before[..brace_pos].rfind('}').map(|p| p + 1).unwrap_or(0);
         let selector_block = before[start..brace_pos].trim();
-        let selector = selector_block
-            .rsplit('{')
-            .next()
-            .unwrap_or(selector_block)
-            .trim();
-        let cleaned = selector.lines().last().unwrap_or(selector).trim();
-        if cleaned.is_empty() {
+
+        // Handle complex selectors that might span multiple lines or have nested braces
+        let selector = extract_last_selector(&selector_block);
+
+        if selector.is_empty() {
             ":root".to_string()
         } else {
-            cleaned.to_string()
+            selector
         }
     } else {
         ":root".to_string()
     }
+}
+
+/// Extract the last selector from a selector block, handling complex cases
+fn extract_last_selector(selector_block: &str) -> String {
+    // Split on commas to handle selector lists
+    let selectors: Vec<&str> = selector_block.split(',').map(|s| s.trim()).collect();
+
+    // For each selector, find the last meaningful one
+    for selector in selectors.into_iter().rev() {
+        let cleaned = selector.rsplit('{').next().unwrap_or(selector).trim();
+
+        // Skip empty selectors or CSS at-rules
+        if !cleaned.is_empty() && !cleaned.starts_with('@') {
+            // Clean up multi-line selectors
+            let lines: Vec<&str> = cleaned.lines().collect();
+            for line in lines.into_iter().rev() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+
+    ":root".to_string()
 }
 
 #[cfg(test)]
@@ -494,7 +569,7 @@ mod edge_case_tests {
     async fn test_parse_empty_css() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///empty.css").unwrap();
-        
+
         let result = parse_css_document("", &uri, &manager).await;
         assert!(result.is_ok());
     }
@@ -503,7 +578,7 @@ mod edge_case_tests {
     async fn test_parse_css_with_comments() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             /* Comment before */
             :root {
@@ -513,10 +588,10 @@ mod edge_case_tests {
             }
             /* Comment after */
         "#;
-        
+
         let result = parse_css_document(css, &uri, &manager).await;
         assert!(result.is_ok());
-        
+
         let vars = manager.get_all_variables().await;
         assert_eq!(vars.len(), 2);
     }
@@ -525,20 +600,20 @@ mod edge_case_tests {
     async fn test_parse_css_with_important() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             :root {
                 --color: red !important;
                 --spacing: 1rem;
             }
         "#;
-        
+
         parse_css_document(css, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_variables("--color").await;
         assert_eq!(vars.len(), 1);
         assert!(vars[0].important);
-        
+
         let spacing = manager.get_variables("--spacing").await;
         assert!(!spacing[0].important);
     }
@@ -547,20 +622,20 @@ mod edge_case_tests {
     async fn test_parse_css_var_with_fallback() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             .button {
                 color: var(--primary, blue);
                 background: var(--bg, var(--fallback, #fff));
             }
         "#;
-        
+
         parse_css_document(css, &uri, &manager).await.unwrap();
-        
+
         let primary_usages = manager.get_usages("--primary").await;
         assert_eq!(primary_usages.len(), 1);
         // Fallback values are parsed but not stored in the usage struct
-        
+
         let bg_usages = manager.get_usages("--bg").await;
         assert_eq!(bg_usages.len(), 1);
     }
@@ -569,7 +644,7 @@ mod edge_case_tests {
     async fn test_parse_css_complex_selectors() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             #id .class > div[data-attr="value"]:hover::before {
                 --complex: value;
@@ -581,9 +656,9 @@ mod edge_case_tests {
                 }
             }
         "#;
-        
+
         parse_css_document(css, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert!(vars.len() >= 2);
     }
@@ -592,7 +667,7 @@ mod edge_case_tests {
     async fn test_parse_css_multiline_values() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             :root {
                 --gradient: linear-gradient(
@@ -602,9 +677,9 @@ mod edge_case_tests {
                 );
             }
         "#;
-        
+
         parse_css_document(css, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_variables("--gradient").await;
         assert_eq!(vars.len(), 1);
         assert!(vars[0].value.contains("linear-gradient"));
@@ -614,7 +689,7 @@ mod edge_case_tests {
     async fn test_parse_css_variable_names_with_dashes() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             :root {
                 --primary-color: blue;
@@ -622,9 +697,9 @@ mod edge_case_tests {
                 --font-size-xl: 2rem;
             }
         "#;
-        
+
         parse_css_document(css, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert_eq!(vars.len(), 3);
         assert!(vars.iter().any(|v| v.name == "--primary-color"));
@@ -636,7 +711,7 @@ mod edge_case_tests {
     async fn test_parse_css_special_characters_in_values() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             :root {
                 --shadow: 0 2px 4px rgba(0,0,0,0.1);
@@ -645,9 +720,9 @@ mod edge_case_tests {
                 --content: "Hello, World!";
             }
         "#;
-        
+
         parse_css_document(css, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert_eq!(vars.len(), 4);
     }
@@ -656,7 +731,7 @@ mod edge_case_tests {
     async fn test_parse_css_nested_var_calls() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             .element {
                 color: var(--primary);
@@ -664,9 +739,9 @@ mod edge_case_tests {
                 border: 1px solid var(--border-color);
             }
         "#;
-        
+
         parse_css_document(css, &uri, &manager).await.unwrap();
-        
+
         assert_eq!(manager.get_usages("--primary").await.len(), 1);
         assert_eq!(manager.get_usages("--bg").await.len(), 1);
         assert_eq!(manager.get_usages("--border-color").await.len(), 1);
@@ -676,15 +751,15 @@ mod edge_case_tests {
     async fn test_parse_css_whitespace_variations() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         let css = r#"
             :root{--no-space:value;}
             :root { --normal-space: value; }
             :root  {  --extra-space  :  value  ;  }
         "#;
-        
+
         parse_css_document(css, &uri, &manager).await.unwrap();
-        
+
         let vars = manager.get_all_variables().await;
         assert_eq!(vars.len(), 3);
     }
@@ -693,13 +768,13 @@ mod edge_case_tests {
     async fn test_parse_css_malformed_but_parseable() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Url::parse("file:///test.css").unwrap();
-        
+
         // Missing closing brace, but should still parse what it can
         let css = r#"
             :root {
                 --valid: blue;
         "#;
-        
+
         let result = parse_css_document(css, &uri, &manager).await;
         assert!(result.is_ok());
     }

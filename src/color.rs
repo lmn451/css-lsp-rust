@@ -478,7 +478,7 @@ mod tests {
         assert!(parse_color("not-a-color").is_none());
         assert!(parse_color("").is_none());
         assert!(parse_color("rgb(999, 999, 999)").is_some()); // Clamped by parser
-        
+
         // Transparent keyword
         let color = parse_color("transparent").expect("transparent");
         assert!(approx_eq(color.alpha, 0.0));
@@ -493,10 +493,10 @@ mod tests {
             blue: 0.5,
             alpha: 2.0,
         };
-        
+
         let hex = format_color_as_hex(color);
         assert!(hex.starts_with('#'));
-        
+
         let rgb = format_color_as_rgb(color);
         assert!(rgb.contains("255")); // Red clamped to max
         assert!(rgb.contains("0")); // Green clamped to min

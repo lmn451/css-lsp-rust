@@ -801,13 +801,10 @@ impl LanguageServer for CssVariableLsp {
 
         for def in definitions {
             let range = def.name_range.unwrap_or(def.range);
-            changes
-                .entry(def.uri.clone())
-                .or_default()
-                .push(TextEdit {
-                    range,
-                    new_text: new_name.clone(),
-                });
+            changes.entry(def.uri.clone()).or_default().push(TextEdit {
+                range,
+                new_text: new_name.clone(),
+            });
         }
 
         for usage in usages {
