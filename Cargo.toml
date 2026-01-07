@@ -10,6 +10,16 @@ homepage = "https://github.com/lmn45/css-variable-lsp"
 repository = "https://github.com/lmn45/css-variable-lsp"
 keywords = ["lsp", "language-server", "css", "variables", "editor"]
 categories = ["development-tools", "command-line-utilities"]
+exclude = [
+    "FEATURE_COMPARISON.md",
+    "IMPLEMENTATION_STATUS.md",
+    "IMPROVEMENTS_SUMMARY.md",
+    "PHASE2_COMPLETE.md",
+    "PHASE3_COMPLETE.md",
+    "TEST_ADDITIONS_SUMMARY.md",
+    "CHANGELOG.md",
+    "AGENTS.md"
+]
 
 [lib]
 name = "css_variable_lsp"
