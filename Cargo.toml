@@ -3,8 +3,13 @@ name = "css-variable-lsp"
 version = "0.1.0"
 edition = "2021"
 authors = ["lmn45"]
-description = "A Language Server Protocol implementation for CSS Variables"
+description = "A fast, Rust-based Language Server Protocol implementation for CSS Variables"
 license = "GPL-3.0"
+readme = "README.md"
+homepage = "https://github.com/lmn45/css-variable-lsp"
+repository = "https://github.com/lmn45/css-variable-lsp"
+keywords = ["lsp", "language-server", "css", "variables", "editor"]
+categories = ["development-tools", "command-line-utilities"]
 
 [lib]
 name = "css_variable_lsp"
