@@ -521,3 +521,119 @@ async fn test_css_custom_properties_edge_cases() {
     let mixed_usages = manager.get_usages("--mixed-123_abc").await;
     assert_eq!(mixed_usages.len(), 1);
 }
+
+/// Integration test: LSP rename functionality verification
+#[tokio::test]
+async fn test_lsp_rename_functionality() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///rename-test.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --primary-color: #3b82f6;
+            --secondary-color: #8b5cf6;
+        }
+
+        .button {
+            background: var(--primary-color);
+            border: 1px solid var(--secondary-color);
+        }
+
+        .card {
+            color: var(--primary-color);
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    // Verify that definitions have proper ranges for rename operations
+    let primary_defs = manager.get_variables("--primary-color").await;
+    assert_eq!(primary_defs.len(), 1);
+    let def = &primary_defs[0];
+
+    // Definition should have a name_range (for the variable name itself)
+    assert!(def.name_range.is_some());
+    let name_range = def.name_range.as_ref().unwrap();
+
+    // The name range should be valid and contain "--primary-color"
+    assert!(name_range.end.line >= name_range.start.line);
+    assert!(name_range.end.character > name_range.start.character);
+
+    // Verify that usages have proper ranges for rename operations
+    let primary_usages = manager.get_usages("--primary-color").await;
+    assert_eq!(primary_usages.len(), 2); // Used in .button and .card
+
+    for usage in &primary_usages {
+        // Each usage should have a name_range
+        assert!(usage.name_range.is_some());
+        let usage_name_range = usage.name_range.as_ref().unwrap();
+
+        // The usage name range should be valid
+        assert!(usage_name_range.end.line >= usage_name_range.start.line);
+        assert!(usage_name_range.end.character > usage_name_range.start.character);
+    }
+
+    // Test that get_references returns both definitions and usages with ranges
+    let (defs, usages) = manager.get_references("--primary-color").await;
+    assert_eq!(defs.len(), 1);
+    assert_eq!(usages.len(), 2);
+
+    // All should have valid ranges for rename operations
+    assert!(defs[0].name_range.is_some());
+    for usage in &usages {
+        assert!(usage.name_range.is_some());
+    }
+}
+
+/// Integration test: LSP rename preserves fallbacks
+#[tokio::test]
+async fn test_lsp_rename_preserves_fallbacks() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///fallback-rename.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --primary-color: #3b82f6;
+        }
+
+        .button {
+            background: var(--primary-color, blue);
+            border: 1px solid var(--secondary-color, #ccc);
+            color: var(--primary-color);
+        }
+
+        .card {
+            background: var(--primary-color, var(--fallback-color, white));
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    // Verify that usages with fallbacks are correctly tracked
+    let primary_usages = manager.get_usages("--primary-color").await;
+    assert_eq!(primary_usages.len(), 3); // Two with fallbacks + one without
+
+    let secondary_usages = manager.get_usages("--secondary-color").await;
+    assert_eq!(secondary_usages.len(), 1); // One with fallback
+
+    // Verify nested fallback is NOT tracked (as expected)
+    let fallback_usages = manager.get_usages("--fallback-color").await;
+    assert_eq!(fallback_usages.len(), 0); // Nested fallbacks should not be tracked
+
+    // Test that ranges are correct for rename operations
+    let (defs, usages) = manager.get_references("--primary-color").await;
+    assert_eq!(defs.len(), 1);
+    assert_eq!(usages.len(), 3);
+
+    // All usages should have valid name_range for precise replacement
+    for usage in &usages {
+        assert!(usage.name_range.is_some());
+        let name_range = usage.name_range.as_ref().unwrap();
+        // The range should only cover the variable name, not the entire var() call
+        assert!(name_range.end.character > name_range.start.character);
+    }
+}

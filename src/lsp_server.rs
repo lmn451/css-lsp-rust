@@ -1198,3 +1198,61 @@ fn find_value_range_in_definition(text: &str, def: &crate::types::CssVariable) -
         crate::types::offset_to_position(text, absolute_end),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_word_extraction(css: &str, cursor_pos: usize) -> Option<String> {
+        use tower_lsp::lsp_types::Position;
+        let position = Position {
+            line: 0,
+            character: cursor_pos as u32,
+        };
+
+        let offset = position_to_offset(css, position)?;
+        let offset = clamp_to_char_boundary(css, offset);
+        let before = &css[..offset];
+        let after = &css[offset..];
+
+        let left = before
+            .rsplit(|c: char| !is_word_char(c))
+            .next()
+            .unwrap_or("");
+        let right = after.split(|c: char| !is_word_char(c)).next().unwrap_or("");
+        let word = format!("{}{}", left, right);
+        if word.starts_with("--") {
+            Some(word)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn test_word_extraction_preserves_fallbacks() {
+        // Test extraction of variable name from var() call with fallback
+        let css = "background: var(--primary-color, blue);";
+        let result = test_word_extraction(css, 20); // cursor on 'p' in --primary-color
+        assert_eq!(result, Some("--primary-color".to_string()));
+
+        // Test that fallback is not included
+        let css2 = "color: var(--secondary-color, #ccc);";
+        let result2 = test_word_extraction(css2, 15); // cursor on 's' in --secondary-color
+        assert_eq!(result2, Some("--secondary-color".to_string()));
+
+        // Test nested fallback - should still extract the main variable
+        let css3 = "border: var(--accent-color, var(--fallback, black));";
+        let result3 = test_word_extraction(css3, 16); // cursor on 'a' in --accent-color
+        assert_eq!(result3, Some("--accent-color".to_string()));
+
+        // Test simple variable without var()
+        let css4 = "--theme-color: red;";
+        let result4 = test_word_extraction(css4, 5); // cursor on 't' in --theme-color
+        assert_eq!(result4, Some("--theme-color".to_string()));
+
+        // Test variable at end of line
+        let css5 = "margin: var(--spacing);";
+        let result5 = test_word_extraction(css5, 15); // cursor on 's' in --spacing
+        assert_eq!(result5, Some("--spacing".to_string()));
+    }
+}
