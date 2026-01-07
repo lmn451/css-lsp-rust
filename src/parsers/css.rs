@@ -474,7 +474,7 @@ fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
         let selector_block = before[start..brace_pos].trim();
 
         // Handle complex selectors that might span multiple lines or have nested braces
-        let selector = extract_last_selector(&selector_block);
+        let selector = extract_last_selector(selector_block);
 
         if selector.is_empty() {
             ":root".to_string()
