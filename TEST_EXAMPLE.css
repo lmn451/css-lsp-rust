@@ -1,0 +1,17 @@
+:root {
+  --primary-color: #3b82f6;
+  --secondary-color: #8b5cf6 !important;
+  --spacing: 1rem;
+}
+
+.button {
+  background: var(--primary-color);
+  padding: var(--spacing);
+  color: var(--text-color, #ffffff);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --primary-color: #60a5fa;
+  }
+}

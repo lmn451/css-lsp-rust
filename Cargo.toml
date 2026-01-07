@@ -1,0 +1,41 @@
+[package]
+name = "css-variable-lsp"
+version = "0.1.0"
+edition = "2021"
+authors = ["lmn45"]
+description = "A Language Server Protocol implementation for CSS Variables"
+license = "GPL-3.0"
+
+[lib]
+name = "css_variable_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "css-variable-lsp"
+path = "src/main.rs"
+
+[dependencies]
+# LSP framework
+tower-lsp = "0.20"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Filesystem and globbing
+globset = "0.4"
+walkdir = "2.4"
+
+# Color parsing
+csscolorparser = "0.6"
+
+# Path handling
+pathdiff = "0.2"
+
+# Logging (optional, for debugging)
+tracing = "0.1"
+tracing-subscriber = "0.3"
+regex = "1.10"
