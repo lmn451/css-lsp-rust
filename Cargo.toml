@@ -1,6 +1,6 @@
 [package]
 name = "css-variable-lsp"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["lmn45"]
 description = "A fast, Rust-based Language Server Protocol implementation for CSS Variables"
