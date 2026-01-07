@@ -18,7 +18,8 @@ exclude = [
     "PHASE3_COMPLETE.md",
     "TEST_ADDITIONS_SUMMARY.md",
     "CHANGELOG.md",
-    "AGENTS.md"
+    "AGENTS.md",
+    "TEST_EXAMPLE.*"
 ]
 
 [lib]
