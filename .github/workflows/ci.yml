@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [main, master, develop]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [main, master, develop]
 
 env:
   CARGO_TERM_COLOR: always
@@ -63,6 +63,10 @@ jobs:
 
       - name: Run integration tests
         run: cargo test --test integration_test --verbose
+
+      - name: Validate asset naming contract
+        if: runner.os == 'Linux'
+        run: ./scripts/validate-asset-names.sh
 
   build:
     name: Build

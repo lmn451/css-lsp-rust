@@ -41,18 +41,33 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: css-variable-lsp
             asset_name: css-variable-lsp-linux-x86_64
+            strip_tool: strip
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: css-variable-lsp
+            asset_name: css-variable-lsp-linux-aarch64
+            use_cross: true
+            strip_tool: aarch64-linux-gnu-strip
+            install_strip: true
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: css-variable-lsp
             asset_name: css-variable-lsp-macos-x86_64
+            strip_tool: strip
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: css-variable-lsp
             asset_name: css-variable-lsp-macos-aarch64
+            strip_tool: strip
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: css-variable-lsp.exe
             asset_name: css-variable-lsp-windows-x86_64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: css-variable-lsp.exe
+            asset_name: css-variable-lsp-windows-aarch64.exe
+            msvc_arch: amd64_arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -62,12 +77,31 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Configure MSVC for ARM64
+        if: runner.os == 'Windows' && matrix.msvc_arch
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Install strip tool (Linux ARM64)
+        if: runner.os == 'Linux' && matrix.install_strip == true
+        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
+
+      - name: Install cross (for cross targets)
+        if: matrix.use_cross == true
+        run: cargo install cross --locked
+
+      - name: Build release binary (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --target ${{ matrix.target }}
+
       - name: Build release binary
+        if: matrix.use_cross != true
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Strip binary (Unix)
         if: runner.os != 'Windows'
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        run: ${{ matrix.strip_tool }} target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
       - name: Create archive (Unix)
         if: runner.os != 'Windows'
@@ -121,4 +155,3 @@ jobs:
         env:
           CARGO_REGISTRIES_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo publish --registry github
-

@@ -19,6 +19,20 @@ This is a ground-up Rust rewrite of the TypeScript/Node-based `css-variable-lsp`
 cargo build --release
 ```
 
+## Release Assets (Local)
+
+Build and package release assets into `dist/` (tar.gz on Unix, zip on Windows):
+
+```bash
+./scripts/build-release-assets.sh
+```
+
+To build a subset of targets:
+
+```bash
+./scripts/build-release-assets.sh x86_64-apple-darwin aarch64-apple-darwin
+```
+
 ## Running
 
 ```bash
