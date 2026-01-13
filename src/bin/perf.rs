@@ -200,7 +200,10 @@ async fn run() -> Result<(), String> {
     };
 
     println!("perf config:");
-    println!("  files: {} CSS + {} HTML ({} total)", css_files, html_files, total_files);
+    println!(
+        "  files: {} CSS + {} HTML ({} total)",
+        css_files, html_files, total_files
+    );
     println!("  vars/file: {}", vars_per_file);
     println!("  color usages: {}", color_usages);
     println!("scan: {:.1}ms ({:.2}ms/file)", scan_ms, ms_per_file);

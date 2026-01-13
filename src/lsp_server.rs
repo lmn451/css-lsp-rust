@@ -378,7 +378,8 @@ impl LanguageServer for CssVariableLsp {
             let mut langs = self.document_language_map.write().await;
             langs.insert(uri.clone(), language_id.clone());
         }
-        self.parse_document_text(&uri, &text, Some(&language_id)).await;
+        self.parse_document_text(&uri, &text, Some(&language_id))
+            .await;
         self.validate_document_text(&uri, &text).await;
     }
 
@@ -1018,10 +1019,7 @@ fn extract_extensions(pattern: &str) -> Vec<String> {
     if let (Some(start), Some(end)) = (pattern.find('{'), pattern.find('}')) {
         if end > start + 1 {
             let inner = &pattern[start + 1..end];
-            return inner
-                .split(',')
-                .filter_map(normalize_extension)
-                .collect();
+            return inner.split(',').filter_map(normalize_extension).collect();
         }
     }
 
