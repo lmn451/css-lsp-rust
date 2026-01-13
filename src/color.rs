@@ -16,8 +16,8 @@ pub fn parse_color(value: &str) -> Option<Color> {
         return parse_rgb(&lower);
     }
 
-    // Try named colors (basic set)
-    parse_named_color(&lower).or_else(|| parse_csscolorparser(value))
+    // Prefer csscolorparser for named colors; fall back to the basic list if needed.
+    parse_csscolorparser(value).or_else(|| parse_named_color(&lower))
 }
 
 fn parse_csscolorparser(value: &str) -> Option<Color> {
