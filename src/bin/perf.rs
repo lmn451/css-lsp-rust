@@ -172,8 +172,10 @@ async fn run() -> Result<(), String> {
         file_cursor += 1;
     }
 
-    let mut config = Config::default();
-    config.lookup_files = vec!["**/*.css".to_string(), "**/*.html".to_string()];
+    let config = Config {
+        lookup_files: vec!["**/*.css".to_string(), "**/*.html".to_string()],
+        ..Default::default()
+    };
     let manager = CssVariableManager::new(config);
 
     let workspace_url = Url::from_directory_path(&workspace_root)
