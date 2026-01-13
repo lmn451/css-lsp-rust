@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added CHANGELOG.md for version tracking
 - Updated repository guidelines and best practices
 
+## [0.1.6] - 2026-01-13
+
+### Fixed
+- Prefer `csscolorparser` for named colors to match standard CSS named color definitions.
+- Honor language IDs and `var()` fallbacks in LSP behavior.
+
 ## [0.1.0] - 2024-01-07
 
 ### Initial Release
