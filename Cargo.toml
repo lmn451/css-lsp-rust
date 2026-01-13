@@ -2,12 +2,12 @@
 name = "css-variable-lsp"
 version = "0.1.6"
 edition = "2021"
-authors = ["lmn45"]
+authors = ["lmn451"]
 description = "A fast, Rust-based Language Server Protocol implementation for CSS Variables"
 license = "GPL-3.0"
 readme = "README.md"
-homepage = "https://github.com/lmn45/css-variable-lsp"
-repository = "https://github.com/lmn45/css-variable-lsp"
+homepage = "https://github.com/lmn451/css-lsp-rust"
+repository = "https://github.com/lmn451/css-lsp-rust"
 keywords = ["lsp", "language-server", "css", "variables", "editor"]
 categories = ["development-tools", "command-line-utilities"]
 exclude = [
