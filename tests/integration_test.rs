@@ -169,6 +169,31 @@ async fn test_color_resolution_chain() {
     assert!(color.is_some());
 }
 
+/// Integration test: Color resolution follows var() fallback syntax
+#[tokio::test]
+async fn test_color_resolution_with_fallbacks() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Url::parse("file:///fallbacks.css").unwrap();
+
+    let css_content = r#"
+        :root {
+            --base-color: #ff0000;
+            --alias-color: var(--base-color, #00ff00);
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    let color = manager.resolve_variable_color("--alias-color").await;
+    assert!(color.is_some());
+    let color = color.unwrap();
+    assert!((color.red - 1.0).abs() < 0.01);
+    assert!((color.green - 0.0).abs() < 0.01);
+    assert!((color.blue - 0.0).abs() < 0.01);
+}
+
 /// Integration test: Multiple file types
 #[tokio::test]
 async fn test_multiple_file_types() {

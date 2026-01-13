@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -30,6 +30,12 @@ use crate::specificity::{
 };
 use crate::types::{position_to_offset, Config};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentKind {
+    Css,
+    Html,
+}
+
 pub struct CssVariableLsp {
     client: Client,
     manager: Arc<CssVariableManager>,
@@ -43,11 +49,14 @@ pub struct CssVariableLsp {
     var_usage_regex: Regex,
     var_partial_regex: Regex,
     style_attr_regex: Regex,
+    lookup_extension_map: HashMap<String, DocumentKind>,
+    document_language_map: Arc<RwLock<HashMap<Url, String>>>,
 }
 
 impl CssVariableLsp {
     pub fn new(client: Client, runtime_config: RuntimeConfig) -> Self {
         let config = Config::from_runtime(&runtime_config);
+        let lookup_extension_map = build_lookup_extension_map(&config.lookup_files);
         Self {
             client,
             manager: Arc::new(CssVariableManager::new(config)),
@@ -61,6 +70,8 @@ impl CssVariableLsp {
             var_usage_regex: Regex::new(r"var\((--[\w-]+)\)").unwrap(),
             var_partial_regex: Regex::new(r"var\(\s*(--[\w-]*)$").unwrap(),
             style_attr_regex: Regex::new(r#"(?i)style\s*=\s*["'][^"']*:\s*[^"';]*$"#).unwrap(),
+            lookup_extension_map,
+            document_language_map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -78,16 +89,15 @@ impl CssVariableLsp {
         *stored = paths;
     }
 
-    async fn parse_document_text(&self, uri: &Url, text: &str) {
+    async fn parse_document_text(&self, uri: &Url, text: &str, language_id: Option<&str>) {
         self.manager.remove_document(uri).await;
 
-        let path = uri.path().to_lowercase();
-        let result = if is_html_like(&path) {
-            parse_html_document(text, uri, &self.manager).await
-        } else if is_css_like(&path) {
-            parse_css_document(text, uri, &self.manager).await
-        } else {
-            return;
+        let path = uri.path();
+        let kind = resolve_document_kind(path, language_id, &self.lookup_extension_map);
+        let result = match kind {
+            Some(DocumentKind::Html) => parse_html_document(text, uri, &self.manager).await,
+            Some(DocumentKind::Css) => parse_css_document(text, uri, &self.manager).await,
+            None => return,
         };
 
         if let Err(e) = result {
@@ -158,7 +168,7 @@ impl CssVariableLsp {
 
         match tokio::fs::read_to_string(&path).await {
             Ok(text) => {
-                self.parse_document_text(uri, &text).await;
+                self.parse_document_text(uri, &text, None).await;
             }
             Err(_) => {
                 self.manager.remove_document(uri).await;
@@ -359,11 +369,16 @@ impl LanguageServer for CssVariableLsp {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
+        let language_id = params.text_document.language_id;
         {
             let mut docs = self.document_map.write().await;
             docs.insert(uri.clone(), text.clone());
         }
-        self.parse_document_text(&uri, &text).await;
+        {
+            let mut langs = self.document_language_map.write().await;
+            langs.insert(uri.clone(), language_id.clone());
+        }
+        self.parse_document_text(&uri, &text, Some(&language_id)).await;
         self.validate_document_text(&uri, &text).await;
     }
 
@@ -374,7 +389,12 @@ impl LanguageServer for CssVariableLsp {
             Some(text) => text,
             None => return,
         };
-        self.parse_document_text(&uri, &updated_text).await;
+        let language_id = {
+            let langs = self.document_language_map.read().await;
+            langs.get(&uri).cloned()
+        };
+        self.parse_document_text(&uri, &updated_text, language_id.as_deref())
+            .await;
         self.validate_document_text(&uri, &updated_text).await;
     }
 
@@ -383,6 +403,10 @@ impl LanguageServer for CssVariableLsp {
         {
             let mut docs = self.document_map.write().await;
             docs.remove(&uri);
+        }
+        {
+            let mut langs = self.document_language_map.write().await;
+            langs.remove(&uri);
         }
         self.update_document_from_disk(&uri).await;
     }
@@ -732,19 +756,44 @@ impl LanguageServer for CssVariableLsp {
         };
 
         let mut colors = Vec::new();
+        let mut seen_ranges: HashSet<(u32, u32, u32, u32)> = HashSet::new();
+        let range_key = |range: &Range| {
+            (
+                range.start.line,
+                range.start.character,
+                range.end.line,
+                range.end.character,
+            )
+        };
 
         if !config.color_only_on_variables {
             let definitions = self.manager.get_document_variables(&uri).await;
             for def in definitions {
                 if let Some(color) = parse_color(&def.value) {
                     if let Some(value_range) = def.value_range {
-                        colors.push(ColorInformation {
-                            range: value_range,
-                            color,
-                        });
+                        if seen_ranges.insert(range_key(&value_range)) {
+                            colors.push(ColorInformation {
+                                range: value_range,
+                                color,
+                            });
+                        }
                     } else if let Some(range) = find_value_range_in_definition(&text, &def) {
-                        colors.push(ColorInformation { range, color });
+                        if seen_ranges.insert(range_key(&range)) {
+                            colors.push(ColorInformation { range, color });
+                        }
                     }
+                }
+            }
+        }
+
+        let usages = self.manager.get_document_usages(&uri).await;
+        for usage in usages {
+            if let Some(color) = self.manager.resolve_variable_color(&usage.name).await {
+                if seen_ranges.insert(range_key(&usage.range)) {
+                    colors.push(ColorInformation {
+                        range: usage.range,
+                        color,
+                    });
                 }
             }
         }
@@ -752,11 +801,14 @@ impl LanguageServer for CssVariableLsp {
         for caps in self.var_usage_regex.captures_iter(&text) {
             let match_all = caps.get(0).unwrap();
             let var_name = caps.get(1).unwrap().as_str();
+            let range = Range::new(
+                crate::types::offset_to_position(&text, match_all.start()),
+                crate::types::offset_to_position(&text, match_all.end()),
+            );
+            if !seen_ranges.insert(range_key(&range)) {
+                continue;
+            }
             if let Some(color) = self.manager.resolve_variable_color(var_name).await {
-                let range = Range::new(
-                    crate::types::offset_to_position(&text, match_all.start()),
-                    crate::types::offset_to_position(&text, match_all.end()),
-                );
                 colors.push(ColorInformation { range, color });
             }
         }
@@ -941,19 +993,76 @@ impl CssVariableLsp {
     }
 }
 
-fn is_css_like(path: &str) -> bool {
-    path.ends_with(".css")
-        || path.ends_with(".scss")
-        || path.ends_with(".sass")
-        || path.ends_with(".less")
+fn is_html_like_extension(ext: &str) -> bool {
+    matches!(ext, ".html" | ".vue" | ".svelte" | ".astro" | ".ripple")
 }
 
-fn is_html_like(path: &str) -> bool {
-    path.ends_with(".html")
-        || path.ends_with(".vue")
-        || path.ends_with(".svelte")
-        || path.ends_with(".astro")
-        || path.ends_with(".ripple")
+fn language_id_kind(language_id: &str) -> Option<DocumentKind> {
+    match language_id.to_lowercase().as_str() {
+        "html" | "vue" | "svelte" | "astro" | "ripple" => Some(DocumentKind::Html),
+        "css" | "scss" | "sass" | "less" => Some(DocumentKind::Css),
+        _ => None,
+    }
+}
+
+fn normalize_extension(ext: &str) -> Option<String> {
+    let trimmed = ext.trim().trim_start_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!(".{}", trimmed.to_lowercase()))
+}
+
+fn extract_extensions(pattern: &str) -> Vec<String> {
+    let pattern = pattern.trim();
+    if let (Some(start), Some(end)) = (pattern.find('{'), pattern.find('}')) {
+        if end > start + 1 {
+            let inner = &pattern[start + 1..end];
+            return inner
+                .split(',')
+                .filter_map(normalize_extension)
+                .collect();
+        }
+    }
+
+    let ext = std::path::Path::new(pattern)
+        .extension()
+        .and_then(|ext| ext.to_str());
+    ext.and_then(normalize_extension).into_iter().collect()
+}
+
+fn build_lookup_extension_map(lookup_files: &[String]) -> HashMap<String, DocumentKind> {
+    let mut map = HashMap::new();
+    for pattern in lookup_files {
+        for ext in extract_extensions(pattern) {
+            let kind = if is_html_like_extension(&ext) {
+                DocumentKind::Html
+            } else {
+                DocumentKind::Css
+            };
+            map.insert(ext, kind);
+        }
+    }
+    map
+}
+
+fn resolve_document_kind(
+    path: &str,
+    language_id: Option<&str>,
+    lookup_extension_map: &HashMap<String, DocumentKind>,
+) -> Option<DocumentKind> {
+    if let Some(language_id) = language_id {
+        if let Some(kind) = language_id_kind(language_id) {
+            return Some(kind);
+        }
+    }
+
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(normalize_extension)?;
+
+    lookup_extension_map.get(&ext).copied()
 }
 
 fn clamp_to_char_boundary(text: &str, mut idx: usize) -> usize {
@@ -1254,5 +1363,42 @@ mod tests {
         let css5 = "margin: var(--spacing);";
         let result5 = test_word_extraction(css5, 15); // cursor on 's' in --spacing
         assert_eq!(result5, Some("--spacing".to_string()));
+    }
+
+    #[test]
+    fn resolve_document_kind_prefers_language_id() {
+        let lookup_files = vec!["**/*.custom".to_string()];
+        let lookup_map = build_lookup_extension_map(&lookup_files);
+
+        let kind = resolve_document_kind("file.custom", Some("html"), &lookup_map);
+        assert_eq!(kind, Some(DocumentKind::Html));
+    }
+
+    #[test]
+    fn resolve_document_kind_uses_lookup_extensions() {
+        let lookup_files = vec![
+            "**/*.{css,scss}".to_string(),
+            "**/*.vue".to_string(),
+            "**/*.custom".to_string(),
+        ];
+        let lookup_map = build_lookup_extension_map(&lookup_files);
+
+        let css_kind = resolve_document_kind("styles.scss", None, &lookup_map);
+        assert_eq!(css_kind, Some(DocumentKind::Css));
+
+        let html_kind = resolve_document_kind("component.vue", None, &lookup_map);
+        assert_eq!(html_kind, Some(DocumentKind::Html));
+
+        let custom_kind = resolve_document_kind("theme.custom", None, &lookup_map);
+        assert_eq!(custom_kind, Some(DocumentKind::Css));
+    }
+
+    #[test]
+    fn resolve_document_kind_returns_none_for_unknown() {
+        let lookup_files = vec!["**/*.css".to_string()];
+        let lookup_map = build_lookup_extension_map(&lookup_files);
+
+        let kind = resolve_document_kind("notes.txt", Some("plaintext"), &lookup_map);
+        assert_eq!(kind, None);
     }
 }

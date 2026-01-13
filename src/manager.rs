@@ -135,6 +135,17 @@ impl CssVariableManager {
             .collect()
     }
 
+    /// Get all variable usages in a specific document
+    pub async fn get_document_usages(&self, uri: &Url) -> Vec<CssVariableUsage> {
+        let usages = self.usages.read().await;
+        usages
+            .values()
+            .flatten()
+            .filter(|u| &u.uri == uri)
+            .cloned()
+            .collect()
+    }
+
     /// Set DOM tree for a document
     pub async fn set_dom_tree(&self, uri: Url, dom_tree: DomTree) {
         let mut dom_trees = self.dom_trees.write().await;
@@ -155,14 +166,41 @@ impl CssVariableManager {
 
 fn extract_var_reference(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    if !trimmed.starts_with("var(") || !trimmed.ends_with(')') {
+    let start = trimmed.find("var(")?;
+    let mut idx = start + 4;
+    let bytes = trimmed.as_bytes();
+    let mut depth = 1i32;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    if depth != 0 {
         return None;
     }
-    let inner = trimmed.strip_prefix("var(")?.strip_suffix(')')?.trim();
-    if inner.contains(',') || !inner.starts_with("--") {
+
+    let inner = trimmed[start + 4..idx].trim_start();
+    let inner = inner.strip_prefix("--")?;
+    let mut name_len = 0usize;
+    for ch in inner.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            name_len += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if name_len == 0 {
         return None;
     }
-    Some(inner.to_string())
+    Some(format!("--{}", &inner[..name_len]))
 }
 
 #[cfg(test)]
@@ -194,6 +232,22 @@ mod tests {
             usage_context: context.to_string(),
             dom_node: None,
         }
+    }
+
+    #[test]
+    fn extract_var_reference_allows_fallbacks_and_trailing_tokens() {
+        assert_eq!(
+            extract_var_reference("var(--primary, #fff)"),
+            Some("--primary".to_string())
+        );
+        assert_eq!(
+            extract_var_reference("var(--primary) !important"),
+            Some("--primary".to_string())
+        );
+        assert_eq!(
+            extract_var_reference("calc(1px + var(--spacing))"),
+            Some("--spacing".to_string())
+        );
     }
 
     #[tokio::test]
