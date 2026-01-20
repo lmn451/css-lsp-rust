@@ -20,7 +20,13 @@ if [[ -n $(git status --porcelain) ]]; then
     git add -u
     git commit --amend --no-edit
     echo -e "${GREEN}Commit amended with formatting fixes.${NC}"
-    echo -e "${YELLOW}Please run 'git push' again to push the updated commit.${NC}"
+
+    echo -e "${YELLOW}Automatically pushing with --force-with-lease...${NC}"
+    if git push --force-with-lease; then
+        echo -e "${GREEN}Successfully pushed updated commit.${NC}"
+    else
+        echo -e "${RED}Failed to push updated commit. Please push manually.${NC}"
+    fi
     exit 1
 fi
 
