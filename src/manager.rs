@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::lsp_types::Url;
@@ -133,6 +133,12 @@ impl CssVariableManager {
             .filter(|v| &v.uri == uri)
             .cloned()
             .collect()
+    }
+
+    /// Get the set of variable names defined in a specific document
+    pub async fn get_document_variable_names(&self, uri: &Url) -> HashSet<String> {
+        let vars = self.get_document_variables(uri).await;
+        vars.into_iter().map(|v| v.name).collect()
     }
 
     /// Get all variable usages in a specific document

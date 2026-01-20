@@ -51,6 +51,8 @@ pub struct CssVariableLsp {
     style_attr_regex: Regex,
     lookup_extension_map: HashMap<String, DocumentKind>,
     document_language_map: Arc<RwLock<HashMap<Url, String>>>,
+    document_usage_map: Arc<RwLock<HashMap<Url, HashSet<String>>>>,
+    usage_index: Arc<RwLock<HashMap<String, HashSet<Url>>>>,
 }
 
 impl CssVariableLsp {
@@ -72,6 +74,8 @@ impl CssVariableLsp {
             style_attr_regex: Regex::new(r#"(?i)style\s*=\s*["'][^"']*:\s*[^"';]*$"#).unwrap(),
             lookup_extension_map,
             document_language_map: Arc::new(RwLock::new(HashMap::new())),
+            document_usage_map: Arc::new(RwLock::new(HashMap::new())),
+            usage_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -108,43 +112,22 @@ impl CssVariableLsp {
     }
 
     async fn validate_document_text(&self, uri: &Url, text: &str) {
-        let mut diagnostics = Vec::new();
         let has_related_info = *self.has_diagnostic_related_information.read().await;
-
-        for captures in self.usage_regex.captures_iter(text) {
-            let match_all = captures.get(0).unwrap();
-            let name = captures.get(1).unwrap().as_str();
-            let definitions = self.manager.get_variables(name).await;
-            if !definitions.is_empty() {
-                continue;
-            }
-            let range = Range::new(
-                crate::types::offset_to_position(text, match_all.start()),
-                crate::types::offset_to_position(text, match_all.end()),
-            );
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::WARNING),
-                code: None,
-                code_description: None,
-                source: Some("css-variable-lsp".to_string()),
-                message: format!("CSS variable '{}' is not defined in the workspace", name),
-                related_information: if has_related_info {
-                    Some(Vec::new())
-                } else {
-                    None
-                },
-                tags: None,
-                data: None,
-            });
-        }
-
-        self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
-            .await;
+        validate_document_text_with(
+            &self.client,
+            self.manager.as_ref(),
+            &self.usage_regex,
+            has_related_info,
+            uri,
+            text,
+            &self.document_usage_map,
+            &self.usage_index,
+        )
+        .await;
     }
 
     async fn validate_all_open_documents(&self) {
+        let has_related_info = *self.has_diagnostic_related_information.read().await;
         let docs_snapshot = {
             let docs = self.document_map.read().await;
             docs.iter()
@@ -153,7 +136,17 @@ impl CssVariableLsp {
         };
 
         for (uri, text) in docs_snapshot {
-            self.validate_document_text(&uri, &text).await;
+            validate_document_text_with(
+                &self.client,
+                self.manager.as_ref(),
+                &self.usage_regex,
+                has_related_info,
+                &uri,
+                &text,
+                &self.document_usage_map,
+                &self.usage_index,
+            )
+            .await;
         }
     }
 
@@ -255,6 +248,49 @@ impl CssVariableLsp {
     async fn is_document_open(&self, uri: &Url) -> bool {
         let docs = self.document_map.read().await;
         docs.contains_key(uri)
+    }
+
+    async fn revalidate_affected_documents(
+        &self,
+        changed_names: &HashSet<String>,
+        exclude_uri: Option<&Url>,
+    ) {
+        let mut affected_uris = HashSet::new();
+        {
+            let index = self.usage_index.read().await;
+            for name in changed_names {
+                if let Some(uris) = index.get(name) {
+                    for uri in uris {
+                        if exclude_uri != Some(uri) {
+                            affected_uris.insert(uri.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if affected_uris.is_empty() {
+            return;
+        }
+
+        let has_related_info = *self.has_diagnostic_related_information.read().await;
+        let docs = self.document_map.read().await;
+
+        for uri in affected_uris {
+            if let Some(text) = docs.get(&uri) {
+                validate_document_text_with(
+                    &self.client,
+                    self.manager.as_ref(),
+                    &self.usage_regex,
+                    has_related_info,
+                    &uri,
+                    text,
+                    &self.document_usage_map,
+                    &self.usage_index,
+                )
+                .await;
+            }
+        }
     }
 }
 
@@ -370,6 +406,9 @@ impl LanguageServer for CssVariableLsp {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         let language_id = params.text_document.language_id;
+
+        let old_names = self.manager.get_document_variable_names(&uri).await;
+
         {
             let mut docs = self.document_map.write().await;
             docs.insert(uri.clone(), text.clone());
@@ -380,12 +419,27 @@ impl LanguageServer for CssVariableLsp {
         }
         self.parse_document_text(&uri, &text, Some(&language_id))
             .await;
+
+        let new_names = self.manager.get_document_variable_names(&uri).await;
+
         self.validate_document_text(&uri, &text).await;
+
+        if old_names != new_names {
+            let changed_names: HashSet<_> = old_names
+                .symmetric_difference(&new_names)
+                .cloned()
+                .collect();
+            self.revalidate_affected_documents(&changed_names, Some(&uri))
+                .await;
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         let changes = params.content_changes;
+
+        let old_names = self.manager.get_document_variable_names(&uri).await;
+
         let updated_text = match self.apply_content_changes(&uri, changes).await {
             Some(text) => text,
             None => return,
@@ -396,7 +450,19 @@ impl LanguageServer for CssVariableLsp {
         };
         self.parse_document_text(&uri, &updated_text, language_id.as_deref())
             .await;
+
+        let new_names = self.manager.get_document_variable_names(&uri).await;
+
         self.validate_document_text(&uri, &updated_text).await;
+
+        if old_names != new_names {
+            let changed_names: HashSet<_> = old_names
+                .symmetric_difference(&new_names)
+                .cloned()
+                .collect();
+            self.revalidate_affected_documents(&changed_names, Some(&uri))
+                .await;
+        }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -409,6 +475,23 @@ impl LanguageServer for CssVariableLsp {
             let mut langs = self.document_language_map.write().await;
             langs.remove(&uri);
         }
+
+        // Clean up usage maps
+        {
+            let mut usage_map = self.document_usage_map.write().await;
+            if let Some(old_usages) = usage_map.remove(&uri) {
+                let mut index = self.usage_index.write().await;
+                for name in old_usages {
+                    if let Some(uris) = index.get_mut(&name) {
+                        uris.remove(&uri);
+                        if uris.is_empty() {
+                            index.remove(&name);
+                        }
+                    }
+                }
+            }
+        }
+
         self.update_document_from_disk(&uri).await;
     }
 
@@ -992,6 +1075,86 @@ impl CssVariableLsp {
 
         self.validate_all_open_documents().await;
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn validate_document_text_with(
+    client: &Client,
+    manager: &CssVariableManager,
+    usage_regex: &Regex,
+    has_related_info: bool,
+    uri: &Url,
+    text: &str,
+    document_usage_map: &Arc<RwLock<HashMap<Url, HashSet<String>>>>,
+    usage_index: &Arc<RwLock<HashMap<String, HashSet<Url>>>>,
+) {
+    let mut diagnostics = Vec::new();
+    let mut current_usages = HashSet::new();
+
+    for captures in usage_regex.captures_iter(text) {
+        let match_all = captures.get(0).unwrap();
+        let name = captures.get(1).unwrap().as_str();
+
+        current_usages.insert(name.to_string());
+
+        let definitions = manager.get_variables(name).await;
+        if !definitions.is_empty() {
+            continue;
+        }
+        let range = Range::new(
+            crate::types::offset_to_position(text, match_all.start()),
+            crate::types::offset_to_position(text, match_all.end()),
+        );
+        diagnostics.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: None,
+            code_description: None,
+            source: Some("css-variable-lsp".to_string()),
+            message: format!("CSS variable '{}' is not defined in the workspace", name),
+            related_information: if has_related_info {
+                Some(Vec::new())
+            } else {
+                None
+            },
+            tags: None,
+            data: None,
+        });
+    }
+
+    // Update usage maps
+    {
+        let mut usage_map = document_usage_map.write().await;
+        let old_usages = usage_map.insert(uri.clone(), current_usages.clone());
+
+        let mut index = usage_index.write().await;
+
+        // Remove old usages from index
+        if let Some(old_set) = old_usages {
+            for name in old_set {
+                if !current_usages.contains(&name) {
+                    if let Some(uris) = index.get_mut(&name) {
+                        uris.remove(uri);
+                        if uris.is_empty() {
+                            index.remove(&name);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add new usages to index
+        for name in current_usages {
+            index
+                .entry(name)
+                .or_insert_with(HashSet::new)
+                .insert(uri.clone());
+        }
+    }
+
+    client
+        .publish_diagnostics(uri.clone(), diagnostics, None)
+        .await;
 }
 
 fn is_html_like_extension(ext: &str) -> bool {
