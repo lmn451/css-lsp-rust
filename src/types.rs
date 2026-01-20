@@ -106,6 +106,8 @@ impl Default for Config {
                 "**/*.vue".to_string(),
                 "**/*.svelte".to_string(),
                 "**/*.astro".to_string(),
+                "**/*.jsx".to_string(),
+                "**/*.tsx".to_string(),
                 "**/*.ripple".to_string(),
             ],
             ignore_globs: vec![

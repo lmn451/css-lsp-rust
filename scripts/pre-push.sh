@@ -13,8 +13,14 @@ echo -e "${YELLOW}Running pre-push checks...${NC}"
 
 # 1. Check formatting
 echo -e "${YELLOW}Checking formatting...${NC}"
-if ! cargo fmt -- --check; then
-    echo -e "${RED}Formatting check failed. Run 'cargo fmt' to fix.${NC}"
+cargo fmt
+
+if [[ -n $(git status --porcelain) ]]; then
+    echo -e "${YELLOW}Formatting changes detected. Amending commit...${NC}"
+    git add -u
+    git commit --amend --no-edit
+    echo -e "${GREEN}Commit amended with formatting fixes.${NC}"
+    echo -e "${YELLOW}Please run 'git push' again to push the updated commit.${NC}"
     exit 1
 fi
 

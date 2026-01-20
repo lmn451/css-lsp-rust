@@ -508,7 +508,8 @@ impl LanguageServer for CssVariableLsp {
                 .symmetric_difference(&new_names)
                 .cloned()
                 .collect();
-            self.revalidate_affected_documents(&changed_names, None).await;
+            self.revalidate_affected_documents(&changed_names, None)
+                .await;
         }
     }
 

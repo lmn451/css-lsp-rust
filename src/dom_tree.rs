@@ -196,7 +196,7 @@ impl DomTree {
                             }
                         }
                     }
-                    "class" => {
+                    "class" | "classname" => {
                         if let Some(v) = &value {
                             classes.extend(v.split_whitespace().map(|c| c.to_string()));
                         }
@@ -790,5 +790,15 @@ mod tests {
 
         // Should parse attributes correctly
         assert!(!tree.roots.is_empty());
+    }
+
+    #[test]
+    fn test_dom_tree_classname_alias() {
+        let html = r#"<div className="react-class">Content</div>"#;
+        let result = DomTree::parse(html);
+        let tree = result.dom_tree;
+        assert!(!tree.roots.is_empty());
+        let node = &tree.nodes[tree.roots[0]];
+        assert!(node.classes.contains(&"react-class".to_string()));
     }
 }
