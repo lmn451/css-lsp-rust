@@ -274,22 +274,26 @@ impl CssVariableLsp {
         }
 
         let has_related_info = *self.has_diagnostic_related_information.read().await;
-        let docs = self.document_map.read().await;
+        let affected_snapshot = {
+            let docs = self.document_map.read().await;
+            affected_uris
+                .into_iter()
+                .filter_map(|uri| docs.get(&uri).map(|text| (uri, text.clone())))
+                .collect::<Vec<_>>()
+        };
 
-        for uri in affected_uris {
-            if let Some(text) = docs.get(&uri) {
-                validate_document_text_with(
-                    &self.client,
-                    self.manager.as_ref(),
-                    &self.usage_regex,
-                    has_related_info,
-                    &uri,
-                    text,
-                    &self.document_usage_map,
-                    &self.usage_index,
-                )
-                .await;
-            }
+        for (uri, text) in affected_snapshot {
+            validate_document_text_with(
+                &self.client,
+                self.manager.as_ref(),
+                &self.usage_regex,
+                has_related_info,
+                &uri,
+                &text,
+                &self.document_usage_map,
+                &self.usage_index,
+            )
+            .await;
         }
     }
 }
@@ -467,6 +471,9 @@ impl LanguageServer for CssVariableLsp {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
+
+        let old_names = self.manager.get_document_variable_names(&uri).await;
+
         {
             let mut docs = self.document_map.write().await;
             docs.remove(&uri);
@@ -493,6 +500,16 @@ impl LanguageServer for CssVariableLsp {
         }
 
         self.update_document_from_disk(&uri).await;
+
+        let new_names = self.manager.get_document_variable_names(&uri).await;
+
+        if old_names != new_names {
+            let changed_names: HashSet<_> = old_names
+                .symmetric_difference(&new_names)
+                .cloned()
+                .collect();
+            self.revalidate_affected_documents(&changed_names, None).await;
+        }
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
