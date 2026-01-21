@@ -1,23 +1,9 @@
 use csscolorparser::Color as CssColor;
 use tower_lsp::lsp_types::{Color, ColorPresentation, Range, TextEdit};
 
-/// Parse a CSS color value and return an LSP Color (simplified version)
+/// Parse a CSS color value and return an LSP Color
 pub fn parse_color(value: &str) -> Option<Color> {
-    let value = value.trim();
-    let lower = value.to_lowercase();
-
-    // Try hex color
-    if let Some(hex) = lower.strip_prefix('#') {
-        return parse_hex(hex);
-    }
-
-    // Try rgb/rgba
-    if lower.starts_with("rgb") {
-        return parse_rgb(&lower);
-    }
-
-    // Prefer csscolorparser for named colors; fall back to the basic list if needed.
-    parse_csscolorparser(value).or_else(|| parse_named_color(&lower))
+    parse_csscolorparser(value.trim())
 }
 
 fn parse_csscolorparser(value: &str) -> Option<Color> {
@@ -28,175 +14,6 @@ fn parse_csscolorparser(value: &str) -> Option<Color> {
         blue: parsed.b as f32,
         alpha: parsed.a as f32,
     })
-}
-
-fn parse_hex(hex: &str) -> Option<Color> {
-    let hex = hex.trim();
-    let len = hex.len();
-
-    if len == 3 {
-        // #RGB
-        let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
-        let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
-        let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-        Some(Color {
-            red: r as f32 / 255.0,
-            green: g as f32 / 255.0,
-            blue: b as f32 / 255.0,
-            alpha: 1.0,
-        })
-    } else if len == 4 {
-        // #RGBA
-        let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
-        let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
-        let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-        let a = u8::from_str_radix(&hex[3..4].repeat(2), 16).ok()?;
-        Some(Color {
-            red: r as f32 / 255.0,
-            green: g as f32 / 255.0,
-            blue: b as f32 / 255.0,
-            alpha: a as f32 / 255.0,
-        })
-    } else if len == 6 {
-        // #RRGGBB
-        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-        Some(Color {
-            red: r as f32 / 255.0,
-            green: g as f32 / 255.0,
-            blue: b as f32 / 255.0,
-            alpha: 1.0,
-        })
-    } else if len == 8 {
-        // #RRGGBBAA
-        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-        let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-        Some(Color {
-            red: r as f32 / 255.0,
-            green: g as f32 / 255.0,
-            blue: b as f32 / 255.0,
-            alpha: a as f32 / 255.0,
-        })
-    } else {
-        None
-    }
-}
-
-fn parse_rgb(value: &str) -> Option<Color> {
-    let inner = if let Some(rest) = value.strip_prefix("rgba") {
-        rest
-    } else if let Some(rest) = value.strip_prefix("rgb") {
-        rest
-    } else {
-        return None;
-    };
-
-    let inner = inner.trim_start().strip_prefix('(')?.strip_suffix(')')?;
-    let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-
-    if parts.len() < 3 {
-        return None;
-    }
-
-    let parse_channel = |part: &str| -> Option<f32> {
-        if let Some(pct) = part.strip_suffix('%') {
-            let value = pct.trim().parse::<f32>().ok()?;
-            return Some((value / 100.0).clamp(0.0, 1.0));
-        }
-        let value = part.parse::<f32>().ok()?;
-        if value > 1.0 {
-            Some((value / 255.0).clamp(0.0, 1.0))
-        } else {
-            Some(value.clamp(0.0, 1.0))
-        }
-    };
-
-    let parse_alpha = |part: &str| -> Option<f32> {
-        if let Some(pct) = part.strip_suffix('%') {
-            let value = pct.trim().parse::<f32>().ok()?;
-            return Some((value / 100.0).clamp(0.0, 1.0));
-        }
-        let value = part.parse::<f32>().ok()?;
-        if value > 1.0 {
-            Some((value / 255.0).clamp(0.0, 1.0))
-        } else {
-            Some(value.clamp(0.0, 1.0))
-        }
-    };
-
-    let r = parse_channel(parts[0])?;
-    let g = parse_channel(parts[1])?;
-    let b = parse_channel(parts[2])?;
-    let a = if parts.len() > 3 {
-        parse_alpha(parts[3])?
-    } else {
-        1.0
-    };
-
-    Some(Color {
-        red: r,
-        green: g,
-        blue: b,
-        alpha: a,
-    })
-}
-
-fn parse_named_color(name: &str) -> Option<Color> {
-    // Basic named colors
-    match name.to_lowercase().as_str() {
-        "red" => Some(Color {
-            red: 1.0,
-            green: 0.0,
-            blue: 0.0,
-            alpha: 1.0,
-        }),
-        "green" => Some(Color {
-            red: 0.0,
-            green: 0.5,
-            blue: 0.0,
-            alpha: 1.0,
-        }),
-        "blue" => Some(Color {
-            red: 0.0,
-            green: 0.0,
-            blue: 1.0,
-            alpha: 1.0,
-        }),
-        "white" => Some(Color {
-            red: 1.0,
-            green: 1.0,
-            blue: 1.0,
-            alpha: 1.0,
-        }),
-        "black" => Some(Color {
-            red: 0.0,
-            green: 0.0,
-            blue: 0.0,
-            alpha: 1.0,
-        }),
-        "yellow" => Some(Color {
-            red: 1.0,
-            green: 1.0,
-            blue: 0.0,
-            alpha: 1.0,
-        }),
-        "cyan" => Some(Color {
-            red: 0.0,
-            green: 1.0,
-            blue: 1.0,
-            alpha: 1.0,
-        }),
-        "magenta" => Some(Color {
-            red: 1.0,
-            green: 0.0,
-            blue: 1.0,
-            alpha: 1.0,
-        }),
-        _ => None,
-    }
 }
 
 /// Generate color presentations for color picker
@@ -350,14 +167,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_color_csscolorparser_fallback() {
-        let color = parse_color("hsl(0, 100%, 50%)").expect("csscolorparser");
-        assert!(approx_eq(color.red, 1.0));
-        assert!(approx_eq(color.green, 0.0));
-        assert!(approx_eq(color.blue, 0.0));
-    }
-
-    #[test]
     fn generate_color_presentations_formats_output() {
         let range = Range::new(Position::new(0, 0), Position::new(0, 4));
         let color = Color {
@@ -478,6 +287,10 @@ mod tests {
         assert!(parse_color("not-a-color").is_none());
         assert!(parse_color("").is_none());
         assert!(parse_color("rgb(999, 999, 999)").is_some()); // Clamped by parser
+
+        // Named colors
+        assert!(parse_color("rebeccapurple").is_some());
+        assert!(parse_color("aliceblue").is_some());
 
         // Transparent keyword
         let color = parse_color("transparent").expect("transparent");

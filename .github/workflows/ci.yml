@@ -64,6 +64,9 @@ jobs:
       - name: Run integration tests
         run: cargo test --test integration_test --verbose
 
+      - name: Run diagnostics integration tests
+        run: cargo test --test diagnostics_integration_test --verbose
+
       - name: Validate asset naming contract
         if: runner.os == 'Linux'
         run: ./scripts/validate-asset-names.sh

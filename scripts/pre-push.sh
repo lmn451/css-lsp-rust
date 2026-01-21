@@ -13,8 +13,20 @@ echo -e "${YELLOW}Running pre-push checks...${NC}"
 
 # 1. Check formatting
 echo -e "${YELLOW}Checking formatting...${NC}"
-if ! cargo fmt -- --check; then
-    echo -e "${RED}Formatting check failed. Run 'cargo fmt' to fix.${NC}"
+cargo fmt
+
+if [[ -n $(git status --porcelain) ]]; then
+    echo -e "${YELLOW}Formatting changes detected. Amending commit...${NC}"
+    git add -u
+    git commit --amend --no-edit
+    echo -e "${GREEN}Commit amended with formatting fixes.${NC}"
+
+    echo -e "${YELLOW}Automatically pushing with --force-with-lease...${NC}"
+    if git push --force-with-lease; then
+        echo -e "${GREEN}Successfully pushed updated commit.${NC}"
+    else
+        echo -e "${RED}Failed to push updated commit. Please push manually.${NC}"
+    fi
     exit 1
 fi
 
@@ -29,6 +41,13 @@ fi
 echo -e "${YELLOW}Running tests...${NC}"
 if ! cargo test --verbose; then
     echo -e "${RED}Tests failed.${NC}"
+    exit 1
+fi
+
+# 3b. Run diagnostics integration tests explicitly
+echo -e "${YELLOW}Running diagnostics integration tests...${NC}"
+if ! cargo test --test diagnostics_integration_test --verbose; then
+    echo -e "${RED}Diagnostics integration tests failed.${NC}"
     exit 1
 fi
 
