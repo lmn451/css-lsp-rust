@@ -44,6 +44,13 @@ if ! cargo test --verbose; then
     exit 1
 fi
 
+# 3b. Run diagnostics integration tests explicitly
+echo -e "${YELLOW}Running diagnostics integration tests...${NC}"
+if ! cargo test --test diagnostics_integration_test --verbose; then
+    echo -e "${RED}Diagnostics integration tests failed.${NC}"
+    exit 1
+fi
+
 # 4. Validate asset naming contract
 echo -e "${YELLOW}Validating asset naming contract...${NC}"
 if ! ./scripts/validate-asset-names.sh; then

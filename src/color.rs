@@ -288,6 +288,10 @@ mod tests {
         assert!(parse_color("").is_none());
         assert!(parse_color("rgb(999, 999, 999)").is_some()); // Clamped by parser
 
+        // Named colors
+        assert!(parse_color("rebeccapurple").is_some());
+        assert!(parse_color("aliceblue").is_some());
+
         // Transparent keyword
         let color = parse_color("transparent").expect("transparent");
         assert!(approx_eq(color.alpha, 0.0));
