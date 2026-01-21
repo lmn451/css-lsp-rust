@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-01-21
+
+### Added
+- Cross-document variable usage tracking.
+- Targeted diagnostic revalidation with integration tests.
+- Support `classname` attribute alias in DOM parsing.
+- Include `.jsx` and `.tsx` files in workspace configuration.
+- Git pre-push hook for automated checks.
+- Release documentation, smoke-test script, and asset name validation tooling.
+
+### Changed
+- Pre-push hook auto-formats and pushes with `--force-with-lease`.
+- Simplified color parsing by removing redundant custom parsers.
+
+### Fixed
+- Lock handling in `revalidate_affected_documents` and stale diagnostics in `did_close`.
+- Clippy warning `field-reassign-with-default` in `perf.rs`.
+
 ### Added
 - Comprehensive integration test suite covering full LSP workflows
 - CI/CD pipeline with GitHub Actions for automated testing and releases
