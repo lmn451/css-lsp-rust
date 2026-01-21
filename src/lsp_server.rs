@@ -282,6 +282,7 @@ impl CssVariableLsp {
         let path = match to_normalized_fs_path(uri) {
             Some(path) => path,
             None => {
+                tracing::debug!("Could not convert URI to file path: {}", uri);
                 self.manager.remove_document(uri).await;
                 return;
             }
@@ -291,7 +292,8 @@ impl CssVariableLsp {
             Ok(text) => {
                 self.parse_document_text(uri, &text, None).await;
             }
-            Err(_) => {
+            Err(e) => {
+                tracing::debug!("Failed to read file {}: {}", path.display(), e);
                 self.manager.remove_document(uri).await;
             }
         }
@@ -1365,6 +1367,9 @@ impl LanguageServer for CssVariableLsp {
 
 impl CssVariableLsp {
     /// Scan workspace folders for CSS and HTML files
+    ///
+    /// Note: SCSS/SASS/LESS files are scanned for CSS custom properties (--var) only.
+    /// Native preprocessor variables ($var in SCSS/SASS, @var in LESS) are not supported.
     pub async fn scan_workspace_folders(&self, folders: Vec<WorkspaceFolder>) {
         let folder_uris: Vec<Url> = folders.iter().map(|f| f.uri.clone()).collect();
 
@@ -1403,17 +1408,38 @@ impl CssVariableLsp {
         .await;
 
         match result {
-            Ok(_) => {
+            Ok(stats) => {
                 let total_vars = manager.get_all_variables().await.len();
+
+                // Log success with summary
                 self.client
                     .log_message(
                         MessageType::INFO,
                         format!(
-                            "Workspace scan complete. Found {} CSS variables.",
+                            "Workspace scan complete. {} | Found {} CSS variables.",
+                            stats.summary(),
                             total_vars
                         ),
                     )
                     .await;
+
+                // Log warnings if there were any errors during scanning
+                if stats.read_errors > 0 || stats.parse_errors > 0 {
+                    self.client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "Some files had errors during scanning: {} read errors, {} parse errors",
+                                stats.read_errors, stats.parse_errors
+                            ),
+                        )
+                        .await;
+
+                    // Log detailed error samples if available
+                    if let Some(details) = stats.error_details() {
+                        self.client.log_message(MessageType::WARNING, details).await;
+                    }
+                }
             }
             Err(e) => {
                 self.client

@@ -11,3 +11,6 @@ pub mod runtime_config;
 pub mod specificity;
 pub mod types;
 pub mod workspace;
+
+// Re-export commonly used types
+pub use workspace::ScanStats;
