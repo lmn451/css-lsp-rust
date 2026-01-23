@@ -125,7 +125,7 @@ async fn test_lsp_completion_for_variables() {
 
     let variable_names: Vec<String> = completion_items
         .iter()
-        .filter_map(|item| Some(item.label.clone()))
+        .map(|item| item.label.clone())
         .collect();
 
     assert!(variable_names.contains(&"--primary-color".to_string()));
@@ -171,12 +171,9 @@ async fn test_lsp_hover_for_variable_definition() {
 
     let hover: Hover = serde_json::from_value(result.clone()).unwrap();
 
-    match hover.contents {
-        tower_lsp::lsp_types::HoverContents::Markup(markup) => {
-            let content_str = markup.value;
-            assert!(content_str.contains("--primary-color") || content_str.contains("#3b82f6"));
-        }
-        _ => {}
+    if let tower_lsp::lsp_types::HoverContents::Markup(markup) = hover.contents {
+        let content_str = markup.value;
+        assert!(content_str.contains("--primary-color") || content_str.contains("#3b82f6"));
     }
 }
 

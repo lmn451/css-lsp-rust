@@ -1,5 +1,6 @@
 use std::process::Command;
 use std::time::Duration;
+use tempfile::TempDir;
 
 #[tokio::test]
 async fn test_perf_binary_basic_run() {
@@ -22,8 +23,8 @@ async fn test_perf_binary_basic_run() {
 
     assert!(output.status.success());
 
-    let stdout = String::from_utf8(&output.stdout).unwrap();
-    let stderr = String::from_utf8(&output.stderr).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert!(stdout.contains("perf config:"));
     assert!(stdout.contains("files: 2 CSS + 1 HTML (3 total)"));
@@ -186,7 +187,6 @@ async fn test_perf_binary_large_scale() {
         .env("CSS_LSP_PERF_BUDGET_MS_PER_FILE", "20.0")
         .env("CSS_LSP_PERF_KEEP_WORKSPACE", "0")
         .current_dir(workspace_path)
-        .timeout(Duration::from_secs(120))
         .output()
         .expect("Failed to run perf binary");
 

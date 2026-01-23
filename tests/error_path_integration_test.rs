@@ -97,7 +97,7 @@ async fn test_css_parser_unclosed_blocks() {
     assert!(result.is_ok());
 
     let all_vars = manager.get_all_variables().await;
-    assert!(all_vars.len() >= 1);
+    assert!(!all_vars.is_empty());
 
     let var_names: Vec<String> = all_vars.iter().map(|v| v.name.clone()).collect();
     assert!(var_names.contains(&"--color".to_string()));
@@ -129,7 +129,7 @@ async fn test_css_parser_invalid_var_references() {
     let all_vars = manager.get_all_variables().await;
     let var_names: Vec<String> = all_vars.iter().map(|v| v.name.clone()).collect();
     assert!(var_names.contains(&"--color".to_string()));
-    assert!(all_vars.len() >= 1);
+    assert!(!all_vars.is_empty());
 }
 
 #[tokio::test]
@@ -212,11 +212,11 @@ async fn test_html_parser_malformed_style_tags() {
     assert!(result.is_ok());
 
     let all_vars = manager.get_all_variables().await;
-    assert!(all_vars.len() >= 1);
+    assert!(!all_vars.is_empty());
 
     let var_names: Vec<String> = all_vars.iter().map(|v| v.name.clone()).collect();
     assert!(var_names.contains(&"--color".to_string()));
-    assert!(all_vars.len() >= 1);
+    assert!(!all_vars.is_empty());
 }
 
 #[tokio::test]
@@ -276,7 +276,7 @@ async fn test_html_parser_missing_tags() {
     assert!(result.is_ok());
 
     let all_vars = manager.get_all_variables().await;
-    assert!(all_vars.len() >= 1);
+    assert!(!all_vars.is_empty());
 }
 
 #[tokio::test]
@@ -305,7 +305,7 @@ async fn test_css_parser_unicode_and_special_chars() {
     assert!(result.is_ok());
 
     let all_vars = manager.get_all_variables().await;
-    assert!(all_vars.len() >= 1);
+    assert!(!all_vars.is_empty());
 
     let var_names: Vec<String> = all_vars.iter().map(|v| v.name.clone()).collect();
     assert!(var_names.contains(&"--normal".to_string()));

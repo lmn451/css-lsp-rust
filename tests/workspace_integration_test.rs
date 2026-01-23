@@ -1,9 +1,4 @@
-use css_variable_lsp::manager::CssVariableManager;
-use css_variable_lsp::types::Config;
-use css_variable_lsp::workspace::{scan_workspace, ScanStats};
-use std::fs;
-use std::path::PathBuf;
-use tower_lsp::lsp_types::Url;
+use css_variable_lsp::workspace::ScanStats;
 
 #[tokio::test]
 async fn test_workspace_scan_stats_methods() {
