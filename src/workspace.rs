@@ -23,7 +23,7 @@ pub struct ScanStats {
 }
 
 impl ScanStats {
-    fn add_error(&mut self, msg: String) {
+    pub fn add_error(&mut self, msg: String) {
         if self.error_samples.len() < 5 {
             self.error_samples.push(msg);
         }
