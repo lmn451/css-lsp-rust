@@ -1,5 +1,5 @@
 use std::process::Command;
-use std::time::Duration;
+
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -54,7 +54,7 @@ async fn test_perf_binary_zero_files() {
 
     assert!(!output.status.success());
 
-    let stderr = String::from_utf8(&output.stderr).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("No files requested"));
 }
 
@@ -78,7 +78,7 @@ async fn test_perf_binary_performance_failure() {
 
     assert!(output.status.success());
 
-    let stdout = String::from_utf8(&output.stdout).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(stdout.contains("Result: FAIL"));
     assert!(stdout.contains("scan budget exceeded"));
@@ -104,7 +104,7 @@ async fn test_perf_binary_keep_workspace() {
 
     assert!(output.status.success());
 
-    let stdout = String::from_utf8(&output.stdout).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(stdout.contains("workspace kept at"));
 
@@ -133,7 +133,7 @@ async fn test_perf_binary_environment_variables() {
 
     assert!(output.status.success());
 
-    let stdout = String::from_utf8(&output.stdout).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(stdout.contains("files: 5 CSS + 3 HTML (8 total)"));
     assert!(stdout.contains("vars/file: 10"));
@@ -161,7 +161,7 @@ async fn test_perf_binary_color_resolution_counting() {
 
     assert!(output.status.success());
 
-    let stdout = String::from_utf8(&output.stdout).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(stdout.contains("colors:"));
     assert!(stdout.contains("~"));
@@ -192,7 +192,7 @@ async fn test_perf_binary_large_scale() {
 
     assert!(output.status.success());
 
-    let stdout = String::from_utf8(&output.stdout).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
 
     assert!(stdout.contains("files: 50 CSS + 10 HTML (60 total)"));
     assert!(stdout.contains("vars/file: 15"));
