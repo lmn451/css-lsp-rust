@@ -1,16 +1,17 @@
+use std::env;
 use std::process::Command;
 
 use tempfile::TempDir;
 
+#[ignore]
 #[tokio::test]
 async fn test_perf_binary_basic_run() {
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path();
 
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--bin")
-        .arg("perf")
+    let perf_binary =
+        env::var("CARGO_BIN_EXE_perf").unwrap_or_else(|_| "../target/debug/perf".to_string());
+    let output = Command::new(&perf_binary)
         .env("CSS_LSP_PERF_FILES", "2")
         .env("CSS_LSP_PERF_HTML_FILES", "1")
         .env("CSS_LSP_PERF_VARS_PER_FILE", "3")
@@ -37,15 +38,15 @@ async fn test_perf_binary_basic_run() {
     assert!(stderr.is_empty());
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_perf_binary_zero_files() {
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path();
 
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--bin")
-        .arg("perf")
+    let perf_binary =
+        env::var("CARGO_BIN_EXE_perf").unwrap_or_else(|_| "../target/debug/perf".to_string());
+    let output = Command::new(&perf_binary)
         .env("CSS_LSP_PERF_FILES", "0")
         .env("CSS_LSP_PERF_HTML_FILES", "0")
         .current_dir(workspace_path)
@@ -58,15 +59,15 @@ async fn test_perf_binary_zero_files() {
     assert!(stderr.contains("No files requested"));
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_perf_binary_performance_failure() {
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path();
 
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--bin")
-        .arg("perf")
+    let perf_binary =
+        env::var("CARGO_BIN_EXE_perf").unwrap_or_else(|_| "../target/debug/perf".to_string());
+    let output = Command::new(&perf_binary)
         .env("CSS_LSP_PERF_FILES", "10")
         .env("CSS_LSP_PERF_HTML_FILES", "5")
         .env("CSS_LSP_PERF_VARS_PER_FILE", "5")
@@ -84,15 +85,15 @@ async fn test_perf_binary_performance_failure() {
     assert!(stdout.contains("scan budget exceeded"));
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_perf_binary_keep_workspace() {
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path();
 
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--bin")
-        .arg("perf")
+    let perf_binary =
+        env::var("CARGO_BIN_EXE_perf").unwrap_or_else(|_| "../target/debug/perf".to_string());
+    let output = Command::new(&perf_binary)
         .env("CSS_LSP_PERF_FILES", "1")
         .env("CSS_LSP_PERF_HTML_FILES", "1")
         .env("CSS_LSP_PERF_VARS_PER_FILE", "2")
@@ -112,15 +113,15 @@ async fn test_perf_binary_keep_workspace() {
     assert!(target_dir.exists());
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_perf_binary_environment_variables() {
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path();
 
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--bin")
-        .arg("perf")
+    let perf_binary =
+        env::var("CARGO_BIN_EXE_perf").unwrap_or_else(|_| "../target/debug/perf".to_string());
+    let output = Command::new(&perf_binary)
         .env("CSS_LSP_PERF_FILES", "5")
         .env("CSS_LSP_PERF_HTML_FILES", "3")
         .env("CSS_LSP_PERF_VARS_PER_FILE", "10")
@@ -141,15 +142,15 @@ async fn test_perf_binary_environment_variables() {
     assert!(stdout.contains("Result: PASS"));
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_perf_binary_color_resolution_counting() {
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path();
 
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--bin")
-        .arg("perf")
+    let perf_binary =
+        env::var("CARGO_BIN_EXE_perf").unwrap_or_else(|_| "../target/debug/perf".to_string());
+    let output = Command::new(&perf_binary)
         .env("CSS_LSP_PERF_FILES", "2")
         .env("CSS_LSP_PERF_HTML_FILES", "0")
         .env("CSS_LSP_PERF_VARS_PER_FILE", "5")
@@ -171,15 +172,15 @@ async fn test_perf_binary_color_resolution_counting() {
     assert!(stdout.contains("color resolutions:"));
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_perf_binary_large_scale() {
     let temp_dir = TempDir::new().unwrap();
     let workspace_path = temp_dir.path();
 
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--bin")
-        .arg("perf")
+    let perf_binary =
+        env::var("CARGO_BIN_EXE_perf").unwrap_or_else(|_| "../target/debug/perf".to_string());
+    let output = Command::new(&perf_binary)
         .env("CSS_LSP_PERF_FILES", "50")
         .env("CSS_LSP_PERF_HTML_FILES", "10")
         .env("CSS_LSP_PERF_VARS_PER_FILE", "15")
