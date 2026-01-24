@@ -7,6 +7,13 @@ pub enum PathDisplayMode {
     Abbreviated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndefinedVarFallbackMode {
+    Warning,
+    Info,
+    Off,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub enable_color_provider: bool,
@@ -15,6 +22,7 @@ pub struct RuntimeConfig {
     pub ignore_globs: Option<Vec<String>>,
     pub path_display_mode: PathDisplayMode,
     pub path_display_abbrev_length: usize,
+    pub undefined_var_fallback: UndefinedVarFallbackMode,
 }
 
 fn get_arg_value(args: &[String], name: &str) -> Option<String> {
@@ -73,6 +81,38 @@ fn parse_path_display(value: Option<&str>) -> (Option<PathDisplayMode>, Option<i
         normalize_path_display_mode(mode_part),
         parse_optional_int(length_part),
     )
+}
+
+fn normalize_undefined_var_fallback_mode(value: Option<&str>) -> Option<UndefinedVarFallbackMode> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.to_lowercase().as_str() {
+        "warning" | "warn" => Some(UndefinedVarFallbackMode::Warning),
+        "info" | "information" => Some(UndefinedVarFallbackMode::Info),
+        "off" | "omit" | "none" | "disable" | "disabled" => Some(UndefinedVarFallbackMode::Off),
+        _ => None,
+    }
+}
+
+fn resolve_undefined_var_fallback(
+    args: &[String],
+    env: &HashMap<String, String>,
+) -> UndefinedVarFallbackMode {
+    let cli_value = get_arg_value(args, "undefined-var-fallback");
+    if let Some(mode) = normalize_undefined_var_fallback_mode(cli_value.as_deref()) {
+        return mode;
+    }
+
+    let env_value = env
+        .get("CSS_LSP_UNDEFINED_VAR_FALLBACK")
+        .map(|v| v.as_str());
+    if let Some(mode) = normalize_undefined_var_fallback_mode(env_value) {
+        return mode;
+    }
+
+    UndefinedVarFallbackMode::Warning
 }
 
 fn split_lookup_list(value: &str) -> Vec<String> {
@@ -193,6 +233,7 @@ pub fn build_runtime_config_with_env(
         .or(length_override)
         .unwrap_or(1);
     let path_display_abbrev_length = length_raw.max(0) as usize;
+    let undefined_var_fallback = resolve_undefined_var_fallback(args, env);
 
     RuntimeConfig {
         enable_color_provider,
@@ -201,6 +242,7 @@ pub fn build_runtime_config_with_env(
         ignore_globs,
         path_display_mode,
         path_display_abbrev_length,
+        undefined_var_fallback,
     }
 }
 
@@ -222,6 +264,7 @@ mod tests {
             "a.css,b.html".to_string(),
             "--ignore-glob=dist/**".to_string(),
             "--path-display=abbreviated:2".to_string(),
+            "--undefined-var-fallback=info".to_string(),
         ];
         let mut env = HashMap::new();
         env.insert(
@@ -230,6 +273,10 @@ mod tests {
         );
         env.insert("CSS_LSP_IGNORE_GLOBS".to_string(), "ignored/**".to_string());
         env.insert("CSS_LSP_PATH_DISPLAY".to_string(), "absolute".to_string());
+        env.insert(
+            "CSS_LSP_UNDEFINED_VAR_FALLBACK".to_string(),
+            "off".to_string(),
+        );
 
         let config = build_runtime_config_with_env(&args, &env);
 
@@ -245,6 +292,10 @@ mod tests {
         );
         assert_eq!(config.path_display_mode, PathDisplayMode::Abbreviated);
         assert_eq!(config.path_display_abbrev_length, 2);
+        assert_eq!(
+            config.undefined_var_fallback,
+            UndefinedVarFallbackMode::Info
+        );
     }
 
     #[test]
@@ -261,6 +312,10 @@ mod tests {
         );
         env.insert("CSS_LSP_PATH_DISPLAY".to_string(), "relative".to_string());
         env.insert("CSS_LSP_PATH_DISPLAY_LENGTH".to_string(), "3".to_string());
+        env.insert(
+            "CSS_LSP_UNDEFINED_VAR_FALLBACK".to_string(),
+            "omit".to_string(),
+        );
 
         let config = build_runtime_config_with_env(&args, &env);
 
@@ -276,5 +331,23 @@ mod tests {
         );
         assert_eq!(config.path_display_mode, PathDisplayMode::Relative);
         assert_eq!(config.path_display_abbrev_length, 3);
+        assert_eq!(config.undefined_var_fallback, UndefinedVarFallbackMode::Off);
+    }
+
+    #[test]
+    fn runtime_config_undefined_var_fallback_defaults_on_invalid() {
+        let args = vec!["--undefined-var-fallback=maybe".to_string()];
+        let mut env = HashMap::new();
+        env.insert(
+            "CSS_LSP_UNDEFINED_VAR_FALLBACK".to_string(),
+            "surely".to_string(),
+        );
+
+        let config = build_runtime_config_with_env(&args, &env);
+
+        assert_eq!(
+            config.undefined_var_fallback,
+            UndefinedVarFallbackMode::Warning
+        );
     }
 }

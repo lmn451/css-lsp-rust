@@ -1,21 +1,23 @@
 use css_variable_lsp::lsp_server::CssVariableLsp;
-use css_variable_lsp::runtime_config::build_runtime_config;
+use css_variable_lsp::runtime_config::{build_runtime_config_with_env, RuntimeConfig};
 use futures::StreamExt;
 use serde::Serialize;
+use std::collections::HashMap;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::{timeout, Duration};
 use tower::{Service, ServiceExt};
 use tower_lsp::jsonrpc::Request;
 use tower_lsp::lsp_types::{
-    ClientCapabilities, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, InitializeParams, PublishDiagnosticsParams,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Url,
-    VersionedTextDocumentIdentifier,
+    ClientCapabilities, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, InitializeParams,
+    PublishDiagnosticsParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, Url, VersionedTextDocumentIdentifier,
 };
 use tower_lsp::LspService;
 
-async fn setup_service() -> (LspService<CssVariableLsp>, UnboundedReceiver<Request>) {
-    let runtime_config = build_runtime_config(&Vec::new());
+async fn setup_service_with_config(
+    runtime_config: RuntimeConfig,
+) -> (LspService<CssVariableLsp>, UnboundedReceiver<Request>) {
     let (service, socket) =
         LspService::new(|client| CssVariableLsp::new(client, runtime_config.clone()));
 
@@ -28,6 +30,11 @@ async fn setup_service() -> (LspService<CssVariableLsp>, UnboundedReceiver<Reque
     });
 
     (service, rx)
+}
+
+async fn setup_service() -> (LspService<CssVariableLsp>, UnboundedReceiver<Request>) {
+    let runtime_config = build_runtime_config_with_env(&Vec::new(), &HashMap::new());
+    setup_service_with_config(runtime_config).await
 }
 
 async fn send_request(service: &mut LspService<CssVariableLsp>, req: Request) {
@@ -225,4 +232,58 @@ async fn test_diagnostics_revalidate_on_definition_close() {
 
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 1);
+}
+
+#[tokio::test]
+async fn test_diagnostics_fallback_info_severity() {
+    let mut env = HashMap::new();
+    env.insert(
+        "CSS_LSP_UNDEFINED_VAR_FALLBACK".to_string(),
+        "info".to_string(),
+    );
+    let runtime_config = build_runtime_config_with_env(&Vec::new(), &env);
+    let (mut service, mut diagnostics_rx) = setup_service_with_config(runtime_config).await;
+    initialize(&mut service).await;
+
+    let index_uri = Url::parse("file:///index.scss").unwrap();
+    open_document(
+        &mut service,
+        index_uri.clone(),
+        "scss",
+        ".card { color: var(--dark, #000); }",
+        1,
+    )
+    .await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics.diagnostics[0].severity,
+        Some(DiagnosticSeverity::INFORMATION)
+    );
+}
+
+#[tokio::test]
+async fn test_diagnostics_fallback_off_omits() {
+    let mut env = HashMap::new();
+    env.insert(
+        "CSS_LSP_UNDEFINED_VAR_FALLBACK".to_string(),
+        "off".to_string(),
+    );
+    let runtime_config = build_runtime_config_with_env(&Vec::new(), &env);
+    let (mut service, mut diagnostics_rx) = setup_service_with_config(runtime_config).await;
+    initialize(&mut service).await;
+
+    let index_uri = Url::parse("file:///index.scss").unwrap();
+    open_document(
+        &mut service,
+        index_uri.clone(),
+        "scss",
+        ".card { color: var(--dark, #000); }",
+        1,
+    )
+    .await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 0);
 }

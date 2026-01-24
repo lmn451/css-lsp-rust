@@ -23,7 +23,7 @@ use crate::color::{generate_color_presentations, parse_color};
 use crate::manager::CssVariableManager;
 use crate::parsers::{parse_css_document, parse_html_document};
 use crate::path_display::{format_uri_for_display, to_normalized_fs_path, PathDisplayOptions};
-use crate::runtime_config::RuntimeConfig;
+use crate::runtime_config::{RuntimeConfig, UndefinedVarFallbackMode};
 use crate::specificity::{
     calculate_specificity, compare_specificity, format_specificity, matches_context,
     sort_by_cascade,
@@ -68,7 +68,7 @@ impl CssVariableLsp {
             root_folder_path: Arc::new(RwLock::new(None)),
             has_workspace_folder_capability: Arc::new(RwLock::new(false)),
             has_diagnostic_related_information: Arc::new(RwLock::new(false)),
-            usage_regex: Regex::new(r"var\((--[\w-]+)(?:\s*,\s*[^)]+)?\)").unwrap(),
+            usage_regex: Regex::new(r"var\((--[\w-]+)(?:\s*,\s*([^)]+))?\)").unwrap(),
             var_usage_regex: Regex::new(r"var\((--[\w-]+)\)").unwrap(),
             var_partial_regex: Regex::new(r"var\(\s*(--[\w-]*)$").unwrap(),
             style_attr_regex: Regex::new(r#"(?i)style\s*=\s*["'][^"']*:\s*[^"';]*$"#).unwrap(),
@@ -117,6 +117,7 @@ impl CssVariableLsp {
             &self.client,
             self.manager.as_ref(),
             &self.usage_regex,
+            self.runtime_config.undefined_var_fallback,
             has_related_info,
             uri,
             text,
@@ -140,6 +141,7 @@ impl CssVariableLsp {
                 &self.client,
                 self.manager.as_ref(),
                 &self.usage_regex,
+                self.runtime_config.undefined_var_fallback,
                 has_related_info,
                 &uri,
                 &text,
@@ -287,6 +289,7 @@ impl CssVariableLsp {
                 &self.client,
                 self.manager.as_ref(),
                 &self.usage_regex,
+                self.runtime_config.undefined_var_fallback,
                 has_related_info,
                 &uri,
                 &text,
@@ -1100,6 +1103,7 @@ async fn validate_document_text_with(
     client: &Client,
     manager: &CssVariableManager,
     usage_regex: &Regex,
+    undefined_var_fallback: UndefinedVarFallbackMode,
     has_related_info: bool,
     uri: &Url,
     text: &str,
@@ -1108,10 +1112,13 @@ async fn validate_document_text_with(
 ) {
     let mut diagnostics = Vec::new();
     let mut current_usages = HashSet::new();
+    let default_severity = DiagnosticSeverity::WARNING;
 
     for captures in usage_regex.captures_iter(text) {
         let match_all = captures.get(0).unwrap();
         let name = captures.get(1).unwrap().as_str();
+        let fallback = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+        let has_fallback = !fallback.trim().is_empty();
 
         current_usages.insert(name.to_string());
 
@@ -1119,13 +1126,27 @@ async fn validate_document_text_with(
         if !definitions.is_empty() {
             continue;
         }
+
+        let severity = if has_fallback {
+            match undefined_var_fallback {
+                UndefinedVarFallbackMode::Warning => Some(default_severity),
+                UndefinedVarFallbackMode::Info => Some(DiagnosticSeverity::INFORMATION),
+                UndefinedVarFallbackMode::Off => None,
+            }
+        } else {
+            Some(default_severity)
+        };
+        let severity = match severity {
+            Some(severity) => severity,
+            None => continue,
+        };
         let range = Range::new(
             crate::types::offset_to_position(text, match_all.start()),
             crate::types::offset_to_position(text, match_all.end()),
         );
         diagnostics.push(Diagnostic {
             range,
-            severity: Some(DiagnosticSeverity::WARNING),
+            severity: Some(severity),
             code: None,
             code_description: None,
             source: Some("css-variable-lsp".to_string()),
