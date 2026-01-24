@@ -1,2 +1,2 @@
 [registries.github]
-index = "sparse+https://github.com/rust-lang/crates.io-index"
+index = "sparse+https://index.crates.io/"
