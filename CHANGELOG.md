@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-01-24
+
+### Added
+- Configurable undefined `var()` fallback diagnostics via `--undefined-var-fallback` /
+  `CSS_LSP_UNDEFINED_VAR_FALLBACK` (warning, info, or off).
+
 ## [0.1.7] - 2026-01-21
 
 ### Added
