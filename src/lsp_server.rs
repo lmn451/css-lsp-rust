@@ -47,8 +47,6 @@ pub struct CssVariableLsp {
     has_diagnostic_related_information: Arc<RwLock<bool>>,
     usage_regex: Regex,
     var_usage_regex: Regex,
-    var_partial_regex: Regex,
-    style_attr_regex: Regex,
     lookup_extension_map: HashMap<String, DocumentKind>,
     document_language_map: Arc<RwLock<HashMap<Url, String>>>,
     document_usage_map: Arc<RwLock<HashMap<Url, HashSet<String>>>>,
@@ -70,8 +68,6 @@ impl CssVariableLsp {
             has_diagnostic_related_information: Arc::new(RwLock::new(false)),
             usage_regex: Regex::new(r"var\((--[\w-]+)(?:\s*,\s*([^)]+))?\)").unwrap(),
             var_usage_regex: Regex::new(r"var\((--[\w-]+)\)").unwrap(),
-            var_partial_regex: Regex::new(r"var\(\s*(--[\w-]*)$").unwrap(),
-            style_attr_regex: Regex::new(r#"(?i)style\s*=\s*["'][^"']*:\s*[^"';]*$"#).unwrap(),
             lookup_extension_map,
             document_language_map: Arc::new(RwLock::new(HashMap::new())),
             document_usage_map: Arc::new(RwLock::new(HashMap::new())),
@@ -215,7 +211,7 @@ impl CssVariableLsp {
         }
     }
 
-    fn is_in_css_value_context(&self, text: &str, position: Position) -> bool {
+    fn is_in_var_function_context(&self, text: &str, position: Position) -> bool {
         let offset = match position_to_offset(text, position) {
             Some(o) => o,
             None => return false,
@@ -224,27 +220,7 @@ impl CssVariableLsp {
         let offset = clamp_to_char_boundary(text, offset);
         let before_cursor = &text[start..offset];
 
-        if self.var_partial_regex.is_match(before_cursor) {
-            return true;
-        }
-
-        if let Some(_property_name) = get_property_name_from_context(before_cursor) {
-            return true;
-        }
-
-        if self.style_attr_regex.is_match(before_cursor) {
-            return true;
-        }
-
-        false
-    }
-
-    fn get_property_name_from_context(&self, text: &str, position: Position) -> Option<String> {
-        let offset = position_to_offset(text, position)?;
-        let start = clamp_to_char_boundary(text, offset.saturating_sub(200));
-        let offset = clamp_to_char_boundary(text, offset);
-        let before_cursor = &text[start..offset];
-        get_property_name_from_context(before_cursor)
+        is_var_function_context_slice(before_cursor)
     }
 
     async fn is_document_open(&self, uri: &Url) -> bool {
@@ -355,7 +331,7 @@ impl LanguageServer for CssVariableLsp {
             )),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
-                trigger_characters: Some(vec!["-".to_string()]),
+                trigger_characters: Some(vec!["-".to_string(), "(".to_string()]),
                 work_done_progress_options: WorkDoneProgressOptions::default(),
                 all_commit_characters: None,
                 completion_item: None,
@@ -574,11 +550,24 @@ impl LanguageServer for CssVariableLsp {
             None => return Ok(Some(CompletionResponse::Array(Vec::new()))),
         };
 
-        if !self.is_in_css_value_context(&text, position) {
+        let language_id = {
+            let langs = self.document_language_map.read().await;
+            langs.get(&uri).cloned()
+        };
+        let value_slice = completion_value_context_slice(
+            &text,
+            position,
+            language_id.as_deref(),
+            &uri,
+            &self.lookup_extension_map,
+        );
+        let in_var_context = self.is_in_var_function_context(&text, position);
+
+        if !should_offer_completion(in_var_context, value_slice) {
             return Ok(Some(CompletionResponse::Array(Vec::new())));
         }
 
-        let property_name = self.get_property_name_from_context(&text, position);
+        let property_name = value_slice.and_then(get_property_name_from_context);
         let variables = self.manager.get_all_variables().await;
 
         let mut unique_vars = HashMap::new();
@@ -618,6 +607,7 @@ impl LanguageServer for CssVariableLsp {
                     label: var.name.clone(),
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(var.value.clone()),
+                    insert_text: Some(completion_insert_text(&var.name, in_var_context)),
                     documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
                         "Defined in {}",
                         format_uri_for_display(&var.uri, options)
@@ -1279,6 +1269,291 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_'
 }
 
+fn is_word_byte(b: u8) -> bool {
+    is_word_char(b as char)
+}
+
+fn slice_eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn is_var_function_start(bytes: &[u8], paren_idx: usize) -> bool {
+    if paren_idx < 3 {
+        return false;
+    }
+    let start = paren_idx - 3;
+    if !slice_eq_ignore_ascii_case(&bytes[start..paren_idx], b"var") {
+        return false;
+    }
+    if start == 0 {
+        return true;
+    }
+    !is_word_byte(bytes[start - 1])
+}
+
+fn is_var_function_context_slice(before_cursor: &str) -> bool {
+    let bytes = before_cursor.as_bytes();
+    let mut stack: Vec<bool> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => {
+                let is_var = is_var_function_start(bytes, i);
+                stack.push(is_var);
+            }
+            b')' => {
+                if !stack.is_empty() {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    stack.into_iter().any(|is_var| is_var)
+}
+
+fn completion_value_context_slice<'a>(
+    text: &'a str,
+    position: Position,
+    language_id: Option<&str>,
+    uri: &Url,
+    lookup_extension_map: &HashMap<String, DocumentKind>,
+) -> Option<&'a str> {
+    let offset = position_to_offset(text, position)?;
+    let start = clamp_to_char_boundary(text, offset.saturating_sub(400));
+    let offset = clamp_to_char_boundary(text, offset);
+    let before_cursor = &text[start..offset];
+
+    if is_js_like_document(uri.path(), language_id) {
+        return find_js_string_segment(before_cursor);
+    }
+
+    match resolve_document_kind(uri.path(), language_id, lookup_extension_map) {
+        Some(DocumentKind::Html) => find_html_style_context_slice(before_cursor),
+        Some(DocumentKind::Css) => Some(before_cursor),
+        None => None,
+    }
+}
+
+fn should_offer_completion(in_var_context: bool, value_slice: Option<&str>) -> bool {
+    in_var_context || value_slice.is_some()
+}
+
+fn completion_insert_text(var_name: &str, in_var_context: bool) -> String {
+    if in_var_context {
+        var_name.to_string()
+    } else {
+        format!("var({})", var_name)
+    }
+}
+
+fn is_js_like_language_id(language_id: &str) -> bool {
+    matches!(
+        language_id.to_lowercase().as_str(),
+        "javascript"
+            | "javascriptreact"
+            | "typescript"
+            | "typescriptreact"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+    )
+}
+
+fn is_js_like_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" | ".mts" | ".cts"
+    )
+}
+
+fn is_js_like_document(path: &str, language_id: Option<&str>) -> bool {
+    if let Some(language_id) = language_id {
+        if is_js_like_language_id(language_id) {
+            return true;
+        }
+    }
+
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(normalize_extension);
+    ext.as_deref().map(is_js_like_extension).unwrap_or(false)
+}
+
+fn find_html_style_attribute_slice(before_cursor: &str) -> Option<&str> {
+    let lower = before_cursor.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut search_end = lower.len();
+
+    while let Some(idx) = lower[..search_end].rfind("style") {
+        if idx > 0 && is_word_byte(bytes[idx - 1]) {
+            search_end = idx;
+            continue;
+        }
+        let after_idx = idx + 5;
+        if after_idx < bytes.len() && is_word_byte(bytes[after_idx]) {
+            search_end = idx;
+            continue;
+        }
+
+        let mut j = after_idx;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b'=' {
+            search_end = idx;
+            continue;
+        }
+        j += 1;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            return None;
+        }
+
+        let quote = bytes[j];
+        if quote != b'"' && quote != b'\'' {
+            search_end = idx;
+            continue;
+        }
+        let value_start = j + 1;
+        let rest = &bytes[value_start..];
+        if !rest.contains(&quote) {
+            return Some(&before_cursor[value_start..]);
+        }
+
+        search_end = idx;
+    }
+
+    None
+}
+
+fn find_html_style_block_slice(before_cursor: &str) -> Option<&str> {
+    let lower = before_cursor.to_ascii_lowercase();
+    let open_idx = lower.rfind("<style")?;
+    if let Some(close_idx) = lower.rfind("</style") {
+        if close_idx > open_idx {
+            return None;
+        }
+    }
+
+    let tag_end_rel = lower[open_idx..].find('>')?;
+    let tag_end = open_idx + tag_end_rel;
+    if tag_end + 1 > before_cursor.len() {
+        return None;
+    }
+
+    Some(&before_cursor[tag_end + 1..])
+}
+
+fn find_html_style_context_slice(before_cursor: &str) -> Option<&str> {
+    find_html_style_attribute_slice(before_cursor)
+        .or_else(|| find_html_style_block_slice(before_cursor))
+}
+
+fn find_js_string_segment(before_cursor: &str) -> Option<&str> {
+    let bytes = before_cursor.as_bytes();
+    let mut in_quote: Option<u8> = None;
+    let mut in_template = false;
+    let mut template_expr_depth: i32 = 0;
+    let mut expr_quote: Option<u8> = None;
+    let mut segment_start: Option<usize> = None;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if b == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if b == q {
+                in_quote = None;
+                segment_start = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_template {
+            if template_expr_depth > 0 {
+                if let Some(q) = expr_quote {
+                    if b == b'\\' {
+                        i = i.saturating_add(2);
+                        continue;
+                    }
+                    if b == q {
+                        expr_quote = None;
+                    }
+                    i += 1;
+                    continue;
+                }
+
+                if b == b'\'' || b == b'"' || b == b'`' {
+                    expr_quote = Some(b);
+                    i += 1;
+                    continue;
+                }
+                if b == b'{' {
+                    template_expr_depth += 1;
+                } else if b == b'}' {
+                    template_expr_depth -= 1;
+                    if template_expr_depth == 0 {
+                        segment_start = Some(i + 1);
+                    }
+                }
+                i += 1;
+                continue;
+            }
+
+            if b == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if b == b'`' {
+                in_template = false;
+                segment_start = None;
+                i += 1;
+                continue;
+            }
+            if b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                template_expr_depth = 1;
+                segment_start = None;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'\'' || b == b'"' {
+            in_quote = Some(b);
+            segment_start = Some(i + 1);
+            i += 1;
+            continue;
+        }
+        if b == b'`' {
+            in_template = true;
+            segment_start = Some(i + 1);
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+
+    if in_quote.is_some() {
+        return segment_start.map(|start| &before_cursor[start..]);
+    }
+    if in_template && template_expr_depth == 0 {
+        return segment_start.map(|start| &before_cursor[start..]);
+    }
+    None
+}
+
 fn find_context_colon(before_cursor: &str) -> Option<usize> {
     let mut in_braces = 0i32;
     let mut in_parens = 0i32;
@@ -1563,6 +1838,157 @@ mod tests {
         let css5 = "margin: var(--spacing);";
         let result5 = test_word_extraction(css5, 15); // cursor on 's' in --spacing
         assert_eq!(result5, Some("--spacing".to_string()));
+    }
+
+    #[test]
+    fn test_var_function_context_open() {
+        let text = "color: var(--primary";
+        assert!(is_var_function_context_slice(text));
+    }
+
+    #[test]
+    fn test_var_function_context_closed() {
+        let text = "color: var(--primary);";
+        assert!(!is_var_function_context_slice(text));
+    }
+
+    #[test]
+    fn test_var_function_context_nested() {
+        let text = "color: var(--primary, calc(100% - var(--secondary";
+        assert!(is_var_function_context_slice(text));
+    }
+
+    #[test]
+    fn test_var_function_context_requires_boundary() {
+        let text = "navbar(--primary";
+        assert!(!is_var_function_context_slice(text));
+    }
+
+    #[test]
+    fn test_var_function_context_case_insensitive() {
+        let text = "color: VAR(--primary";
+        assert!(is_var_function_context_slice(text));
+    }
+
+    #[test]
+    fn test_completion_insert_text_in_var_context() {
+        let text = completion_insert_text("--primary", true);
+        assert_eq!(text, "--primary");
+    }
+
+    #[test]
+    fn test_completion_insert_text_outside_var_context() {
+        let text = completion_insert_text("--primary", false);
+        assert_eq!(text, "var(--primary)");
+    }
+
+    #[test]
+    fn test_should_offer_completion() {
+        assert!(should_offer_completion(true, None));
+        assert!(should_offer_completion(false, Some("color: var(")));
+        assert!(!should_offer_completion(false, None));
+    }
+
+    #[test]
+    fn test_completion_value_context_slice_css() {
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let text = ".card { color: var(";
+        let position = crate::types::offset_to_position(text, text.len());
+        let uri = Url::parse("file:///styles.css").unwrap();
+        let slice = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+            .expect("expected css slice");
+        assert_eq!(slice, text);
+    }
+
+    #[test]
+    fn test_completion_value_context_slice_html_style_attribute() {
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let text = r#"<div style="color: var("#;
+        let position = crate::types::offset_to_position(text, text.len());
+        let uri = Url::parse("file:///index.html").unwrap();
+        let slice = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+            .expect("expected html style attribute slice");
+        assert_eq!(slice, "color: var(");
+    }
+
+    #[test]
+    fn test_completion_value_context_slice_html_style_block() {
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let text = "<style>body { color: var(";
+        let position = crate::types::offset_to_position(text, text.len());
+        let uri = Url::parse("file:///index.html").unwrap();
+        let slice = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+            .expect("expected html style block slice");
+        assert_eq!(slice, "body { color: var(");
+    }
+
+    #[test]
+    fn test_completion_value_context_slice_js_string() {
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let text = r#"const css = "color: var("#;
+        let position = crate::types::offset_to_position(text, text.len());
+        let uri = Url::parse("file:///app.js").unwrap();
+        let slice = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+            .expect("expected js string slice");
+        assert_eq!(slice, "color: var(");
+    }
+
+    #[test]
+    fn test_completion_value_context_slice_js_non_string() {
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let text = "const css = color: var(";
+        let position = crate::types::offset_to_position(text, text.len());
+        let uri = Url::parse("file:///app.js").unwrap();
+        assert!(completion_value_context_slice(text, position, None, &uri, &lookup_map).is_none());
+    }
+
+    #[test]
+    fn test_completion_value_context_slice_unknown() {
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let text = "color: var(";
+        let position = crate::types::offset_to_position(text, text.len());
+        let uri = Url::parse("file:///notes.txt").unwrap();
+        assert!(completion_value_context_slice(text, position, None, &uri, &lookup_map).is_none());
+    }
+
+    #[test]
+    fn test_html_style_attribute_slice_open() {
+        let text = r#"<div style="color: var("#;
+        let slice = find_html_style_attribute_slice(text).unwrap();
+        assert_eq!(slice, "color: var(");
+    }
+
+    #[test]
+    fn test_html_style_attribute_slice_closed() {
+        let text = r#"<div style="color: red">"#;
+        assert!(find_html_style_attribute_slice(text).is_none());
+    }
+
+    #[test]
+    fn test_html_style_block_slice() {
+        let text = "<style>body { color: var(";
+        let slice = find_html_style_block_slice(text).unwrap();
+        assert_eq!(slice, "body { color: var(");
+    }
+
+    #[test]
+    fn test_js_string_segment_basic() {
+        let text = r#"const css = \"color: var("#;
+        let slice = find_js_string_segment(text).unwrap();
+        assert_eq!(slice, "color: var(");
+    }
+
+    #[test]
+    fn test_js_string_segment_template_after_expression() {
+        let text = r#"const css = `color: ${theme}; background: var("#;
+        let slice = find_js_string_segment(text).unwrap();
+        assert_eq!(slice, "; background: var(");
+    }
+
+    #[test]
+    fn test_js_string_segment_template_expression() {
+        let text = r#"const css = `color: ${theme"#;
+        assert!(find_js_string_segment(text).is_none());
     }
 
     #[test]
