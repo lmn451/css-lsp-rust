@@ -550,6 +550,12 @@ impl LanguageServer for CssVariableLsp {
             None => return Ok(Some(CompletionResponse::Array(Vec::new()))),
         };
 
+        let in_var_context = self.is_in_var_function_context(&text, position);
+
+        if !in_var_context {
+            return Ok(Some(CompletionResponse::Array(Vec::new())));
+        }
+
         let language_id = {
             let langs = self.document_language_map.read().await;
             langs.get(&uri).cloned()
@@ -561,12 +567,6 @@ impl LanguageServer for CssVariableLsp {
             &uri,
             &self.lookup_extension_map,
         );
-        let in_var_context = self.is_in_var_function_context(&text, position);
-
-        if !should_offer_completion(in_var_context, value_slice) {
-            return Ok(Some(CompletionResponse::Array(Vec::new())));
-        }
-
         let property_name = value_slice.and_then(get_property_name_from_context);
         let variables = self.manager.get_all_variables().await;
 
@@ -607,7 +607,7 @@ impl LanguageServer for CssVariableLsp {
                     label: var.name.clone(),
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(var.value.clone()),
-                    insert_text: Some(completion_insert_text(&var.name, in_var_context)),
+                    insert_text: Some(var.name.clone()),
                     documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
                         "Defined in {}",
                         format_uri_for_display(&var.uri, options)
@@ -1273,44 +1273,44 @@ fn is_word_byte(b: u8) -> bool {
     is_word_char(b as char)
 }
 
-fn slice_eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
-    left.eq_ignore_ascii_case(right)
-}
+fn is_var_function_context_slice(before_cursor: &str) -> bool {
+    let bytes = before_cursor.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
 
-fn is_var_function_start(bytes: &[u8], paren_idx: usize) -> bool {
+    let mut i = bytes.len();
+    if is_word_byte(bytes[i - 1]) {
+        let mut start = i;
+        while start > 0 && is_word_byte(bytes[start - 1]) {
+            start -= 1;
+        }
+        if i - start < 2 || bytes[start] != b'-' || bytes[start + 1] != b'-' {
+            return false;
+        }
+        i = start;
+    }
+
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+
+    if i == 0 || bytes[i - 1] != b'(' {
+        return false;
+    }
+
+    let paren_idx = i - 1;
     if paren_idx < 3 {
         return false;
     }
     let start = paren_idx - 3;
-    if !slice_eq_ignore_ascii_case(&bytes[start..paren_idx], b"var") {
+    if !bytes[start..paren_idx].eq_ignore_ascii_case(b"var") {
         return false;
     }
     if start == 0 {
         return true;
     }
     !is_word_byte(bytes[start - 1])
-}
-
-fn is_var_function_context_slice(before_cursor: &str) -> bool {
-    let bytes = before_cursor.as_bytes();
-    let mut stack: Vec<bool> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => {
-                let is_var = is_var_function_start(bytes, i);
-                stack.push(is_var);
-            }
-            b')' => {
-                if !stack.is_empty() {
-                    stack.pop();
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    stack.into_iter().any(|is_var| is_var)
 }
 
 fn completion_value_context_slice<'a>(
@@ -1333,18 +1333,6 @@ fn completion_value_context_slice<'a>(
         Some(DocumentKind::Html) => find_html_style_context_slice(before_cursor),
         Some(DocumentKind::Css) => Some(before_cursor),
         None => None,
-    }
-}
-
-fn should_offer_completion(in_var_context: bool, value_slice: Option<&str>) -> bool {
-    in_var_context || value_slice.is_some()
-}
-
-fn completion_insert_text(var_name: &str, in_var_context: bool) -> String {
-    if in_var_context {
-        var_name.to_string()
-    } else {
-        format!("var({})", var_name)
     }
 }
 
@@ -1859,6 +1847,12 @@ mod tests {
     }
 
     #[test]
+    fn test_var_function_context_after_fallback() {
+        let text = "color: var(--primary, ";
+        assert!(!is_var_function_context_slice(text));
+    }
+
+    #[test]
     fn test_var_function_context_requires_boundary() {
         let text = "navbar(--primary";
         assert!(!is_var_function_context_slice(text));
@@ -1868,25 +1862,6 @@ mod tests {
     fn test_var_function_context_case_insensitive() {
         let text = "color: VAR(--primary";
         assert!(is_var_function_context_slice(text));
-    }
-
-    #[test]
-    fn test_completion_insert_text_in_var_context() {
-        let text = completion_insert_text("--primary", true);
-        assert_eq!(text, "--primary");
-    }
-
-    #[test]
-    fn test_completion_insert_text_outside_var_context() {
-        let text = completion_insert_text("--primary", false);
-        assert_eq!(text, "var(--primary)");
-    }
-
-    #[test]
-    fn test_should_offer_completion() {
-        assert!(should_offer_completion(true, None));
-        assert!(should_offer_completion(false, Some("color: var(")));
-        assert!(!should_offer_completion(false, None));
     }
 
     #[test]
