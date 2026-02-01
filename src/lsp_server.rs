@@ -423,7 +423,7 @@ impl LanguageServer for CssVariableLsp {
                             "missing cssVariableLsp key",
                         ))
                     })
-                    .and_then(|v| serde_json::from_value::<ClientConfigPatch>(v))
+                    .and_then(serde_json::from_value::<ClientConfigPatch>)
             });
 
         let patch = match patch {

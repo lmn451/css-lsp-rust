@@ -15,7 +15,7 @@ echo -e "${YELLOW}Running pre-push checks...${NC}"
 echo -e "${YELLOW}Checking formatting...${NC}"
 cargo fmt
 
-if [[ -n $(git status --porcelain) ]]; then
+if [[ -n $(git status --porcelain --untracked-files=no) ]]; then
     echo -e "${YELLOW}Formatting changes detected. Amending commit...${NC}"
     git add -u
     git commit --amend --no-edit
