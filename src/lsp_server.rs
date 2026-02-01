@@ -211,18 +211,6 @@ impl CssVariableLsp {
         }
     }
 
-    fn is_in_var_function_context(&self, text: &str, position: Position) -> bool {
-        let offset = match position_to_offset(text, position) {
-            Some(o) => o,
-            None => return false,
-        };
-        let start = clamp_to_char_boundary(text, offset.saturating_sub(200));
-        let offset = clamp_to_char_boundary(text, offset);
-        let before_cursor = &text[start..offset];
-
-        is_var_function_context_slice(before_cursor)
-    }
-
     async fn is_document_open(&self, uri: &Url) -> bool {
         let docs = self.document_map.read().await;
         docs.contains_key(uri)
@@ -331,7 +319,7 @@ impl LanguageServer for CssVariableLsp {
             )),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
-                trigger_characters: Some(vec!["-".to_string(), "(".to_string()]),
+                trigger_characters: Some(vec!["-".to_string(), "(".to_string(), ":".to_string()]),
                 work_done_progress_options: WorkDoneProgressOptions::default(),
                 all_commit_characters: None,
                 completion_item: None,
@@ -550,24 +538,27 @@ impl LanguageServer for CssVariableLsp {
             None => return Ok(Some(CompletionResponse::Array(Vec::new()))),
         };
 
-        let in_var_context = self.is_in_var_function_context(&text, position);
-
-        if !in_var_context {
-            return Ok(Some(CompletionResponse::Array(Vec::new())));
-        }
-
         let language_id = {
             let langs = self.document_language_map.read().await;
             langs.get(&uri).cloned()
         };
-        let value_slice = completion_value_context_slice(
+        let context = completion_value_context_slice(
             &text,
             position,
             language_id.as_deref(),
             &uri,
             &self.lookup_extension_map,
         );
-        let property_name = value_slice.and_then(get_property_name_from_context);
+        let context = match context {
+            Some(context) => context,
+            None => return Ok(Some(CompletionResponse::Array(Vec::new()))),
+        };
+        let value_context = get_value_context_info(context.slice, context.allow_without_braces);
+        if !value_context.is_value_context {
+            return Ok(Some(CompletionResponse::Array(Vec::new())));
+        }
+        let property_name = value_context.property_name;
+        let in_var_context = is_var_function_context_slice(context.slice);
         let variables = self.manager.get_all_variables().await;
 
         let mut unique_vars = HashMap::new();
@@ -603,11 +594,16 @@ impl LanguageServer for CssVariableLsp {
                     workspace_folder_paths: &workspace_folder_paths,
                     root_folder_path: root_folder_path.as_ref(),
                 };
+                let insert_text = if in_var_context {
+                    var.name.clone()
+                } else {
+                    format!("var({})", var.name)
+                };
                 CompletionItem {
                     label: var.name.clone(),
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(var.value.clone()),
-                    insert_text: Some(var.name.clone()),
+                    insert_text: Some(insert_text),
                     documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
                         "Defined in {}",
                         format_uri_for_display(&var.uri, options)
@@ -618,6 +614,13 @@ impl LanguageServer for CssVariableLsp {
             .collect();
 
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn completion_resolve(
+        &self,
+        item: CompletionItem,
+    ) -> tower_lsp::jsonrpc::Result<CompletionItem> {
+        Ok(item)
     }
 
     async fn hover(&self, params: HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
@@ -1313,25 +1316,42 @@ fn is_var_function_context_slice(before_cursor: &str) -> bool {
     !is_word_byte(bytes[start - 1])
 }
 
+struct CompletionContextSlice<'a> {
+    slice: &'a str,
+    allow_without_braces: bool,
+}
+
+struct ValueContext {
+    is_value_context: bool,
+    property_name: Option<String>,
+}
+
 fn completion_value_context_slice<'a>(
     text: &'a str,
     position: Position,
     language_id: Option<&str>,
     uri: &Url,
     lookup_extension_map: &HashMap<String, DocumentKind>,
-) -> Option<&'a str> {
+) -> Option<CompletionContextSlice<'a>> {
     let offset = position_to_offset(text, position)?;
     let start = clamp_to_char_boundary(text, offset.saturating_sub(400));
     let offset = clamp_to_char_boundary(text, offset);
     let before_cursor = &text[start..offset];
 
     if is_js_like_document(uri.path(), language_id) {
-        return find_js_string_segment(before_cursor);
+        let slice = find_js_string_segment(before_cursor)?;
+        return Some(CompletionContextSlice {
+            slice,
+            allow_without_braces: true,
+        });
     }
 
     match resolve_document_kind(uri.path(), language_id, lookup_extension_map) {
         Some(DocumentKind::Html) => find_html_style_context_slice(before_cursor),
-        Some(DocumentKind::Css) => Some(before_cursor),
+        Some(DocumentKind::Css) => Some(CompletionContextSlice {
+            slice: before_cursor,
+            allow_without_braces: false,
+        }),
         None => None,
     }
 }
@@ -1438,9 +1458,20 @@ fn find_html_style_block_slice(before_cursor: &str) -> Option<&str> {
     Some(&before_cursor[tag_end + 1..])
 }
 
-fn find_html_style_context_slice(before_cursor: &str) -> Option<&str> {
-    find_html_style_attribute_slice(before_cursor)
-        .or_else(|| find_html_style_block_slice(before_cursor))
+fn find_html_style_context_slice(before_cursor: &str) -> Option<CompletionContextSlice<'_>> {
+    if let Some(slice) = find_html_style_attribute_slice(before_cursor) {
+        return Some(CompletionContextSlice {
+            slice,
+            allow_without_braces: true,
+        });
+    }
+    if let Some(slice) = find_html_style_block_slice(before_cursor) {
+        return Some(CompletionContextSlice {
+            slice,
+            allow_without_braces: false,
+        });
+    }
+    None
 }
 
 fn find_js_string_segment(before_cursor: &str) -> Option<&str> {
@@ -1542,7 +1573,7 @@ fn find_js_string_segment(before_cursor: &str) -> Option<&str> {
     None
 }
 
-fn find_context_colon(before_cursor: &str) -> Option<usize> {
+fn find_context_colon(before_cursor: &str, allow_without_braces: bool) -> Option<usize> {
     let mut in_braces = 0i32;
     let mut in_parens = 0i32;
     let mut last_colon: i32 = -1;
@@ -1555,7 +1586,7 @@ fn find_context_colon(before_cursor: &str) -> Option<usize> {
             '(' => {
                 in_parens -= 1;
                 if in_parens < 0 {
-                    break;
+                    in_parens = 0;
                 }
             }
             '}' => in_braces += 1,
@@ -1576,6 +1607,10 @@ fn find_context_colon(before_cursor: &str) -> Option<usize> {
         }
     }
 
+    if !allow_without_braces && last_brace == -1 {
+        return None;
+    }
+
     if last_colon > last_semicolon && last_colon > last_brace {
         Some(last_colon as usize)
     } else {
@@ -1583,11 +1618,22 @@ fn find_context_colon(before_cursor: &str) -> Option<usize> {
     }
 }
 
-fn get_property_name_from_context(before_cursor: &str) -> Option<String> {
-    let colon_pos = find_context_colon(before_cursor)?;
+fn get_value_context_info(before_cursor: &str, allow_without_braces: bool) -> ValueContext {
+    let colon_pos = match find_context_colon(before_cursor, allow_without_braces) {
+        Some(pos) => pos,
+        None => {
+            return ValueContext {
+                is_value_context: false,
+                property_name: None,
+            }
+        }
+    };
     let before_colon = before_cursor[..colon_pos].trim_end();
     if before_colon.is_empty() {
-        return None;
+        return ValueContext {
+            is_value_context: true,
+            property_name: None,
+        };
     }
 
     let mut start = before_colon.len();
@@ -1600,10 +1646,16 @@ fn get_property_name_from_context(before_cursor: &str) -> Option<String> {
     }
 
     if start >= before_colon.len() {
-        return None;
+        return ValueContext {
+            is_value_context: true,
+            property_name: None,
+        };
     }
 
-    Some(before_colon[start..].to_lowercase())
+    ValueContext {
+        is_value_context: true,
+        property_name: Some(before_colon[start..].to_lowercase()),
+    }
 }
 
 fn score_variable_relevance(var_name: &str, property_name: Option<&str>) -> i32 {
@@ -1870,9 +1922,10 @@ mod tests {
         let text = ".card { color: var(";
         let position = crate::types::offset_to_position(text, text.len());
         let uri = Url::parse("file:///styles.css").unwrap();
-        let slice = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+        let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected css slice");
-        assert_eq!(slice, text);
+        assert_eq!(context.slice, text);
+        assert!(!context.allow_without_braces);
     }
 
     #[test]
@@ -1881,9 +1934,10 @@ mod tests {
         let text = r#"<div style="color: var("#;
         let position = crate::types::offset_to_position(text, text.len());
         let uri = Url::parse("file:///index.html").unwrap();
-        let slice = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+        let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected html style attribute slice");
-        assert_eq!(slice, "color: var(");
+        assert_eq!(context.slice, "color: var(");
+        assert!(context.allow_without_braces);
     }
 
     #[test]
@@ -1892,9 +1946,10 @@ mod tests {
         let text = "<style>body { color: var(";
         let position = crate::types::offset_to_position(text, text.len());
         let uri = Url::parse("file:///index.html").unwrap();
-        let slice = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+        let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected html style block slice");
-        assert_eq!(slice, "body { color: var(");
+        assert_eq!(context.slice, "body { color: var(");
+        assert!(!context.allow_without_braces);
     }
 
     #[test]
@@ -1903,9 +1958,10 @@ mod tests {
         let text = r#"const css = "color: var("#;
         let position = crate::types::offset_to_position(text, text.len());
         let uri = Url::parse("file:///app.js").unwrap();
-        let slice = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+        let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected js string slice");
-        assert_eq!(slice, "color: var(");
+        assert_eq!(context.slice, "color: var(");
+        assert!(context.allow_without_braces);
     }
 
     #[test]
