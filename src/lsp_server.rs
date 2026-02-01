@@ -5,19 +5,21 @@ use std::sync::Arc;
 use regex::Regex;
 use tokio::sync::RwLock;
 use tower_lsp::lsp_types::{
-    ColorInformation, ColorPresentation, ColorPresentationParams, ColorProviderCapability,
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    CreateFilesParams, DeleteFilesParams, Diagnostic, DiagnosticSeverity,
-    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
-    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentColorParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    FileChangeType, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind,
-    MessageType, OneOf, Position, PrepareRenameResponse, Range, ReferenceParams, RenameFilesParams,
-    RenameOptions, RenameParams, ServerCapabilities, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit, WorkspaceFolder,
-    WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities, WorkspaceSymbolParams,
+    CodeAction, CodeActionContext, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CodeActionResponse, ColorInformation, ColorPresentation,
+    ColorPresentationParams, ColorProviderCapability, CompletionItem, CompletionItemKind,
+    CompletionOptions, CompletionParams, CompletionResponse, CreateFilesParams, DeleteFilesParams,
+    Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentColorParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, FileChangeType, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, InitializeParams, InitializeResult, Location, MarkupContent,
+    MarkupKind, MessageType, OneOf, Position, PrepareRenameResponse, Range, ReferenceParams,
+    RenameFilesParams, RenameOptions, RenameParams, ServerCapabilities, SymbolInformation,
+    SymbolKind, TextDocumentContentChangeEvent, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
+    WorkspaceEdit, WorkspaceFolder, WorkspaceFoldersServerCapabilities,
+    WorkspaceServerCapabilities, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer};
 
@@ -31,6 +33,103 @@ use crate::specificity::{
     sort_by_cascade,
 };
 use crate::types::{position_to_offset, Config};
+
+fn code_actions_for_undefined_variables(
+    uri: &Url,
+    text: &str,
+    context: &CodeActionContext,
+) -> Vec<CodeActionOrCommand> {
+    let mut actions = Vec::new();
+
+    for diag in &context.diagnostics {
+        let code = match diag.code.as_ref() {
+            Some(tower_lsp::lsp_types::NumberOrString::String(code)) => code.as_str(),
+            _ => continue,
+        };
+        if code != "css-variable-lsp.undefined-variable" {
+            continue;
+        }
+
+        let name = diag
+            .data
+            .as_ref()
+            .and_then(|d| d.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let name = match name {
+            Some(name) => name,
+            None => continue,
+        };
+
+        // Very conservative quickfix: insert a :root block at the start of the current file.
+        // This avoids trying to parse/modify existing CSS.
+        let insert_text = format!(":root {{\n    {}: ;\n}}\n\n", name);
+
+        let edit = WorkspaceEdit {
+            changes: Some(HashMap::from([(
+                uri.clone(),
+                vec![TextEdit {
+                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                    new_text: insert_text,
+                }],
+            )])),
+            document_changes: None,
+            change_annotations: None,
+        };
+
+        let action = CodeAction {
+            title: format!("Create {} in :root", name),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diag.clone()]),
+            edit: Some(edit),
+            command: None,
+            is_preferred: Some(true),
+            disabled: None,
+            data: None,
+        };
+
+        actions.push(CodeActionOrCommand::CodeAction(action));
+
+        // Optional quickfix: add fallback to `var(--name)` -> `var(--name, )`
+        // Only offered when the diagnostic covers a `var(...)` call without a comma.
+        if let (Some(start), Some(end)) = (
+            crate::types::position_to_offset(text, diag.range.start),
+            crate::types::position_to_offset(text, diag.range.end),
+        ) {
+            if start < end && end <= text.len() {
+                let slice = &text[start..end];
+                if slice.starts_with("var(") && slice.ends_with(')') && !slice.contains(',') {
+                    let new_text = slice.trim_end_matches(')').to_string() + ", )";
+                    let edit = WorkspaceEdit {
+                        changes: Some(HashMap::from([(
+                            uri.clone(),
+                            vec![TextEdit {
+                                range: diag.range,
+                                new_text,
+                            }],
+                        )])),
+                        document_changes: None,
+                        change_annotations: None,
+                    };
+
+                    let action = CodeAction {
+                        title: format!("Add fallback to {}", name),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        diagnostics: Some(vec![diag.clone()]),
+                        edit: Some(edit),
+                        command: None,
+                        is_preferred: Some(false),
+                        disabled: None,
+                        data: None,
+                    };
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            }
+        }
+    }
+
+    actions
+}
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -358,10 +457,12 @@ impl LanguageServer for CssVariableLsp {
             hover_provider: Some(tower_lsp::lsp_types::HoverProviderCapability::Simple(true)),
             definition_provider: Some(OneOf::Left(true)),
             references_provider: Some(OneOf::Left(true)),
+            code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
             rename_provider: Some(OneOf::Right(RenameOptions {
                 prepare_provider: Some(true),
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             })),
+
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
             color_provider: if self.runtime_config.enable_color_provider {
@@ -941,6 +1042,32 @@ impl LanguageServer for CssVariableLsp {
         ))))
     }
 
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let text = {
+            let docs = self.document_map.read().await;
+            docs.get(&uri).cloned()
+        };
+        let text = match text {
+            Some(text) => text,
+            None => return Ok(Some(Vec::new())),
+        };
+
+        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
+
+        // 1) Quick-fix undefined variable diagnostics.
+        actions.extend(code_actions_for_undefined_variables(
+            &uri,
+            &text,
+            &params.context,
+        ));
+
+        Ok(Some(actions))
+    }
+
     async fn references(
         &self,
         params: ReferenceParams,
@@ -1348,7 +1475,9 @@ async fn validate_document_text_with(
         diagnostics.push(Diagnostic {
             range,
             severity: Some(severity),
-            code: None,
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "css-variable-lsp.undefined-variable".to_string(),
+            )),
             code_description: None,
             source: Some("css-variable-lsp".to_string()),
             message: format!("CSS variable '{}' is not defined in the workspace", name),
@@ -1358,7 +1487,14 @@ async fn validate_document_text_with(
                 None
             },
             tags: None,
-            data: None,
+            data: Some(serde_json::json!({
+                "name": name,
+                "hasFallback": has_fallback,
+                "range": {
+                    "start": { "line": range.start.line, "character": range.start.character },
+                    "end": { "line": range.end.line, "character": range.end.character }
+                }
+            })),
         });
     }
 

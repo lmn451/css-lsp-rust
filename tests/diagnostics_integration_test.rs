@@ -14,7 +14,8 @@ use tower_lsp::lsp_types::{
     TextDocumentItem, Url, VersionedTextDocumentIdentifier,
 };
 use tower_lsp::lsp_types::{
-    DeleteFilesParams, DidChangeConfigurationParams, FileDelete, TextDocumentPositionParams,
+    CodeActionContext, CodeActionParams, CodeActionResponse, DeleteFilesParams,
+    DidChangeConfigurationParams, FileDelete, Range, TextDocumentPositionParams,
 };
 use tower_lsp::LspService;
 
@@ -415,6 +416,59 @@ async fn test_did_delete_files_triggers_revalidation() {
 
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 1);
+}
+
+#[tokio::test]
+async fn test_code_actions_for_undefined_variable() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    let _init = initialize(&mut service).await;
+
+    let uri = Url::parse("file:///index.scss").unwrap();
+    let text = ".card { color: var(--missing); background: var(--missing, #000); }";
+    open_document(&mut service, uri.clone(), "scss", text, 1).await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 2);
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range::new(
+            tower_lsp::lsp_types::Position::new(0, 0),
+            tower_lsp::lsp_types::Position::new(0, 0),
+        ),
+        context: CodeActionContext {
+            diagnostics: diagnostics.diagnostics,
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let req = Request::build("textDocument/codeAction")
+        .id(99)
+        .params(serde_json::to_value(params).unwrap())
+        .finish();
+
+    let result = send_request_for_result(&mut service, req)
+        .await
+        .expect("codeAction should return result");
+
+    let actions: CodeActionResponse = serde_json::from_value(result).unwrap();
+
+    // We should at least offer "Create --missing in :root".
+    let titles: Vec<String> = actions
+        .into_iter()
+        .filter_map(|a| match a {
+            tower_lsp::lsp_types::CodeActionOrCommand::CodeAction(ca) => Some(ca.title),
+            _ => None,
+        })
+        .collect();
+
+    assert!(titles
+        .iter()
+        .any(|t| t.contains("Create --missing in :root")));
+    assert!(titles.iter().any(|t| t.contains("Add fallback")));
 }
 
 #[tokio::test]
