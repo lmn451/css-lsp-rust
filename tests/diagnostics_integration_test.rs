@@ -13,6 +13,9 @@ use tower_lsp::lsp_types::{
     PublishDiagnosticsParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
     TextDocumentItem, Url, VersionedTextDocumentIdentifier,
 };
+use tower_lsp::lsp_types::{
+    DeleteFilesParams, DidChangeConfigurationParams, FileDelete, TextDocumentPositionParams,
+};
 use tower_lsp::LspService;
 
 async fn setup_service_with_config(
@@ -41,6 +44,19 @@ async fn send_request(service: &mut LspService<CssVariableLsp>, req: Request) {
     let _ = service.ready().await.unwrap().call(req).await.unwrap();
 }
 
+async fn send_request_for_result(
+    service: &mut LspService<CssVariableLsp>,
+    req: Request,
+) -> Option<serde_json::Value> {
+    let response = service.ready().await.unwrap().call(req).await.unwrap();
+    response.and_then(|resp| resp.result().cloned())
+}
+
+fn position_of(text: &str, needle: &str) -> tower_lsp::lsp_types::Position {
+    let offset = text.find(needle).expect("needle should exist in text");
+    css_variable_lsp::types::offset_to_position(text, offset)
+}
+
 async fn send_notification<P: Serialize>(
     service: &mut LspService<CssVariableLsp>,
     method: &'static str,
@@ -52,7 +68,9 @@ async fn send_notification<P: Serialize>(
     send_request(service, req).await;
 }
 
-async fn initialize(service: &mut LspService<CssVariableLsp>) {
+async fn initialize(
+    service: &mut LspService<CssVariableLsp>,
+) -> tower_lsp::lsp_types::InitializeResult {
     let params = InitializeParams {
         capabilities: ClientCapabilities::default(),
         ..Default::default()
@@ -61,7 +79,11 @@ async fn initialize(service: &mut LspService<CssVariableLsp>) {
         .id(1)
         .params(serde_json::to_value(params).unwrap())
         .finish();
-    send_request(service, req).await;
+
+    let result = send_request_for_result(service, req)
+        .await
+        .expect("initialize should return result");
+    serde_json::from_value(result).expect("initialize result should decode")
 }
 
 async fn next_publish_diagnostics_for(
@@ -261,6 +283,138 @@ async fn test_diagnostics_fallback_info_severity() {
         diagnostics.diagnostics[0].severity,
         Some(DiagnosticSeverity::INFORMATION)
     );
+}
+
+#[tokio::test]
+async fn test_initialize_advertises_workspace_folder_change_notifications() {
+    let (mut service, _diagnostics_rx) = setup_service().await;
+
+    // This server only advertises workspace folder change notifications if the client
+    // declares workspace folder support.
+    let req = Request::build("initialize")
+        .id(1)
+        .params(serde_json::json!({
+            "capabilities": {
+                "workspace": {
+                    "workspaceFolders": true
+                }
+            }
+        }))
+        .finish();
+
+    let result = send_request_for_result(&mut service, req)
+        .await
+        .expect("initialize should return result");
+    let init: tower_lsp::lsp_types::InitializeResult =
+        serde_json::from_value(result).expect("initialize result should decode");
+
+    let change_notifications = init
+        .capabilities
+        .workspace
+        .and_then(|w| w.workspace_folders)
+        .and_then(|wf| wf.change_notifications);
+
+    assert!(matches!(
+        change_notifications,
+        Some(tower_lsp::lsp_types::OneOf::Left(true))
+    ));
+}
+
+#[tokio::test]
+async fn test_prepare_rename_returns_range() {
+    let (mut service, _diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Url::parse("file:///index.scss").unwrap();
+    let text = ".card { color: var(--dark); }";
+    open_document(&mut service, uri.clone(), "scss", text, 1).await;
+
+    let pos = position_of(text, "--dark");
+    let req = Request::build("textDocument/prepareRename")
+        .params(
+            serde_json::to_value(TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: pos,
+            })
+            .unwrap(),
+        )
+        .id(1)
+        .finish();
+
+    let result = send_request_for_result(&mut service, req).await;
+    assert!(result.is_some());
+}
+
+#[tokio::test]
+async fn test_did_change_configuration_disables_color_provider() {
+    let (mut service, _diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Url::parse("file:///colors.scss").unwrap();
+    open_document(
+        &mut service,
+        uri.clone(),
+        "scss",
+        ":root { --primary: #ff0000; } .x { color: var(--primary); }",
+        1,
+    )
+    .await;
+
+    // Disable color provider via config change.
+    let params = DidChangeConfigurationParams {
+        settings: serde_json::json!({"enableColorProvider": false}),
+    };
+    send_notification(&mut service, "workspace/didChangeConfiguration", params).await;
+
+    let req = Request::build("textDocument/documentColor")
+        .params(serde_json::json!({"textDocument": {"uri": uri}}))
+        .id(2)
+        .finish();
+
+    let result = send_request_for_result(&mut service, req).await;
+    let colors: Vec<serde_json::Value> = serde_json::from_value(result.unwrap()).unwrap();
+    assert_eq!(colors.len(), 0);
+}
+
+#[tokio::test]
+async fn test_did_delete_files_triggers_revalidation() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let index_uri = Url::parse("file:///index.scss").unwrap();
+    let vars_uri = Url::parse("file:///vars.scss").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "scss",
+        ":root { --dark: #000; }",
+        1,
+    )
+    .await;
+
+    open_document(
+        &mut service,
+        index_uri.clone(),
+        "scss",
+        ".card { color: var(--dark); }",
+        1,
+    )
+    .await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 0);
+
+    // Simulate deletion of vars file.
+    let params = DeleteFilesParams {
+        files: vec![FileDelete {
+            uri: vars_uri.to_string(),
+        }],
+    };
+    send_notification(&mut service, "workspace/didDeleteFiles", params).await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
 }
 
 #[tokio::test]

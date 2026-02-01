@@ -7,13 +7,15 @@ use tokio::sync::RwLock;
 use tower_lsp::lsp_types::{
     ColorInformation, ColorPresentation, ColorPresentationParams, ColorProviderCapability,
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    CreateFilesParams, DeleteFilesParams, Diagnostic, DiagnosticSeverity,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentColorParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     FileChangeType, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
     HoverParams, InitializeParams, InitializeResult, Location, MarkupContent, MarkupKind,
-    MessageType, OneOf, Position, Range, ReferenceParams, RenameParams, ServerCapabilities,
-    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    MessageType, OneOf, Position, PrepareRenameResponse, Range, ReferenceParams, RenameFilesParams,
+    RenameOptions, RenameParams, ServerCapabilities, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentPositionParams, TextDocumentSyncCapability,
     TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions, WorkspaceEdit, WorkspaceFolder,
     WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities, WorkspaceSymbolParams,
 };
@@ -29,6 +31,31 @@ use crate::specificity::{
     sort_by_cascade,
 };
 use crate::types::{position_to_offset, Config};
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientConfigPatch {
+    lookup_files: Option<Vec<String>>,
+    ignore_globs: Option<Vec<String>>,
+    enable_color_provider: Option<bool>,
+    color_only_on_variables: Option<bool>,
+}
+
+fn apply_config_patch(mut base: Config, patch: ClientConfigPatch) -> Config {
+    if let Some(lookup_files) = patch.lookup_files {
+        base.lookup_files = lookup_files;
+    }
+    if let Some(ignore_globs) = patch.ignore_globs {
+        base.ignore_globs = ignore_globs;
+    }
+    if let Some(enable_color_provider) = patch.enable_color_provider {
+        base.enable_color_provider = enable_color_provider;
+    }
+    if let Some(color_only_on_variables) = patch.color_only_on_variables {
+        base.color_only_on_variables = color_only_on_variables;
+    }
+    base
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DocumentKind {
@@ -47,7 +74,8 @@ pub struct CssVariableLsp {
     has_diagnostic_related_information: Arc<RwLock<bool>>,
     usage_regex: Regex,
     var_usage_regex: Regex,
-    lookup_extension_map: HashMap<String, DocumentKind>,
+    lookup_extension_map: Arc<RwLock<HashMap<String, DocumentKind>>>,
+    live_config: Arc<RwLock<Config>>,
     document_language_map: Arc<RwLock<HashMap<Url, String>>>,
     document_usage_map: Arc<RwLock<HashMap<Url, HashSet<String>>>>,
     usage_index: Arc<RwLock<HashMap<String, HashSet<Url>>>>,
@@ -57,6 +85,7 @@ impl CssVariableLsp {
     pub fn new(client: Client, runtime_config: RuntimeConfig) -> Self {
         let config = Config::from_runtime(&runtime_config);
         let lookup_extension_map = build_lookup_extension_map(&config.lookup_files);
+        let live_config = config.clone();
         Self {
             client,
             manager: Arc::new(CssVariableManager::new(config)),
@@ -68,7 +97,8 @@ impl CssVariableLsp {
             has_diagnostic_related_information: Arc::new(RwLock::new(false)),
             usage_regex: Regex::new(r"var\((--[\w-]+)(?:\s*,\s*([^)]+))?\)").unwrap(),
             var_usage_regex: Regex::new(r"var\((--[\w-]+)\)").unwrap(),
-            lookup_extension_map,
+            lookup_extension_map: Arc::new(RwLock::new(lookup_extension_map)),
+            live_config: Arc::new(RwLock::new(live_config)),
             document_language_map: Arc::new(RwLock::new(HashMap::new())),
             document_usage_map: Arc::new(RwLock::new(HashMap::new())),
             usage_index: Arc::new(RwLock::new(HashMap::new())),
@@ -93,7 +123,8 @@ impl CssVariableLsp {
         self.manager.remove_document(uri).await;
 
         let path = uri.path();
-        let kind = resolve_document_kind(path, language_id, &self.lookup_extension_map);
+        let lookup_map = self.lookup_extension_map.read().await.clone();
+        let kind = resolve_document_kind(path, language_id, &lookup_map);
         let result = match kind {
             Some(DocumentKind::Html) => parse_html_document(text, uri, &self.manager).await,
             Some(DocumentKind::Css) => parse_css_document(text, uri, &self.manager).await,
@@ -327,7 +358,10 @@ impl LanguageServer for CssVariableLsp {
             hover_provider: Some(tower_lsp::lsp_types::HoverProviderCapability::Simple(true)),
             definition_provider: Some(OneOf::Left(true)),
             references_provider: Some(OneOf::Left(true)),
-            rename_provider: Some(OneOf::Left(true)),
+            rename_provider: Some(OneOf::Right(RenameOptions {
+                prepare_provider: Some(true),
+                work_done_progress_options: WorkDoneProgressOptions::default(),
+            })),
             document_symbol_provider: Some(OneOf::Left(true)),
             workspace_symbol_provider: Some(OneOf::Left(true)),
             color_provider: if self.runtime_config.enable_color_provider {
@@ -342,7 +376,7 @@ impl LanguageServer for CssVariableLsp {
             capabilities.workspace = Some(WorkspaceServerCapabilities {
                 workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                     supported: Some(true),
-                    change_notifications: None,
+                    change_notifications: Some(OneOf::Left(true)),
                 }),
                 file_operations: None,
             });
@@ -371,6 +405,65 @@ impl LanguageServer for CssVariableLsp {
 
     async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
         Ok(())
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        // We accept either:
+        // - a flat object matching Config fields
+        // - or a namespaced object { "cssVariableLsp": { ... } }
+        let patch =
+            serde_json::from_value::<ClientConfigPatch>(params.settings.clone()).or_else(|_| {
+                params
+                    .settings
+                    .get("cssVariableLsp")
+                    .cloned()
+                    .ok_or_else(|| {
+                        serde_json::Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "missing cssVariableLsp key",
+                        ))
+                    })
+                    .and_then(|v| serde_json::from_value::<ClientConfigPatch>(v))
+            });
+
+        let patch = match patch {
+            Ok(patch) => patch,
+            Err(err) => {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Failed to parse didChangeConfiguration settings: {}", err),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let mut config = self.live_config.read().await.clone();
+        let prev_lookup_files = config.lookup_files.clone();
+        config = apply_config_patch(config, patch);
+
+        {
+            let mut stored = self.live_config.write().await;
+            *stored = config.clone();
+        }
+
+        self.manager.set_config(config.clone()).await;
+
+        // Update extension map if lookup patterns changed.
+        if config.lookup_files != prev_lookup_files {
+            let new_map = build_lookup_extension_map(&config.lookup_files);
+            let mut stored = self.lookup_extension_map.write().await;
+            *stored = new_map;
+
+            // Patterns changed => rescan workspace folders.
+            if let Ok(Some(folders)) = self.client.workspace_folders().await {
+                self.scan_workspace_folders(folders).await;
+            }
+        }
+
+        // Always revalidate open docs (diagnostics may change due to ignore patterns etc.).
+        self.validate_all_open_documents().await;
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -498,6 +591,52 @@ impl LanguageServer for CssVariableLsp {
         self.validate_all_open_documents().await;
     }
 
+    async fn did_create_files(&self, params: CreateFilesParams) {
+        for file in params.files {
+            let uri = match Url::parse(&file.uri) {
+                Ok(uri) => uri,
+                Err(_) => continue,
+            };
+            if !self.is_document_open(&uri).await {
+                self.update_document_from_disk(&uri).await;
+            }
+        }
+        self.validate_all_open_documents().await;
+    }
+
+    async fn did_rename_files(&self, params: RenameFilesParams) {
+        for file in params.files {
+            let old_uri = match Url::parse(&file.old_uri) {
+                Ok(uri) => uri,
+                Err(_) => continue,
+            };
+            let new_uri = match Url::parse(&file.new_uri) {
+                Ok(uri) => uri,
+                Err(_) => continue,
+            };
+
+            // Remove old document data
+            self.manager.remove_document(&old_uri).await;
+
+            // If the new URI is not open, load it from disk.
+            if !self.is_document_open(&new_uri).await {
+                self.update_document_from_disk(&new_uri).await;
+            }
+        }
+        self.validate_all_open_documents().await;
+    }
+
+    async fn did_delete_files(&self, params: DeleteFilesParams) {
+        for file in params.files {
+            let uri = match Url::parse(&file.uri) {
+                Ok(uri) => uri,
+                Err(_) => continue,
+            };
+            self.manager.remove_document(&uri).await;
+        }
+        self.validate_all_open_documents().await;
+    }
+
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
         let mut current_paths = {
             let paths = self.workspace_folder_paths.read().await;
@@ -542,12 +681,13 @@ impl LanguageServer for CssVariableLsp {
             let langs = self.document_language_map.read().await;
             langs.get(&uri).cloned()
         };
+        let lookup_map = self.lookup_extension_map.read().await.clone();
         let context = completion_value_context_slice(
             &text,
             position,
             language_id.as_deref(),
             &uri,
-            &self.lookup_extension_map,
+            &lookup_map,
         );
         let context = match context {
             Some(context) => context,
@@ -922,6 +1062,74 @@ impl LanguageServer for CssVariableLsp {
             return Ok(Vec::new());
         }
         Ok(generate_color_presentations(params.color, params.range))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+
+        let text = {
+            let docs = self.document_map.read().await;
+            docs.get(&uri).cloned()
+        };
+        let text = match text {
+            Some(text) => text,
+            None => return Ok(None),
+        };
+
+        let name = match self.get_word_at_position(&text, position) {
+            Some(name) => name,
+            None => return Ok(None),
+        };
+
+        // Prefer the precise name range when available.
+        let definitions = self.manager.get_variables(&name).await;
+        let range = definitions
+            .first()
+            .and_then(|d| d.name_range)
+            .unwrap_or_else(|| {
+                // Fallback to the word bounds at the cursor position.
+                // We intentionally return the cursor word selection rather than the whole declaration.
+                let offset = position_to_offset(&text, position).unwrap_or(0);
+                let offset = clamp_to_char_boundary(&text, offset);
+
+                let before = &text[..offset];
+                let after = &text[offset..];
+
+                // Compute byte indices for the word under the cursor.
+                // We do this manually because LSP positions are UTF-16 based.
+                //
+                // Note: get_word_at_position already verifies we're on a `--var`.
+                // So the scan boundaries are safe for our token definition.
+
+                // Simpler: recompute via byte indices using char_indices
+                let mut start_byte = offset;
+                for (i, c) in before.char_indices().rev() {
+                    if is_word_char(c) {
+                        start_byte = i;
+                    } else {
+                        break;
+                    }
+                }
+                let mut end_byte = offset;
+                for (i, c) in after.char_indices() {
+                    if is_word_char(c) {
+                        end_byte = offset + i + c.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+
+                Range::new(
+                    crate::types::offset_to_position(&text, start_byte),
+                    crate::types::offset_to_position(&text, end_byte),
+                )
+            });
+
+        Ok(Some(PrepareRenameResponse::Range(range)))
     }
 
     async fn rename(

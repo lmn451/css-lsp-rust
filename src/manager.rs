@@ -168,6 +168,12 @@ impl CssVariableManager {
     pub async fn get_config(&self) -> Config {
         self.config.read().await.clone()
     }
+
+    /// Replace the current configuration.
+    pub async fn set_config(&self, config: Config) {
+        let mut stored = self.config.write().await;
+        *stored = config;
+    }
 }
 
 fn extract_var_reference(value: &str) -> Option<String> {

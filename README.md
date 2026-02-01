@@ -7,11 +7,26 @@ A Language Server Protocol implementation for CSS Variables, written in Rust.
 This is a ground-up Rust rewrite of the TypeScript/Node-based `css-variable-lsp`, eliminating the Node/npm dependency for the Zed extension.
 
 ### Features
+
 - CSS parsing for variable definitions and `var()` usage tracking
 - HTML parsing for `<style>` blocks and inline styles (custom DOM scanner)
 - Cascade sorting and specificity calculation
 - LSP features: completion, hover, definition, references, rename, diagnostics, document/workspace symbols
 - Workspace scanning and color provider (hex/rgb/hsl + named colors)
+
+## Autocomplete Contexts
+
+TypeScript LSP (`css-variable-lsp`):
+- Triggers on `-`, `(`, and `:`.
+- Returns items only in CSS value contexts (after a `:` and before the next `;`).
+- CSS-like files: inside rules/declarations (requires `{}` context).
+- HTML-like files: inside `style="..."` attributes or `<style>...</style>` blocks.
+- JS/TS/JSX/TSX: only inside string literals or template literal text (not inside `${...}`).
+- Insert text: `--name` if already inside `var(`, otherwise `var(--name)`.
+
+Rust LSP (this repo):
+- Matches the TypeScript LSP behavior above.
+- Document kind detection uses language ID when available, otherwise extensions derived from `lookupFiles`.
 
 ## Building
 
