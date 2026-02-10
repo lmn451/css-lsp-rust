@@ -25,14 +25,14 @@ use tower_lsp::{Client, LanguageServer};
 
 use crate::color::{generate_color_presentations, parse_color};
 use crate::manager::CssVariableManager;
-use crate::parsers::{parse_css_document, parse_html_document};
+use crate::parsers::{parse_css_document, parse_html_document, parse_scss_document};
 use crate::path_display::{format_uri_for_display, to_normalized_fs_path, PathDisplayOptions};
 use crate::runtime_config::{RuntimeConfig, UndefinedVarFallbackMode};
 use crate::specificity::{
     calculate_specificity, compare_specificity, format_specificity, matches_context,
     sort_by_cascade,
 };
-use crate::types::{position_to_offset, Config};
+use crate::types::{position_to_offset, Config, VariableKind};
 
 fn code_actions_for_undefined_variables(
     uri: &Url,
@@ -159,6 +159,7 @@ fn apply_config_patch(mut base: Config, patch: ClientConfigPatch) -> Config {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DocumentKind {
     Css,
+    Scss,
     Html,
 }
 
@@ -173,6 +174,7 @@ pub struct CssVariableLsp {
     has_diagnostic_related_information: Arc<RwLock<bool>>,
     usage_regex: Regex,
     var_usage_regex: Regex,
+    scss_usage_regex: Regex,
     lookup_extension_map: Arc<RwLock<HashMap<String, DocumentKind>>>,
     live_config: Arc<RwLock<Config>>,
     document_language_map: Arc<RwLock<HashMap<Url, String>>>,
@@ -196,6 +198,8 @@ impl CssVariableLsp {
             has_diagnostic_related_information: Arc::new(RwLock::new(false)),
             usage_regex: Regex::new(r"var\((--[\w-]+)(?:\s*,\s*([^)]+))?\)").unwrap(),
             var_usage_regex: Regex::new(r"var\((--[\w-]+)\)").unwrap(),
+            // SCSS variable usage: $variable-name (but not $variable: which is a definition)
+            scss_usage_regex: Regex::new(r"\$[\w-]+").unwrap(),
             lookup_extension_map: Arc::new(RwLock::new(lookup_extension_map)),
             live_config: Arc::new(RwLock::new(live_config)),
             document_language_map: Arc::new(RwLock::new(HashMap::new())),
@@ -226,6 +230,7 @@ impl CssVariableLsp {
         let kind = resolve_document_kind(path, language_id, &lookup_map);
         let result = match kind {
             Some(DocumentKind::Html) => parse_html_document(text, uri, &self.manager).await,
+            Some(DocumentKind::Scss) => parse_scss_document(text, uri, &self.manager).await,
             Some(DocumentKind::Css) => parse_css_document(text, uri, &self.manager).await,
             None => return,
         };
@@ -243,6 +248,7 @@ impl CssVariableLsp {
             &self.client,
             self.manager.as_ref(),
             &self.usage_regex,
+            &self.scss_usage_regex,
             self.runtime_config.undefined_var_fallback,
             has_related_info,
             uri,
@@ -267,6 +273,7 @@ impl CssVariableLsp {
                 &self.client,
                 self.manager.as_ref(),
                 &self.usage_regex,
+                &self.scss_usage_regex,
                 self.runtime_config.undefined_var_fallback,
                 has_related_info,
                 &uri,
@@ -336,11 +343,34 @@ impl CssVariableLsp {
             .unwrap_or("");
         let right = after.split(|c: char| !is_word_char(c)).next().unwrap_or("");
         let word = format!("{}{}", left, right);
+
+        // Check for CSS custom property (--var)
         if word.starts_with("--") {
-            Some(word)
-        } else {
-            None
+            return Some(word);
         }
+
+        // Check for SCSS variable ($var) - need to look one char before
+        if !before.is_empty() {
+            let char_before = before.chars().last();
+            if char_before == Some('$') {
+                return Some(format!("${}", word));
+            }
+        }
+
+        // Check if we're directly on the $ character
+        if offset < text.len() && text.as_bytes().get(offset) == Some(&b'$') {
+            // Get the word after $
+            let after_dollar = &text[offset + 1..];
+            let var_name: String = after_dollar
+                .chars()
+                .take_while(|c| is_word_char(*c))
+                .collect();
+            if !var_name.is_empty() {
+                return Some(format!("${}", var_name));
+            }
+        }
+
+        None
     }
 
     async fn is_document_open(&self, uri: &Url) -> bool {
@@ -385,6 +415,7 @@ impl CssVariableLsp {
                 &self.client,
                 self.manager.as_ref(),
                 &self.usage_regex,
+                &self.scss_usage_regex,
                 self.runtime_config.undefined_var_fallback,
                 has_related_info,
                 &uri,
@@ -451,7 +482,12 @@ impl LanguageServer for CssVariableLsp {
             )),
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(true),
-                trigger_characters: Some(vec!["-".to_string(), "(".to_string(), ":".to_string()]),
+                trigger_characters: Some(vec![
+                    "-".to_string(),
+                    "(".to_string(),
+                    ":".to_string(),
+                    "$".to_string(),
+                ]),
                 work_done_progress_options: WorkDoneProgressOptions::default(),
                 all_commit_characters: None,
                 completion_item: None,
@@ -828,6 +864,9 @@ impl LanguageServer for CssVariableLsp {
         let workspace_folder_paths = self.workspace_folder_paths.read().await.clone();
         let root_folder_path = self.root_folder_path.read().await.clone();
 
+        let is_scss = resolve_document_kind(uri.path(), language_id.as_deref(), &lookup_map)
+            == Some(DocumentKind::Scss);
+
         let items = scored_vars
             .into_iter()
             .map(|(_, var)| {
@@ -837,7 +876,7 @@ impl LanguageServer for CssVariableLsp {
                     workspace_folder_paths: &workspace_folder_paths,
                     root_folder_path: root_folder_path.as_ref(),
                 };
-                let insert_text = if in_var_context {
+                let insert_text = if in_var_context || is_scss || var.kind == VariableKind::Scss {
                     var.name.clone()
                 } else {
                     format!("var({})", var.name)
@@ -912,7 +951,16 @@ impl LanguageServer for CssVariableLsp {
 
         sort_by_cascade(&mut definitions);
 
-        let mut hover_text = format!("### CSS Variable: `{}`\n\n", word);
+        let is_scss_var = definitions
+            .first()
+            .map(|v| v.kind == VariableKind::Scss)
+            .unwrap_or(false);
+        let var_label = if is_scss_var {
+            "SCSS Variable"
+        } else {
+            "CSS Variable"
+        };
+        let mut hover_text = format!("### {}: `{}`\n\n", var_label, word);
 
         if definitions.len() == 1 {
             let var = &definitions[0];
@@ -1457,6 +1505,7 @@ async fn validate_document_text_with(
     client: &Client,
     manager: &CssVariableManager,
     usage_regex: &Regex,
+    scss_usage_regex: &Regex,
     undefined_var_fallback: UndefinedVarFallbackMode,
     has_related_info: bool,
     uri: &Url,
@@ -1468,6 +1517,7 @@ async fn validate_document_text_with(
     let mut current_usages = HashSet::new();
     let default_severity = DiagnosticSeverity::WARNING;
 
+    // Check CSS var() usages
     for captures in usage_regex.captures_iter(text) {
         let match_all = captures.get(0).unwrap();
         let name = captures.get(1).unwrap().as_str();
@@ -1524,6 +1574,56 @@ async fn validate_document_text_with(
         });
     }
 
+    // Check SCSS $variable usages
+    for mat in scss_usage_regex.find_iter(text) {
+        let name = mat.as_str();
+        let match_start = mat.start();
+        let match_end = mat.end();
+
+        // Skip if this is a definition (followed by :)
+        let after = &text[match_end..];
+        let trimmed_after = after.trim_start();
+        if trimmed_after.starts_with(':') {
+            continue;
+        }
+
+        current_usages.insert(name.to_string());
+
+        let definitions = manager.get_variables(name).await;
+        if !definitions.is_empty() {
+            continue;
+        }
+
+        let range = Range::new(
+            crate::types::offset_to_position(text, match_start),
+            crate::types::offset_to_position(text, match_end),
+        );
+        diagnostics.push(Diagnostic {
+            range,
+            severity: Some(default_severity),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                "css-variable-lsp.undefined-variable".to_string(),
+            )),
+            code_description: None,
+            source: Some("css-variable-lsp".to_string()),
+            message: format!("SCSS variable '{}' is not defined in the workspace", name),
+            related_information: if has_related_info {
+                Some(Vec::new())
+            } else {
+                None
+            },
+            tags: None,
+            data: Some(serde_json::json!({
+                "name": name,
+                "hasFallback": false,
+                "range": {
+                    "start": { "line": range.start.line, "character": range.start.character },
+                    "end": { "line": range.end.line, "character": range.end.character }
+                }
+            })),
+        });
+    }
+
     // Update usage maps
     {
         let mut usage_map = document_usage_map.write().await;
@@ -1566,7 +1666,8 @@ fn is_html_like_extension(ext: &str) -> bool {
 fn language_id_kind(language_id: &str) -> Option<DocumentKind> {
     match language_id.to_lowercase().as_str() {
         "html" | "vue" | "svelte" | "astro" | "ripple" => Some(DocumentKind::Html),
-        "css" | "scss" | "sass" | "less" => Some(DocumentKind::Css),
+        "scss" | "sass" => Some(DocumentKind::Scss),
+        "css" | "less" => Some(DocumentKind::Css),
         _ => None,
     }
 }
@@ -1600,6 +1701,8 @@ fn build_lookup_extension_map(lookup_files: &[String]) -> HashMap<String, Docume
         for ext in extract_extensions(pattern) {
             let kind = if is_html_like_extension(&ext) {
                 DocumentKind::Html
+            } else if is_scss_like_extension(&ext) {
+                DocumentKind::Scss
             } else {
                 DocumentKind::Css
             };
@@ -1607,6 +1710,10 @@ fn build_lookup_extension_map(lookup_files: &[String]) -> HashMap<String, Docume
         }
     }
     map
+}
+
+fn is_scss_like_extension(ext: &str) -> bool {
+    matches!(ext.to_lowercase().as_str(), ".scss" | ".sass")
 }
 
 fn resolve_document_kind(
@@ -1718,7 +1825,7 @@ fn completion_value_context_slice<'a>(
 
     match resolve_document_kind(uri.path(), language_id, lookup_extension_map) {
         Some(DocumentKind::Html) => find_html_style_context_slice(before_cursor),
-        Some(DocumentKind::Css) => Some(CompletionContextSlice {
+        Some(DocumentKind::Css) | Some(DocumentKind::Scss) => Some(CompletionContextSlice {
             slice: before_cursor,
             allow_without_braces: false,
         }),
@@ -2410,8 +2517,9 @@ mod tests {
         ];
         let lookup_map = build_lookup_extension_map(&lookup_files);
 
-        let css_kind = resolve_document_kind("styles.scss", None, &lookup_map);
-        assert_eq!(css_kind, Some(DocumentKind::Css));
+        // .scss files should now be detected as Scss kind
+        let scss_kind = resolve_document_kind("styles.scss", None, &lookup_map);
+        assert_eq!(scss_kind, Some(DocumentKind::Scss));
 
         let html_kind = resolve_document_kind("component.vue", None, &lookup_map);
         assert_eq!(html_kind, Some(DocumentKind::Html));

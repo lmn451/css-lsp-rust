@@ -1,7 +1,7 @@
 use tower_lsp::lsp_types::{Range, Url};
 
 use crate::manager::CssVariableManager;
-use crate::types::{offset_to_position, CssVariable, CssVariableUsage, DOMNodeInfo};
+use crate::types::{offset_to_position, CssVariable, CssVariableUsage, DOMNodeInfo, VariableKind};
 
 /// Configuration for parsing CSS snippets
 pub struct CssParseContext<'a> {
@@ -242,6 +242,10 @@ async fn extract_definitions(
                 important: value.to_lowercase().contains("!important"),
                 inline,
                 source_position: abs_name_start,
+                kind: VariableKind::Css,
+                is_default: false,
+                is_global: false,
+                scope: None,
             };
 
             manager.add_variable(variable).await;
@@ -421,6 +425,7 @@ async fn extract_usages(
                     )),
                     usage_context,
                     dom_node: dom_node.clone(),
+                    kind: VariableKind::Css,
                 };
                 manager.add_usage(usage).await;
             }

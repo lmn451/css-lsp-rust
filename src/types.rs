@@ -3,10 +3,30 @@ use tower_lsp::lsp_types::{Position, Range, Url};
 
 use crate::runtime_config::RuntimeConfig;
 
+/// The kind of variable (CSS custom property or SCSS variable)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VariableKind {
+    /// CSS custom property (--variable)
+    #[default]
+    Css,
+    /// SCSS variable ($variable)
+    Scss,
+}
+
+impl VariableKind {
+    /// Returns the prefix character for this variable kind
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            VariableKind::Css => "--",
+            VariableKind::Scss => "$",
+        }
+    }
+}
+
 /// Represents a CSS variable definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CssVariable {
-    /// Variable name (e.g., "--primary-color")
+    /// Variable name (e.g., "--primary-color" or "$primary-color")
     pub name: String,
 
     /// Variable value (e.g., "#3b82f6")
@@ -15,16 +35,17 @@ pub struct CssVariable {
     /// Document URI where the variable is defined
     pub uri: Url,
 
-    /// Range of the entire declaration (e.g., "--foo: red")
+    /// Range of the entire declaration (e.g., "--foo: red" or "$foo: red")
     pub range: Range,
 
-    /// Range of just the variable name (e.g., "--foo")
+    /// Range of just the variable name (e.g., "--foo" or "$foo")
     pub name_range: Option<Range>,
 
     /// Range of just the value part (e.g., "red")
     pub value_range: Option<Range>,
 
     /// CSS selector where this variable is defined (e.g., ":root", "div", ".class")
+    /// For SCSS top-level variables, this will be empty or "global"
     pub selector: String,
 
     /// Whether this definition uses !important
@@ -35,9 +56,30 @@ pub struct CssVariable {
 
     /// Character position in file (for source order in cascade)
     pub source_position: usize,
+
+    /// The kind of variable (CSS or SCSS)
+    #[serde(default)]
+    pub kind: VariableKind,
+
+    /// Whether this SCSS variable uses !default flag
+    #[serde(default)]
+    pub is_default: bool,
+
+    /// Whether this SCSS variable uses !global flag
+    #[serde(default)]
+    pub is_global: bool,
+
+    /// The scope of this variable (for SCSS scoping)
+    /// - None or empty: global scope
+    /// - Some("mixin:name"): defined inside a mixin
+    /// - Some("function:name"): defined inside a function
+    /// - Some("rule:selector"): defined inside a rule block
+    /// - Some("if"), Some("each"), Some("for"), Some("while"): control flow blocks
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
-/// Represents a CSS variable usage (var() call)
+/// Represents a CSS variable usage (var() call or $variable reference)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CssVariableUsage {
     /// Variable name being used
@@ -46,10 +88,10 @@ pub struct CssVariableUsage {
     /// Document URI where the variable is used
     pub uri: Url,
 
-    /// Range of the var() call
+    /// Range of the var() call or $variable reference
     pub range: Range,
 
-    /// Range of just the variable name in var()
+    /// Range of just the variable name in var() or the $variable
     pub name_range: Option<Range>,
 
     /// CSS selector context where variable is used
@@ -57,6 +99,10 @@ pub struct CssVariableUsage {
 
     /// DOM node info if usage is in HTML (for inline styles)
     pub dom_node: Option<DOMNodeInfo>,
+
+    /// The kind of variable (CSS or SCSS)
+    #[serde(default)]
+    pub kind: VariableKind,
 }
 
 /// Information about a DOM node

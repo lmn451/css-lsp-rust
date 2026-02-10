@@ -232,6 +232,10 @@ mod tests {
             important: false,
             inline: false,
             source_position: 0,
+            kind: crate::types::VariableKind::Css,
+            is_default: false,
+            is_global: false,
+            scope: None,
         }
     }
 
@@ -243,6 +247,7 @@ mod tests {
             uri: Url::parse(uri).unwrap(),
             usage_context: context.to_string(),
             dom_node: None,
+            kind: crate::types::VariableKind::Css,
         }
     }
 

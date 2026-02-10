@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::Url;
 use walkdir::WalkDir;
 
 use crate::manager::CssVariableManager;
-use crate::parsers::{parse_css_document, parse_html_document};
+use crate::parsers::{parse_css_document, parse_html_document, parse_scss_document};
 
 /// Statistics collected during workspace scanning
 #[derive(Debug, Default)]
@@ -177,11 +177,11 @@ pub async fn scan_workspace(
             || path_str.ends_with(".ripple")
         {
             parse_html_document(&content, &file_uri, manager).await
-        } else if path_str.ends_with(".css")
-            || path_str.ends_with(".scss")
-            || path_str.ends_with(".sass")
-            || path_str.ends_with(".less")
-        {
+        } else if path_str.ends_with(".scss") || path_str.ends_with(".sass") {
+            // SCSS/SASS files: parse both $variables and --css-variables
+            parse_scss_document(&content, &file_uri, manager).await
+        } else if path_str.ends_with(".css") || path_str.ends_with(".less") {
+            // CSS and LESS files: parse only --css-variables
             parse_css_document(&content, &file_uri, manager).await
         } else {
             continue;
