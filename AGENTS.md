@@ -81,7 +81,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tower_lsp::lsp_types::*;
+use ls_types::*;
 
 // Local imports (alphabetical)
 use crate::manager::CssVariableManager;
@@ -163,9 +163,9 @@ pub fn parse_value(value: &str) -> Result<ParsedValue, String> {
 let config = runtime_config.as_ref()
     .expect("RuntimeConfig should be set during initialization");
 
-// For LSP protocol errors, return tower_lsp::jsonrpc::Result
+// For LSP protocol errors, return tower_lsp_server::jsonrpc::Result
 async fn hover(&self, params: HoverParams)
-    -> tower_lsp::jsonrpc::Result<Option<Hover>>
+    -> tower_lsp_server::jsonrpc::Result<Option<Hover>>
 {
     // Implementation
     Ok(Some(hover_info))

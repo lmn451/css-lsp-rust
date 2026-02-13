@@ -1,7 +1,7 @@
 use globset::{Glob, GlobSetBuilder};
+use ls_types::Uri;
 use std::fs;
 use std::path::PathBuf;
-use tower_lsp::lsp_types::Url;
 use walkdir::WalkDir;
 
 use crate::manager::CssVariableManager;
@@ -9,7 +9,7 @@ use crate::parsers::{parse_css_document, parse_html_document};
 
 /// Scan workspace folders for CSS and HTML files
 pub async fn scan_workspace(
-    folders: Vec<Url>,
+    folders: Vec<Uri>,
     manager: &CssVariableManager,
     mut on_progress: impl FnMut(usize, usize),
 ) -> Result<(), String> {
@@ -41,7 +41,7 @@ pub async fn scan_workspace(
     let mut all_files = Vec::new();
 
     for folder_uri in folders {
-        let folder_path = PathBuf::from(folder_uri.path());
+        let folder_path = PathBuf::from(folder_uri.path().as_str());
 
         for entry in WalkDir::new(&folder_path)
             .follow_links(false)
@@ -90,9 +90,9 @@ pub async fn scan_workspace(
         };
 
         // Convert to URI
-        let file_uri = match Url::from_file_path(file_path) {
-            Ok(u) => u,
-            Err(_) => continue,
+        let file_uri = match Uri::from_file_path(file_path) {
+            Some(u) => u,
+            None => continue,
         };
 
         // Determine file type and parse

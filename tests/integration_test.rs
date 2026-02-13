@@ -1,14 +1,15 @@
 use css_variable_lsp::manager::CssVariableManager;
 use css_variable_lsp::parsers::{parse_css_document, parse_html_document};
 use css_variable_lsp::types::Config;
-use tower_lsp::lsp_types::Url;
+use ls_types::Uri;
+use std::str::FromStr;
 
 /// Integration test: Full CSS variable workflow
 #[tokio::test]
 async fn test_css_variable_full_workflow() {
     let manager = CssVariableManager::new(Config::default());
-    let css_uri = Url::parse("file:///test.css").unwrap();
-    let html_uri = Url::parse("file:///test.html").unwrap();
+    let css_uri = Uri::from_str("file:///test.css").unwrap();
+    let html_uri = Uri::from_str("file:///test.html").unwrap();
 
     // Parse CSS file with variable definitions
     let css_content = r#"
@@ -98,7 +99,7 @@ async fn test_css_variable_full_workflow() {
 #[tokio::test]
 async fn test_cascade_ordering() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///cascade.css").unwrap();
+    let uri = Uri::from_str("file:///cascade.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -141,7 +142,7 @@ async fn test_cascade_ordering() {
 #[tokio::test]
 async fn test_color_resolution_chain() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///colors.css").unwrap();
+    let uri = Uri::from_str("file:///colors.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -173,7 +174,7 @@ async fn test_color_resolution_chain() {
 #[tokio::test]
 async fn test_color_resolution_with_fallbacks() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///fallbacks.css").unwrap();
+    let uri = Uri::from_str("file:///fallbacks.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -200,14 +201,14 @@ async fn test_multiple_file_types() {
     let manager = CssVariableManager::new(Config::default());
 
     // CSS file
-    let css_uri = Url::parse("file:///styles.css").unwrap();
+    let css_uri = Uri::from_str("file:///styles.css").unwrap();
     let css_content = ":root { --css-var: blue; }";
     parse_css_document(css_content, &css_uri, &manager)
         .await
         .unwrap();
 
     // HTML file
-    let html_uri = Url::parse("file:///index.html").unwrap();
+    let html_uri = Uri::from_str("file:///index.html").unwrap();
     let html_content = r#"
         <style>:root { --html-var: red; }</style>
         <div style="--inline-var: green;"></div>
@@ -230,7 +231,7 @@ async fn test_multiple_file_types() {
 #[tokio::test]
 async fn test_var_fallback_handling() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///fallback.css").unwrap();
+    let uri = Uri::from_str("file:///fallback.css").unwrap();
 
     let css_content = r#"
         .button {
@@ -263,7 +264,7 @@ async fn test_var_fallback_handling() {
 #[tokio::test]
 async fn test_css_variables_in_media_queries() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///media.css").unwrap();
+    let uri = Uri::from_str("file:///media.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -308,7 +309,7 @@ async fn test_css_variables_in_media_queries() {
 #[tokio::test]
 async fn test_css_variables_in_keyframes() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///keyframes.css").unwrap();
+    let uri = Uri::from_str("file:///keyframes.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -354,7 +355,7 @@ async fn test_css_variables_in_keyframes() {
 #[tokio::test]
 async fn test_complex_css_selectors() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///complex.css").unwrap();
+    let uri = Uri::from_str("file:///complex.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -401,7 +402,7 @@ async fn test_complex_css_selectors() {
 #[tokio::test]
 async fn test_css_variables_in_calc_expressions() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///calc.css").unwrap();
+    let uri = Uri::from_str("file:///calc.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -443,7 +444,7 @@ async fn test_css_variables_in_calc_expressions() {
 #[tokio::test]
 async fn test_css_variables_in_layout_properties() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///layout.css").unwrap();
+    let uri = Uri::from_str("file:///layout.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -496,7 +497,7 @@ async fn test_css_variables_in_layout_properties() {
 #[tokio::test]
 async fn test_css_custom_properties_edge_cases() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///edge-cases.css").unwrap();
+    let uri = Uri::from_str("file:///edge-cases.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -551,7 +552,7 @@ async fn test_css_custom_properties_edge_cases() {
 #[tokio::test]
 async fn test_lsp_rename_functionality() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///rename-test.css").unwrap();
+    let uri = Uri::from_str("file:///rename-test.css").unwrap();
 
     let css_content = r#"
         :root {
@@ -616,7 +617,7 @@ async fn test_lsp_rename_functionality() {
 #[tokio::test]
 async fn test_lsp_rename_preserves_fallbacks() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///fallback-rename.css").unwrap();
+    let uri = Uri::from_str("file:///fallback-rename.css").unwrap();
 
     let css_content = r#"
         :root {

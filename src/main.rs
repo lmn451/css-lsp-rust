@@ -1,5 +1,5 @@
 use css_variable_lsp::{lsp_server, runtime_config};
-use tower_lsp::{LspService, Server};
+use tower_lsp_server::{LspService, Server};
 
 fn init_tracing() {
     // Keep logs opt-in so LSP stdio cannot be polluted in editor integrations.

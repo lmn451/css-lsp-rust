@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::{Range, Url};
+use ls_types::{Range, Uri};
 
 use crate::manager::CssVariableManager;
 use crate::types::{offset_to_position, CssVariable, CssVariableUsage, DOMNodeInfo};
@@ -7,7 +7,7 @@ use crate::types::{offset_to_position, CssVariable, CssVariableUsage, DOMNodeInf
 pub struct CssParseContext<'a> {
     pub css_text: &'a str,
     pub full_text: &'a str,
-    pub uri: &'a Url,
+    pub uri: &'a Uri,
     pub manager: &'a CssVariableManager,
     pub base_offset: usize,
     pub inline: bool,
@@ -18,7 +18,7 @@ pub struct CssParseContext<'a> {
 /// Parse a CSS document and extract variable definitions and usages
 pub async fn parse_css_document(
     text: &str,
-    uri: &Url,
+    uri: &Uri,
     manager: &CssVariableManager,
 ) -> Result<(), String> {
     let context = CssParseContext {
@@ -62,7 +62,7 @@ pub async fn parse_css_snippet(context: CssParseContext<'_>) -> Result<(), Strin
 async fn extract_definitions(
     css_text: &str,
     full_text: &str,
-    uri: &Url,
+    uri: &Uri,
     manager: &CssVariableManager,
     base_offset: usize,
     inline: bool,
@@ -256,7 +256,7 @@ async fn extract_definitions(
 async fn extract_usages(
     css_text: &str,
     full_text: &str,
-    uri: &Url,
+    uri: &Uri,
     manager: &CssVariableManager,
     base_offset: usize,
     usage_context_override: Option<&str>,
@@ -517,11 +517,12 @@ mod tests {
     use crate::manager::CssVariableManager;
     use crate::types::Config;
     use std::collections::HashSet;
+    use std::str::FromStr;
 
     #[tokio::test]
     async fn parse_css_document_extracts_definitions_and_usages() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
         let text = ":root { --primary: #fff; color: var(--primary); } \
                     .button { --secondary: var(--primary, #000); }";
 
@@ -546,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn parse_css_document_skips_nested_var_fallback_usages() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
         let text = ".button { color: var(--primary, var(--fallback)); }";
 
         parse_css_document(text, &uri, &manager).await.unwrap();
@@ -563,12 +564,13 @@ mod tests {
 mod edge_case_tests {
     use super::*;
     use crate::types::Config;
-    use tower_lsp::lsp_types::Url;
+    use ls_types::Uri;
+    use std::str::FromStr;
 
     #[tokio::test]
     async fn test_parse_empty_css() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///empty.css").unwrap();
+        let uri = Uri::from_str("file:///empty.css").unwrap();
 
         let result = parse_css_document("", &uri, &manager).await;
         assert!(result.is_ok());
@@ -577,7 +579,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_with_comments() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             /* Comment before */
@@ -599,7 +601,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_with_important() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             :root {
@@ -621,7 +623,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_var_with_fallback() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             .button {
@@ -643,7 +645,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_complex_selectors() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             #id .class > div[data-attr="value"]:hover::before {
@@ -666,7 +668,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_multiline_values() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             :root {
@@ -688,7 +690,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_variable_names_with_dashes() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             :root {
@@ -710,7 +712,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_special_characters_in_values() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             :root {
@@ -730,7 +732,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_nested_var_calls() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             .element {
@@ -750,7 +752,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_whitespace_variations() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let css = r#"
             :root{--no-space:value;}
@@ -767,7 +769,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_css_malformed_but_parseable() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         // Missing closing brace, but should still parse what it can
         let css = r#"

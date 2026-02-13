@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::Url;
+use ls_types::Uri;
 
 use super::css::{parse_css_snippet, CssParseContext};
 use crate::dom_tree::DomTree;
@@ -8,7 +8,7 @@ use crate::types::DOMNodeInfo;
 /// Parse an HTML document and extract CSS from style blocks and inline styles
 pub async fn parse_html_document(
     text: &str,
-    uri: &Url,
+    uri: &Uri,
     manager: &CssVariableManager,
 ) -> Result<(), String> {
     let parsed = DomTree::parse(text);
@@ -58,11 +58,12 @@ mod tests {
     use crate::manager::CssVariableManager;
     use crate::types::Config;
     use std::collections::HashSet;
+    use std::str::FromStr;
 
     #[tokio::test]
     async fn parse_html_document_extracts_definitions_and_usages() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
         let text = r#"
             <style>
                 :root { --primary: #fff; }
@@ -94,12 +95,13 @@ mod tests {
 mod edge_case_tests {
     use super::*;
     use crate::types::Config;
-    use tower_lsp::lsp_types::Url;
+    use ls_types::Uri;
+    use std::str::FromStr;
 
     #[tokio::test]
     async fn test_parse_empty_html() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///empty.html").unwrap();
+        let uri = Uri::from_str("file:///empty.html").unwrap();
 
         let result = parse_html_document("", &uri, &manager).await;
         assert!(result.is_ok());
@@ -108,7 +110,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_with_multiple_style_blocks() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <html>
@@ -133,7 +135,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_with_inline_styles() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <div style="--inline1: red; color: var(--inline1);">
@@ -154,7 +156,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_mixed_quotes() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <div style="--var1: blue;">Single</div>
@@ -170,7 +172,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_with_comments() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <!-- HTML Comment -->
@@ -190,7 +192,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_malformed() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         // Missing closing tags
         let html = r#"
@@ -205,7 +207,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_script_tags_ignored() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <html>
@@ -227,7 +229,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_empty_style_attribute() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <div style="">Empty</div>
@@ -241,7 +243,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_style_with_media_queries() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <style>
@@ -261,7 +263,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_nested_elements_with_styles() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <div style="--outer: blue;">
@@ -282,7 +284,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_special_characters_in_attributes() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.html").unwrap();
+        let uri = Uri::from_str("file:///test.html").unwrap();
 
         let html = r#"
             <div 
@@ -302,7 +304,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_vue_component() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.vue").unwrap();
+        let uri = Uri::from_str("file:///test.vue").unwrap();
 
         let html = r#"
             <template>
@@ -322,7 +324,7 @@ mod edge_case_tests {
     #[tokio::test]
     async fn test_parse_html_svelte_component() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.svelte").unwrap();
+        let uri = Uri::from_str("file:///test.svelte").unwrap();
 
         let html = r#"
             <div style="--svelte-var: green;">
