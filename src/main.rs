@@ -3,8 +3,11 @@ use tower_lsp::{LspService, Server};
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing for debugging
-    tracing_subscriber::fmt::init();
+    // Initialize tracing for debugging - write to stderr to avoid polluting stdout
+    // (stdout is used for LSP JSON-RPC communication)
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
