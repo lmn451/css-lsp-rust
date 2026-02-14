@@ -495,3 +495,78 @@ async fn test_diagnostics_fallback_off_omits() {
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 0);
 }
+
+#[tokio::test]
+async fn test_will_save_wait_until_returns_no_edits() {
+    let (mut service, _diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Url::parse("file:///index.scss").unwrap();
+    open_document(
+        &mut service,
+        uri.clone(),
+        "scss",
+        ".card { color: var(--dark); }",
+        1,
+    )
+    .await;
+
+    let req = Request::build("textDocument/willSaveWaitUntil")
+        .id(100)
+        .params(serde_json::json!({
+            "textDocument": { "uri": uri },
+            "reason": 1
+        }))
+        .finish();
+
+    let result = send_request_for_result(&mut service, req).await;
+    assert_eq!(result, Some(serde_json::Value::Null));
+}
+
+#[tokio::test]
+async fn test_save_notifications_keep_server_responsive() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Url::parse("file:///index.scss").unwrap();
+    open_document(
+        &mut service,
+        uri.clone(),
+        "scss",
+        ".card { color: var(--dark); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+
+    send_notification(
+        &mut service,
+        "textDocument/willSave",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "reason": 1
+        }),
+    )
+    .await;
+
+    send_notification(
+        &mut service,
+        "textDocument/didSave",
+        serde_json::json!({
+            "textDocument": { "uri": uri }
+        }),
+    )
+    .await;
+
+    change_document(
+        &mut service,
+        uri.clone(),
+        2,
+        ".card { --dark: #000; color: var(--dark); }",
+    )
+    .await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 0);
+}
