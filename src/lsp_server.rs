@@ -11,14 +11,14 @@ use tower_lsp::lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, CreateFilesParams, DeleteFilesParams,
     Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
     DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentColorParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, FileChangeType, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, InitializeParams, InitializeResult, Location, MarkupContent,
-    MarkupKind, MessageType, OneOf, Position, PrepareRenameResponse, Range, ReferenceParams,
-    RenameFilesParams, RenameOptions, RenameParams, ServerCapabilities, SymbolInformation,
-    SymbolKind, TextDocumentContentChangeEvent, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkDoneProgressOptions,
-    WorkspaceEdit, WorkspaceFolder, WorkspaceFoldersServerCapabilities,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentColorParams, DocumentSymbol,
+    DocumentSymbolParams, DocumentSymbolResponse, FileChangeType, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams, InitializeResult,
+    Location, MarkupContent, MarkupKind, MessageType, OneOf, Position, PrepareRenameResponse,
+    Range, ReferenceParams, RenameFilesParams, RenameOptions, RenameParams, ServerCapabilities,
+    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams,
+    WorkDoneProgressOptions, WorkspaceEdit, WorkspaceFolder, WorkspaceFoldersServerCapabilities,
     WorkspaceServerCapabilities, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer};
@@ -628,6 +628,22 @@ impl LanguageServer for CssVariableLsp {
             self.revalidate_affected_documents(&changed_names, Some(&uri))
                 .await;
         }
+    }
+
+    async fn will_save(&self, _params: WillSaveTextDocumentParams) {
+        // No-op: no pre-save mutation required.
+    }
+
+    async fn will_save_wait_until(
+        &self,
+        _params: WillSaveTextDocumentParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
+        // No-op: no pre-save edits to apply.
+        Ok(None)
+    }
+
+    async fn did_save(&self, _params: DidSaveTextDocumentParams) {
+        // No-op: we already parse and validate on open/change notifications.
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
