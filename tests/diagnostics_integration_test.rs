@@ -19,6 +19,7 @@ use tokio::time::{timeout, Duration};
 use tower::{Service, ServiceExt};
 use tower_lsp_server::jsonrpc::Request;
 use tower_lsp_server::LspService;
+use url::Url;
 
 async fn setup_service_with_config(
     runtime_config: RuntimeConfig,
