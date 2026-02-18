@@ -1,7 +1,8 @@
+use ls_types::Uri;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
-use ls_types::Uri;
 
 use ls_types::{
     CodeAction, CodeActionContext, CodeActionKind, CodeActionOrCommand, CodeActionParams,
@@ -639,7 +640,7 @@ impl LanguageServer for CssVariableLsp {
     async fn will_save_wait_until(
         &self,
         _params: WillSaveTextDocumentParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<Vec<TextEdit>>> {
         // No-op: no pre-save edits to apply.
         Ok(None)
     }
