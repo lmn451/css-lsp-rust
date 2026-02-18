@@ -1,23 +1,24 @@
 use css_variable_lsp::lsp_server::CssVariableLsp;
 use css_variable_lsp::runtime_config::{build_runtime_config_with_env, RuntimeConfig};
 use futures::StreamExt;
-use serde::Serialize;
-use std::collections::HashMap;
-use tokio::sync::mpsc::{self, UnboundedReceiver};
-use tokio::time::{timeout, Duration};
-use tower::{Service, ServiceExt};
-use tower_lsp::jsonrpc::Request;
-use tower_lsp::lsp_types::{
+use ls_types::{
     ClientCapabilities, DiagnosticSeverity, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, InitializeParams,
     PublishDiagnosticsParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, Url, VersionedTextDocumentIdentifier,
+    TextDocumentItem, Uri, VersionedTextDocumentIdentifier,
 };
-use tower_lsp::lsp_types::{
+use ls_types::{
     CodeActionContext, CodeActionParams, CodeActionResponse, DeleteFilesParams,
     DidChangeConfigurationParams, FileDelete, Range, TextDocumentPositionParams,
 };
-use tower_lsp::LspService;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::str::FromStr;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::time::{timeout, Duration};
+use tower::{Service, ServiceExt};
+use tower_lsp_server::jsonrpc::Request;
+use tower_lsp_server::LspService;
 
 async fn setup_service_with_config(
     runtime_config: RuntimeConfig,
@@ -53,7 +54,7 @@ async fn send_request_for_result(
     response.and_then(|resp| resp.result().cloned())
 }
 
-fn position_of(text: &str, needle: &str) -> tower_lsp::lsp_types::Position {
+fn position_of(text: &str, needle: &str) -> ls_types::Position {
     let offset = text.find(needle).expect("needle should exist in text");
     css_variable_lsp::types::offset_to_position(text, offset)
 }
@@ -69,9 +70,7 @@ async fn send_notification<P: Serialize>(
     send_request(service, req).await;
 }
 
-async fn initialize(
-    service: &mut LspService<CssVariableLsp>,
-) -> tower_lsp::lsp_types::InitializeResult {
+async fn initialize(service: &mut LspService<CssVariableLsp>) -> ls_types::InitializeResult {
     let params = InitializeParams {
         capabilities: ClientCapabilities::default(),
         ..Default::default()
@@ -89,7 +88,7 @@ async fn initialize(
 
 async fn next_publish_diagnostics_for(
     rx: &mut UnboundedReceiver<Request>,
-    uri: &Url,
+    uri: &Uri,
 ) -> PublishDiagnosticsParams {
     let result = timeout(Duration::from_secs(2), async {
         loop {
@@ -112,7 +111,7 @@ async fn next_publish_diagnostics_for(
 
 async fn open_document(
     service: &mut LspService<CssVariableLsp>,
-    uri: Url,
+    uri: Uri,
     language_id: &str,
     text: &str,
     version: i32,
@@ -130,7 +129,7 @@ async fn open_document(
 
 async fn change_document(
     service: &mut LspService<CssVariableLsp>,
-    uri: Url,
+    uri: Uri,
     version: i32,
     new_text: &str,
 ) {
@@ -145,7 +144,7 @@ async fn change_document(
     send_notification(service, "textDocument/didChange", params).await;
 }
 
-async fn close_document(service: &mut LspService<CssVariableLsp>, uri: Url) {
+async fn close_document(service: &mut LspService<CssVariableLsp>, uri: Uri) {
     let params = DidCloseTextDocumentParams {
         text_document: TextDocumentIdentifier { uri },
     };
@@ -157,8 +156,8 @@ async fn test_diagnostics_revalidate_on_definition_add() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let index_uri = Url::parse("file:///index.scss").unwrap();
-    let vars_uri = Url::parse("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
 
     open_document(
         &mut service,
@@ -190,8 +189,8 @@ async fn test_diagnostics_revalidate_on_definition_remove() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let index_uri = Url::parse("file:///index.scss").unwrap();
-    let vars_uri = Url::parse("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
 
     open_document(
         &mut service,
@@ -226,8 +225,8 @@ async fn test_diagnostics_revalidate_on_definition_close() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let index_uri = Url::parse("file:///index.scss").unwrap();
-    let vars_uri = Url::parse("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
 
     open_document(
         &mut service,
@@ -268,7 +267,7 @@ async fn test_diagnostics_fallback_info_severity() {
     let (mut service, mut diagnostics_rx) = setup_service_with_config(runtime_config).await;
     initialize(&mut service).await;
 
-    let index_uri = Url::parse("file:///index.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
     open_document(
         &mut service,
         index_uri.clone(),
@@ -306,7 +305,7 @@ async fn test_initialize_advertises_workspace_folder_change_notifications() {
     let result = send_request_for_result(&mut service, req)
         .await
         .expect("initialize should return result");
-    let init: tower_lsp::lsp_types::InitializeResult =
+    let init: ls_types::InitializeResult =
         serde_json::from_value(result).expect("initialize result should decode");
 
     let change_notifications = init
@@ -317,7 +316,7 @@ async fn test_initialize_advertises_workspace_folder_change_notifications() {
 
     assert!(matches!(
         change_notifications,
-        Some(tower_lsp::lsp_types::OneOf::Left(true))
+        Some(ls_types::OneOf::Left(true))
     ));
 }
 
@@ -326,7 +325,7 @@ async fn test_prepare_rename_returns_range() {
     let (mut service, _diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///index.scss").unwrap();
+    let uri = Uri::from_str("file:///index.scss").unwrap();
     let text = ".card { color: var(--dark); }";
     open_document(&mut service, uri.clone(), "scss", text, 1).await;
 
@@ -351,7 +350,7 @@ async fn test_did_change_configuration_disables_color_provider() {
     let (mut service, _diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///colors.scss").unwrap();
+    let uri = Uri::from_str("file:///colors.scss").unwrap();
     open_document(
         &mut service,
         uri.clone(),
@@ -382,8 +381,8 @@ async fn test_did_delete_files_triggers_revalidation() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let index_uri = Url::parse("file:///index.scss").unwrap();
-    let vars_uri = Url::parse("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
 
     open_document(
         &mut service,
@@ -423,7 +422,7 @@ async fn test_code_actions_for_undefined_variable() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     let _init = initialize(&mut service).await;
 
-    let uri = Url::parse("file:///index.scss").unwrap();
+    let uri = Uri::from_str("file:///index.scss").unwrap();
     let text = ".card { color: var(--missing); background: var(--missing, #000); }";
     open_document(&mut service, uri.clone(), "scss", text, 1).await;
 
@@ -432,10 +431,7 @@ async fn test_code_actions_for_undefined_variable() {
 
     let params = CodeActionParams {
         text_document: TextDocumentIdentifier { uri: uri.clone() },
-        range: Range::new(
-            tower_lsp::lsp_types::Position::new(0, 0),
-            tower_lsp::lsp_types::Position::new(0, 0),
-        ),
+        range: Range::new(ls_types::Position::new(0, 0), ls_types::Position::new(0, 0)),
         context: CodeActionContext {
             diagnostics: diagnostics.diagnostics,
             only: None,
@@ -460,7 +456,7 @@ async fn test_code_actions_for_undefined_variable() {
     let titles: Vec<String> = actions
         .into_iter()
         .filter_map(|a| match a {
-            tower_lsp::lsp_types::CodeActionOrCommand::CodeAction(ca) => Some(ca.title),
+            ls_types::CodeActionOrCommand::CodeAction(ca) => Some(ca.title),
             _ => None,
         })
         .collect();
@@ -482,7 +478,7 @@ async fn test_diagnostics_fallback_off_omits() {
     let (mut service, mut diagnostics_rx) = setup_service_with_config(runtime_config).await;
     initialize(&mut service).await;
 
-    let index_uri = Url::parse("file:///index.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
     open_document(
         &mut service,
         index_uri.clone(),
@@ -493,5 +489,80 @@ async fn test_diagnostics_fallback_off_omits() {
     .await;
 
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 0);
+}
+
+#[tokio::test]
+async fn test_will_save_wait_until_returns_no_edits() {
+    let (mut service, _diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Uri::from_str("file:///index.scss").unwrap();
+    open_document(
+        &mut service,
+        uri.clone(),
+        "scss",
+        ".card { color: var(--dark); }",
+        1,
+    )
+    .await;
+
+    let req = Request::build("textDocument/willSaveWaitUntil")
+        .id(100)
+        .params(serde_json::json!({
+            "textDocument": { "uri": uri },
+            "reason": 1
+        }))
+        .finish();
+
+    let result = send_request_for_result(&mut service, req).await;
+    assert_eq!(result, Some(serde_json::Value::Null));
+}
+
+#[tokio::test]
+async fn test_save_notifications_keep_server_responsive() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Uri::from_str("file:///index.scss").unwrap();
+    open_document(
+        &mut service,
+        uri.clone(),
+        "scss",
+        ".card { color: var(--dark); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+
+    send_notification(
+        &mut service,
+        "textDocument/willSave",
+        serde_json::json!({
+            "textDocument": { "uri": uri },
+            "reason": 1
+        }),
+    )
+    .await;
+
+    send_notification(
+        &mut service,
+        "textDocument/didSave",
+        serde_json::json!({
+            "textDocument": { "uri": uri }
+        }),
+    )
+    .await;
+
+    change_document(
+        &mut service,
+        uri.clone(),
+        2,
+        ".card { --dark: #000; color: var(--dark); }",
+    )
+    .await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 0);
 }

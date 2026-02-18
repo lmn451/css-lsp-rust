@@ -1,10 +1,21 @@
 use css_variable_lsp::{lsp_server, runtime_config};
-use tower_lsp::{LspService, Server};
+use tower_lsp_server::{LspService, Server};
+
+fn init_tracing() {
+    // Keep logs opt-in so LSP stdio cannot be polluted in editor integrations.
+    if std::env::var_os("CSS_LSP_ENABLE_LOGS").is_none() {
+        return;
+    }
+
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
+}
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing for debugging
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
