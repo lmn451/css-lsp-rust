@@ -6,7 +6,7 @@ use std::time::Instant;
 use css_variable_lsp::manager::CssVariableManager;
 use css_variable_lsp::types::Config;
 use css_variable_lsp::workspace;
-use tower_lsp::lsp_types::Url;
+use ls_types::Uri;
 
 fn env_usize(name: &str, default_value: usize) -> usize {
     env::var(name)
@@ -178,8 +178,8 @@ async fn run() -> Result<(), String> {
     };
     let manager = CssVariableManager::new(config);
 
-    let workspace_url = Url::from_directory_path(&workspace_root)
-        .map_err(|_| "Invalid workspace path".to_string())?;
+    let workspace_url =
+        Uri::from_file_path(&workspace_root).ok_or_else(|| "Invalid workspace path".to_string())?;
 
     let scan_start = Instant::now();
     workspace::scan_workspace(vec![workspace_url], &manager, |_current, _total| {}).await?;

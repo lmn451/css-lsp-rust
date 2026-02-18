@@ -32,7 +32,8 @@ path = "src/main.rs"
 
 [dependencies]
 # LSP framework
-tower-lsp = "0.20"
+tower-lsp-server = "0.23"
+ls-types = "0.0"
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -50,6 +51,7 @@ csscolorparser = "0.6"
 
 # Path handling
 pathdiff = "0.2"
+url = "2.5"
 
 # Logging (optional, for debugging)
 tracing = "0.1"
@@ -58,4 +60,4 @@ regex = "1.10"
 
 [dev-dependencies]
 futures = "0.3"
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }

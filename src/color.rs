@@ -1,5 +1,5 @@
 use csscolorparser::Color as CssColor;
-use tower_lsp::lsp_types::{Color, ColorPresentation, Range, TextEdit};
+use ls_types::{Color, ColorPresentation, Range, TextEdit};
 
 /// Parse a CSS color value and return an LSP Color
 pub fn parse_color(value: &str) -> Option<Color> {
@@ -124,7 +124,7 @@ fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower_lsp::lsp_types::Position;
+    use ls_types::Position;
 
     fn approx_eq(a: f32, b: f32) -> bool {
         (a - b).abs() < 0.01

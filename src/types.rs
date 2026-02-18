@@ -1,5 +1,5 @@
+use ls_types::{Position, Range, Uri};
 use serde::{Deserialize, Serialize};
-use tower_lsp::lsp_types::{Position, Range, Url};
 
 use crate::runtime_config::RuntimeConfig;
 
@@ -13,7 +13,7 @@ pub struct CssVariable {
     pub value: String,
 
     /// Document URI where the variable is defined
-    pub uri: Url,
+    pub uri: Uri,
 
     /// Range of the entire declaration (e.g., "--foo: red")
     pub range: Range,
@@ -44,7 +44,7 @@ pub struct CssVariableUsage {
     pub name: String,
 
     /// Document URI where the variable is used
-    pub uri: Url,
+    pub uri: Uri,
 
     /// Range of the var() call
     pub range: Range,

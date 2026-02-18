@@ -59,7 +59,7 @@ The LSP server communicates via stdin/stdout using the Language Server Protocol.
 ## Architecture
 
 - `main.rs` - Entry point, sets up async runtime and LSP server
-- `lsp_server.rs` - LSP protocol handlers (implements `tower_lsp::LanguageServer`)
+- `lsp_server.rs` - LSP protocol handlers (implements `tower_lsp_server::LanguageServer`)
 - `manager.rs` - CSS variable manager (stores definitions/usages, DOM trees)
 - `types.rs` - Core data types (CssVariable, CssVariableUsage, Config, etc.)
 - `parsers/` - CSS and HTML parsing (definitions + var() usages)
@@ -72,7 +72,7 @@ The LSP server communicates via stdin/stdout using the Language Server Protocol.
 
 ## Dependencies
 
-- `tower-lsp` - LSP server framework
+- `tower-lsp-server` - LSP server framework
 - `tokio` - Async runtime
 - `globset` / `walkdir` - Workspace scanning
 - `csscolorparser` - Color value parsing

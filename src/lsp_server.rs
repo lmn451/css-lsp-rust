@@ -1,10 +1,10 @@
+use ls_types::Uri;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
-use regex::Regex;
-use tokio::sync::RwLock;
-use tower_lsp::lsp_types::{
+use ls_types::{
     CodeAction, CodeActionContext, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, ColorInformation, ColorPresentation,
     ColorPresentationParams, ColorProviderCapability, CompletionItem, CompletionItemKind,
@@ -17,11 +17,13 @@ use tower_lsp::lsp_types::{
     Location, MarkupContent, MarkupKind, MessageType, OneOf, Position, PrepareRenameResponse,
     Range, ReferenceParams, RenameFilesParams, RenameOptions, RenameParams, ServerCapabilities,
     SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WillSaveTextDocumentParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, WillSaveTextDocumentParams,
     WorkDoneProgressOptions, WorkspaceEdit, WorkspaceFolder, WorkspaceFoldersServerCapabilities,
-    WorkspaceServerCapabilities, WorkspaceSymbolParams,
+    WorkspaceServerCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
-use tower_lsp::{Client, LanguageServer};
+use regex::Regex;
+use tokio::sync::RwLock;
+use tower_lsp_server::{Client, LanguageServer};
 
 use crate::color::{generate_color_presentations, parse_color};
 use crate::manager::CssVariableManager;
@@ -35,7 +37,7 @@ use crate::specificity::{
 use crate::types::{position_to_offset, Config};
 
 fn code_actions_for_undefined_variables(
-    uri: &Url,
+    uri: &Uri,
     text: &str,
     context: &CodeActionContext,
 ) -> Vec<CodeActionOrCommand> {
@@ -43,7 +45,7 @@ fn code_actions_for_undefined_variables(
 
     for diag in &context.diagnostics {
         let code = match diag.code.as_ref() {
-            Some(tower_lsp::lsp_types::NumberOrString::String(code)) => code.as_str(),
+            Some(ls_types::NumberOrString::String(code)) => code.as_str(),
             _ => continue,
         };
         if code != "css-variable-lsp.undefined-variable" {
@@ -165,7 +167,7 @@ enum DocumentKind {
 pub struct CssVariableLsp {
     client: Client,
     manager: Arc<CssVariableManager>,
-    document_map: Arc<RwLock<HashMap<Url, String>>>,
+    document_map: Arc<RwLock<HashMap<Uri, String>>>,
     runtime_config: RuntimeConfig,
     workspace_folder_paths: Arc<RwLock<Vec<PathBuf>>>,
     root_folder_path: Arc<RwLock<Option<PathBuf>>>,
@@ -175,9 +177,9 @@ pub struct CssVariableLsp {
     var_usage_regex: Regex,
     lookup_extension_map: Arc<RwLock<HashMap<String, DocumentKind>>>,
     live_config: Arc<RwLock<Config>>,
-    document_language_map: Arc<RwLock<HashMap<Url, String>>>,
-    document_usage_map: Arc<RwLock<HashMap<Url, HashSet<String>>>>,
-    usage_index: Arc<RwLock<HashMap<String, HashSet<Url>>>>,
+    document_language_map: Arc<RwLock<HashMap<Uri, String>>>,
+    document_usage_map: Arc<RwLock<HashMap<Uri, HashSet<String>>>>,
+    usage_index: Arc<RwLock<HashMap<String, HashSet<Uri>>>>,
 }
 
 impl CssVariableLsp {
@@ -218,10 +220,10 @@ impl CssVariableLsp {
         *stored = paths;
     }
 
-    async fn parse_document_text(&self, uri: &Url, text: &str, language_id: Option<&str>) {
+    async fn parse_document_text(&self, uri: &Uri, text: &str, language_id: Option<&str>) {
         self.manager.remove_document(uri).await;
 
-        let path = uri.path();
+        let path = uri.path().as_str();
         let lookup_map = self.lookup_extension_map.read().await.clone();
         let kind = resolve_document_kind(path, language_id, &lookup_map);
         let result = match kind {
@@ -237,7 +239,7 @@ impl CssVariableLsp {
         }
     }
 
-    async fn validate_document_text(&self, uri: &Url, text: &str) {
+    async fn validate_document_text(&self, uri: &Uri, text: &str) {
         let has_related_info = *self.has_diagnostic_related_information.read().await;
         validate_document_text_with(
             &self.client,
@@ -278,7 +280,7 @@ impl CssVariableLsp {
         }
     }
 
-    async fn update_document_from_disk(&self, uri: &Url) {
+    async fn update_document_from_disk(&self, uri: &Uri) {
         let path = match to_normalized_fs_path(uri) {
             Some(path) => path,
             None => {
@@ -299,7 +301,7 @@ impl CssVariableLsp {
 
     async fn apply_content_changes(
         &self,
-        uri: &Url,
+        uri: &Uri,
         changes: Vec<TextDocumentContentChangeEvent>,
     ) -> Option<String> {
         let mut docs = self.document_map.write().await;
@@ -341,7 +343,7 @@ impl CssVariableLsp {
         }
     }
 
-    async fn is_document_open(&self, uri: &Url) -> bool {
+    async fn is_document_open(&self, uri: &Uri) -> bool {
         let docs = self.document_map.read().await;
         docs.contains_key(uri)
     }
@@ -349,7 +351,7 @@ impl CssVariableLsp {
     async fn revalidate_affected_documents(
         &self,
         changed_names: &HashSet<String>,
-        exclude_uri: Option<&Url>,
+        exclude_uri: Option<&Uri>,
     ) {
         let mut affected_uris = HashSet::new();
         {
@@ -395,12 +397,12 @@ impl CssVariableLsp {
     }
 }
 
-#[tower_lsp::async_trait]
+// async_trait macro no longer needed for tower-lsp-server v0.21+
 impl LanguageServer for CssVariableLsp {
     async fn initialize(
         &self,
         params: InitializeParams,
-    ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
+    ) -> tower_lsp_server::jsonrpc::Result<InitializeResult> {
         self.client
             .log_message(MessageType::INFO, "CSS Variable LSP (Rust) initializing...")
             .await;
@@ -428,6 +430,7 @@ impl LanguageServer for CssVariableLsp {
             *rel = has_related_info;
         }
 
+        #[allow(deprecated)]
         if let Some(root_uri) = params.root_uri.as_ref() {
             let root_path = to_normalized_fs_path(root_uri);
             let mut root = self.root_folder_path.write().await;
@@ -454,7 +457,7 @@ impl LanguageServer for CssVariableLsp {
                 all_commit_characters: None,
                 completion_item: None,
             }),
-            hover_provider: Some(tower_lsp::lsp_types::HoverProviderCapability::Simple(true)),
+            hover_provider: Some(ls_types::HoverProviderCapability::Simple(true)),
             definition_provider: Some(OneOf::Left(true)),
             references_provider: Some(OneOf::Left(true)),
             code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
@@ -485,14 +488,14 @@ impl LanguageServer for CssVariableLsp {
 
         Ok(InitializeResult {
             capabilities,
-            server_info: Some(tower_lsp::lsp_types::ServerInfo {
+            server_info: Some(ls_types::ServerInfo {
                 name: "css-variable-lsp-rust".to_string(),
                 version: Some("0.1.0".to_string()),
             }),
         })
     }
 
-    async fn initialized(&self, _params: tower_lsp::lsp_types::InitializedParams) {
+    async fn initialized(&self, _params: ls_types::InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "CSS Variable LSP (Rust) initialized!")
             .await;
@@ -504,7 +507,7 @@ impl LanguageServer for CssVariableLsp {
         }
     }
 
-    async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
+    async fn shutdown(&self) -> tower_lsp_server::jsonrpc::Result<()> {
         Ok(())
     }
 
@@ -637,7 +640,7 @@ impl LanguageServer for CssVariableLsp {
     async fn will_save_wait_until(
         &self,
         _params: WillSaveTextDocumentParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<Vec<TextEdit>>> {
         // No-op: no pre-save edits to apply.
         Ok(None)
     }
@@ -710,7 +713,7 @@ impl LanguageServer for CssVariableLsp {
 
     async fn did_create_files(&self, params: CreateFilesParams) {
         for file in params.files {
-            let uri = match Url::parse(&file.uri) {
+            let uri = match Uri::from_str(&file.uri) {
                 Ok(uri) => uri,
                 Err(_) => continue,
             };
@@ -723,11 +726,11 @@ impl LanguageServer for CssVariableLsp {
 
     async fn did_rename_files(&self, params: RenameFilesParams) {
         for file in params.files {
-            let old_uri = match Url::parse(&file.old_uri) {
+            let old_uri = match Uri::from_str(&file.old_uri) {
                 Ok(uri) => uri,
                 Err(_) => continue,
             };
-            let new_uri = match Url::parse(&file.new_uri) {
+            let new_uri = match Uri::from_str(&file.new_uri) {
                 Ok(uri) => uri,
                 Err(_) => continue,
             };
@@ -745,7 +748,7 @@ impl LanguageServer for CssVariableLsp {
 
     async fn did_delete_files(&self, params: DeleteFilesParams) {
         for file in params.files {
-            let uri = match Url::parse(&file.uri) {
+            let uri = match Uri::from_str(&file.uri) {
                 Ok(uri) => uri,
                 Err(_) => continue,
             };
@@ -781,7 +784,7 @@ impl LanguageServer for CssVariableLsp {
     async fn completion(
         &self,
         params: CompletionParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
@@ -861,7 +864,7 @@ impl LanguageServer for CssVariableLsp {
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(var.value.clone()),
                     insert_text: Some(insert_text),
-                    documentation: Some(tower_lsp::lsp_types::Documentation::String(format!(
+                    documentation: Some(ls_types::Documentation::String(format!(
                         "Defined in {}",
                         format_uri_for_display(&var.uri, options)
                     ))),
@@ -876,11 +879,11 @@ impl LanguageServer for CssVariableLsp {
     async fn completion_resolve(
         &self,
         item: CompletionItem,
-    ) -> tower_lsp::jsonrpc::Result<CompletionItem> {
+    ) -> tower_lsp_server::jsonrpc::Result<CompletionItem> {
         Ok(item)
     }
 
-    async fn hover(&self, params: HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
+    async fn hover(&self, params: HoverParams) -> tower_lsp_server::jsonrpc::Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
@@ -1028,7 +1031,7 @@ impl LanguageServer for CssVariableLsp {
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<GotoDefinitionResponse>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
@@ -1061,7 +1064,7 @@ impl LanguageServer for CssVariableLsp {
     async fn code_action(
         &self,
         params: CodeActionParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri;
         let text = {
             let docs = self.document_map.read().await;
@@ -1087,7 +1090,7 @@ impl LanguageServer for CssVariableLsp {
     async fn references(
         &self,
         params: ReferenceParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<Vec<Location>>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<Vec<Location>>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
@@ -1120,7 +1123,7 @@ impl LanguageServer for CssVariableLsp {
     async fn document_color(
         &self,
         params: DocumentColorParams,
-    ) -> tower_lsp::jsonrpc::Result<Vec<ColorInformation>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Vec<ColorInformation>> {
         let config = self.manager.get_config().await;
         if !config.enable_color_provider {
             return Ok(Vec::new());
@@ -1200,7 +1203,7 @@ impl LanguageServer for CssVariableLsp {
     async fn color_presentation(
         &self,
         params: ColorPresentationParams,
-    ) -> tower_lsp::jsonrpc::Result<Vec<ColorPresentation>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Vec<ColorPresentation>> {
         if !self.runtime_config.enable_color_provider {
             return Ok(Vec::new());
         }
@@ -1210,7 +1213,7 @@ impl LanguageServer for CssVariableLsp {
     async fn prepare_rename(
         &self,
         params: TextDocumentPositionParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<PrepareRenameResponse>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<PrepareRenameResponse>> {
         let uri = params.text_document.uri;
         let position = params.position;
 
@@ -1278,7 +1281,7 @@ impl LanguageServer for CssVariableLsp {
     async fn rename(
         &self,
         params: RenameParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<WorkspaceEdit>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<WorkspaceEdit>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
         let new_name = params.new_name;
@@ -1298,7 +1301,7 @@ impl LanguageServer for CssVariableLsp {
         };
 
         let (definitions, usages) = self.manager.get_references(&old_name).await;
-        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
 
         for def in definitions {
             let range = def.name_range.unwrap_or(def.range);
@@ -1330,7 +1333,7 @@ impl LanguageServer for CssVariableLsp {
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<DocumentSymbolResponse>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<DocumentSymbolResponse>> {
         let vars = self
             .manager
             .get_document_variables(&params.text_document.uri)
@@ -1356,7 +1359,7 @@ impl LanguageServer for CssVariableLsp {
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
-    ) -> tower_lsp::jsonrpc::Result<Option<Vec<SymbolInformation>>> {
+    ) -> tower_lsp_server::jsonrpc::Result<Option<WorkspaceSymbolResponse>> {
         let query = params.query.to_lowercase();
         let vars = self.manager.get_all_variables().await;
         let mut symbols = Vec::new();
@@ -1370,19 +1373,19 @@ impl LanguageServer for CssVariableLsp {
                 kind: SymbolKind::VARIABLE,
                 tags: None,
                 deprecated: None,
-                location: Location::new(var.uri, var.range),
+                location: Location::new(var.uri.clone(), var.range),
                 container_name: None,
             });
         }
 
-        Ok(Some(symbols))
+        Ok(Some(WorkspaceSymbolResponse::Flat(symbols)))
     }
 }
 
 impl CssVariableLsp {
     /// Scan workspace folders for CSS and HTML files
     pub async fn scan_workspace_folders(&self, folders: Vec<WorkspaceFolder>) {
-        let folder_uris: Vec<Url> = folders.iter().map(|f| f.uri.clone()).collect();
+        let folder_uris: Vec<Uri> = folders.iter().map(|f| f.uri.clone()).collect();
 
         self.client
             .log_message(
@@ -1449,10 +1452,10 @@ async fn validate_document_text_with(
     usage_regex: &Regex,
     undefined_var_fallback: UndefinedVarFallbackMode,
     has_related_info: bool,
-    uri: &Url,
+    uri: &Uri,
     text: &str,
-    document_usage_map: &Arc<RwLock<HashMap<Url, HashSet<String>>>>,
-    usage_index: &Arc<RwLock<HashMap<String, HashSet<Url>>>>,
+    document_usage_map: &Arc<RwLock<HashMap<Uri, HashSet<String>>>>,
+    usage_index: &Arc<RwLock<HashMap<String, HashSet<Uri>>>>,
 ) {
     let mut diagnostics = Vec::new();
     let mut current_usages = HashSet::new();
@@ -1491,7 +1494,7 @@ async fn validate_document_text_with(
         diagnostics.push(Diagnostic {
             range,
             severity: Some(severity),
-            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+            code: Some(ls_types::NumberOrString::String(
                 "css-variable-lsp.undefined-variable".to_string(),
             )),
             code_description: None,
@@ -1690,7 +1693,7 @@ fn completion_value_context_slice<'a>(
     text: &'a str,
     position: Position,
     language_id: Option<&str>,
-    uri: &Url,
+    uri: &Uri,
     lookup_extension_map: &HashMap<String, DocumentKind>,
 ) -> Option<CompletionContextSlice<'a>> {
     let offset = position_to_offset(text, position)?;
@@ -1698,7 +1701,7 @@ fn completion_value_context_slice<'a>(
     let offset = clamp_to_char_boundary(text, offset);
     let before_cursor = &text[start..offset];
 
-    if is_js_like_document(uri.path(), language_id) {
+    if is_js_like_document(uri.path().as_str(), language_id) {
         let slice = find_js_string_segment(before_cursor)?;
         return Some(CompletionContextSlice {
             slice,
@@ -1706,7 +1709,7 @@ fn completion_value_context_slice<'a>(
         });
     }
 
-    match resolve_document_kind(uri.path(), language_id, lookup_extension_map) {
+    match resolve_document_kind(uri.path().as_str(), language_id, lookup_extension_map) {
         Some(DocumentKind::Html) => find_html_style_context_slice(before_cursor),
         Some(DocumentKind::Css) => Some(CompletionContextSlice {
             slice: before_cursor,
@@ -2186,9 +2189,10 @@ fn find_value_range_in_definition(text: &str, def: &crate::types::CssVariable) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     fn test_word_extraction(css: &str, cursor_pos: usize) -> Option<String> {
-        use tower_lsp::lsp_types::Position;
+        use ls_types::Position;
         let position = Position {
             line: 0,
             character: cursor_pos as u32,
@@ -2281,7 +2285,7 @@ mod tests {
         let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
         let text = ".card { color: var(";
         let position = crate::types::offset_to_position(text, text.len());
-        let uri = Url::parse("file:///styles.css").unwrap();
+        let uri = Uri::from_str("file:///styles.css").unwrap();
         let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected css slice");
         assert_eq!(context.slice, text);
@@ -2293,7 +2297,7 @@ mod tests {
         let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
         let text = r#"<div style="color: var("#;
         let position = crate::types::offset_to_position(text, text.len());
-        let uri = Url::parse("file:///index.html").unwrap();
+        let uri = Uri::from_str("file:///index.html").unwrap();
         let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected html style attribute slice");
         assert_eq!(context.slice, "color: var(");
@@ -2305,7 +2309,7 @@ mod tests {
         let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
         let text = "<style>body { color: var(";
         let position = crate::types::offset_to_position(text, text.len());
-        let uri = Url::parse("file:///index.html").unwrap();
+        let uri = Uri::from_str("file:///index.html").unwrap();
         let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected html style block slice");
         assert_eq!(context.slice, "body { color: var(");
@@ -2317,7 +2321,7 @@ mod tests {
         let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
         let text = r#"const css = "color: var("#;
         let position = crate::types::offset_to_position(text, text.len());
-        let uri = Url::parse("file:///app.js").unwrap();
+        let uri = Uri::from_str("file:///app.js").unwrap();
         let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected js string slice");
         assert_eq!(context.slice, "color: var(");
@@ -2329,7 +2333,7 @@ mod tests {
         let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
         let text = "const css = color: var(";
         let position = crate::types::offset_to_position(text, text.len());
-        let uri = Url::parse("file:///app.js").unwrap();
+        let uri = Uri::from_str("file:///app.js").unwrap();
         assert!(completion_value_context_slice(text, position, None, &uri, &lookup_map).is_none());
     }
 
@@ -2338,7 +2342,7 @@ mod tests {
         let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
         let text = "color: var(";
         let position = crate::types::offset_to_position(text, text.len());
-        let uri = Url::parse("file:///notes.txt").unwrap();
+        let uri = Uri::from_str("file:///notes.txt").unwrap();
         assert!(completion_value_context_slice(text, position, None, &uri, &lookup_map).is_none());
     }
 

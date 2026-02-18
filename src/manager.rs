@@ -1,7 +1,7 @@
+use ls_types::Uri;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower_lsp::lsp_types::Url;
 
 use crate::color::parse_color;
 use crate::dom_tree::DomTree;
@@ -21,7 +21,7 @@ pub struct CssVariableManager {
     config: Arc<RwLock<Config>>,
 
     /// DOM trees for HTML documents
-    dom_trees: Arc<RwLock<HashMap<Url, DomTree>>>,
+    dom_trees: Arc<RwLock<HashMap<Uri, DomTree>>>,
 }
 
 impl CssVariableManager {
@@ -64,7 +64,7 @@ impl CssVariableManager {
     }
 
     /// Resolve a variable name to a color using cascade ordering and var() chains.
-    pub async fn resolve_variable_color(&self, name: &str) -> Option<tower_lsp::lsp_types::Color> {
+    pub async fn resolve_variable_color(&self, name: &str) -> Option<ls_types::Color> {
         let mut seen = std::collections::HashSet::new();
         let mut current = name.to_string();
 
@@ -105,7 +105,7 @@ impl CssVariableManager {
     }
 
     /// Remove all data for a document
-    pub async fn remove_document(&self, uri: &Url) {
+    pub async fn remove_document(&self, uri: &Uri) {
         let mut vars = self.variables.write().await;
         let mut usages = self.usages.write().await;
         let mut dom_trees = self.dom_trees.write().await;
@@ -126,7 +126,7 @@ impl CssVariableManager {
     }
 
     /// Get all variables defined in a specific document
-    pub async fn get_document_variables(&self, uri: &Url) -> Vec<CssVariable> {
+    pub async fn get_document_variables(&self, uri: &Uri) -> Vec<CssVariable> {
         let vars = self.variables.read().await;
         vars.values()
             .flatten()
@@ -136,13 +136,13 @@ impl CssVariableManager {
     }
 
     /// Get the set of variable names defined in a specific document
-    pub async fn get_document_variable_names(&self, uri: &Url) -> HashSet<String> {
+    pub async fn get_document_variable_names(&self, uri: &Uri) -> HashSet<String> {
         let vars = self.get_document_variables(uri).await;
         vars.into_iter().map(|v| v.name).collect()
     }
 
     /// Get all variable usages in a specific document
-    pub async fn get_document_usages(&self, uri: &Url) -> Vec<CssVariableUsage> {
+    pub async fn get_document_usages(&self, uri: &Uri) -> Vec<CssVariableUsage> {
         let usages = self.usages.read().await;
         usages
             .values()
@@ -153,13 +153,13 @@ impl CssVariableManager {
     }
 
     /// Set DOM tree for a document
-    pub async fn set_dom_tree(&self, uri: Url, dom_tree: DomTree) {
+    pub async fn set_dom_tree(&self, uri: Uri, dom_tree: DomTree) {
         let mut dom_trees = self.dom_trees.write().await;
         dom_trees.insert(uri, dom_tree);
     }
 
     /// Get DOM tree for a document
-    pub async fn get_dom_tree(&self, uri: &Url) -> Option<DomTree> {
+    pub async fn get_dom_tree(&self, uri: &Uri) -> Option<DomTree> {
         let dom_trees = self.dom_trees.read().await;
         dom_trees.get(uri).cloned()
     }
@@ -218,7 +218,8 @@ fn extract_var_reference(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower_lsp::lsp_types::{Position, Range, Url};
+    use ls_types::{Position, Range, Uri};
+    use std::str::FromStr;
 
     fn create_test_variable(name: &str, value: &str, selector: &str, uri: &str) -> CssVariable {
         CssVariable {
@@ -228,7 +229,7 @@ mod tests {
             range: Range::new(Position::new(0, 0), Position::new(0, 10)),
             name_range: None,
             value_range: None,
-            uri: Url::parse(uri).unwrap(),
+            uri: Uri::from_str(uri).unwrap(),
             important: false,
             inline: false,
             source_position: 0,
@@ -240,7 +241,7 @@ mod tests {
             name: name.to_string(),
             range: Range::new(Position::new(0, 0), Position::new(0, 10)),
             name_range: None,
-            uri: Url::parse(uri).unwrap(),
+            uri: Uri::from_str(uri).unwrap(),
             usage_context: context.to_string(),
             dom_node: None,
         }
@@ -320,7 +321,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_remove_document() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Url::parse("file:///test.css").unwrap();
+        let uri = Uri::from_str("file:///test.css").unwrap();
 
         let var = create_test_variable("--primary", "blue", ":root", "file:///test.css");
         let usage = create_test_usage("--primary", ".button", "file:///test.css");
@@ -405,8 +406,8 @@ mod tests {
     #[tokio::test]
     async fn test_manager_document_isolation() {
         let manager = CssVariableManager::new(Config::default());
-        let uri1 = Url::parse("file:///file1.css").unwrap();
-        let _uri2 = Url::parse("file:///file2.css").unwrap();
+        let uri1 = Uri::from_str("file:///file1.css").unwrap();
+        let _uri2 = Uri::from_str("file:///file2.css").unwrap();
 
         manager
             .add_variable(create_test_variable(

@@ -1,5 +1,5 @@
+use ls_types::Uri;
 use std::path::{Component, Path, PathBuf};
-use tower_lsp::lsp_types::Url;
 
 use crate::runtime_config::PathDisplayMode;
 
@@ -10,8 +10,8 @@ pub struct PathDisplayOptions<'a> {
     pub root_folder_path: Option<&'a PathBuf>,
 }
 
-pub fn to_normalized_fs_path(uri: &Url) -> Option<PathBuf> {
-    uri.to_file_path().ok()
+pub fn to_normalized_fs_path(uri: &Uri) -> Option<PathBuf> {
+    uri.to_file_path().map(|cow| cow.into_owned())
 }
 
 fn find_best_relative_path(fs_path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
@@ -85,7 +85,7 @@ fn abbreviate_path(path: &Path, abbrev_length: usize) -> String {
     parts.join(std::path::MAIN_SEPARATOR_STR)
 }
 
-pub fn format_uri_for_display(uri: &Url, options: PathDisplayOptions<'_>) -> String {
+pub fn format_uri_for_display(uri: &Uri, options: PathDisplayOptions<'_>) -> String {
     let fs_path = match to_normalized_fs_path(uri) {
         Some(path) => path,
         None => return uri.to_string(),
@@ -124,7 +124,7 @@ mod tests {
     fn format_uri_respects_relative_and_abbreviated_modes() {
         let root = std::env::temp_dir().join("css-lsp-test-root");
         let file_path = root.join("src").join("styles").join("main.css");
-        let uri = Url::from_file_path(&file_path).unwrap();
+        let uri = Uri::from_file_path(&file_path).unwrap();
 
         let workspace_paths = vec![root.clone()];
         let relative = format_uri_for_display(
