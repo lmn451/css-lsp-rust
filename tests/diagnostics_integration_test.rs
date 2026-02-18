@@ -19,7 +19,6 @@ use tokio::time::{timeout, Duration};
 use tower::{Service, ServiceExt};
 use tower_lsp_server::jsonrpc::Request;
 use tower_lsp_server::LspService;
-use url::Url;
 
 async fn setup_service_with_config(
     runtime_config: RuntimeConfig,
@@ -498,7 +497,7 @@ async fn test_will_save_wait_until_returns_no_edits() {
     let (mut service, _diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///index.scss").unwrap();
+    let uri = Uri::from_str("file:///index.scss").unwrap();
     open_document(
         &mut service,
         uri.clone(),
@@ -525,7 +524,7 @@ async fn test_save_notifications_keep_server_responsive() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///index.scss").unwrap();
+    let uri = Uri::from_str("file:///index.scss").unwrap();
     open_document(
         &mut service,
         uri.clone(),
