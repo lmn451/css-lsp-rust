@@ -1,17 +1,18 @@
 use css_variable_lsp::lsp_server::CssVariableLsp;
 use css_variable_lsp::runtime_config::build_runtime_config;
 use futures::StreamExt;
-use serde::Serialize;
-use tokio::sync::mpsc::{self, UnboundedReceiver};
-use tower::{Service, ServiceExt};
-use tower_lsp::jsonrpc::{Request, Response};
-use tower_lsp::lsp_types::{
+use ls_types::{
     ClientCapabilities, CompletionItemKind, CompletionParams, CompletionResponse,
     DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
     InitializeParams, Location, Position, ReferenceContext, ReferenceParams,
-    TextDocumentIdentifier, TextDocumentItem, Url,
+    TextDocumentIdentifier, TextDocumentItem, Uri,
 };
-use tower_lsp::LspService;
+use serde::Serialize;
+use std::str::FromStr;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tower::{Service, ServiceExt};
+use tower_lsp_server::jsonrpc::{Request, Response};
+use tower_lsp_server::LspService;
 
 async fn setup_service() -> (LspService<CssVariableLsp>, UnboundedReceiver<Request>) {
     let runtime_config = build_runtime_config(&Vec::new());
@@ -58,7 +59,7 @@ async fn initialize(service: &mut LspService<CssVariableLsp>) {
 
 async fn open_document(
     service: &mut LspService<CssVariableLsp>,
-    uri: Url,
+    uri: Uri,
     language_id: &str,
     text: &str,
     version: i32,
@@ -79,7 +80,7 @@ async fn test_lsp_completion_for_variables() {
     let (mut service, _rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
     let css_content = r#"
         :root {
             --primary-color: #3b82f6;
@@ -95,7 +96,7 @@ async fn test_lsp_completion_for_variables() {
     open_document(&mut service, uri.clone(), "css", css_content, 1).await;
 
     let params = CompletionParams {
-        text_document_position: tower_lsp::lsp_types::TextDocumentPositionParams {
+        text_document_position: ls_types::TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position: Position {
                 line: 8,
@@ -141,7 +142,7 @@ async fn test_lsp_hover_for_variable_definition() {
     let (mut service, _rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
     let css_content = r#"
         :root {
             --primary-color: #3b82f6;
@@ -151,7 +152,7 @@ async fn test_lsp_hover_for_variable_definition() {
     open_document(&mut service, uri.clone(), "css", css_content, 1).await;
 
     let params = HoverParams {
-        text_document_position_params: tower_lsp::lsp_types::TextDocumentPositionParams {
+        text_document_position_params: ls_types::TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position: Position {
                 line: 2,
@@ -171,7 +172,7 @@ async fn test_lsp_hover_for_variable_definition() {
 
     let hover: Hover = serde_json::from_value(result.clone()).unwrap();
 
-    if let tower_lsp::lsp_types::HoverContents::Markup(markup) = hover.contents {
+    if let ls_types::HoverContents::Markup(markup) = hover.contents {
         let content_str = markup.value;
         assert!(content_str.contains("--primary-color") || content_str.contains("#3b82f6"));
     }
@@ -183,7 +184,7 @@ async fn test_lsp_goto_definition() {
     let (mut service, _rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
     let css_content = r#"
         :root {
             --primary-color: #3b82f6;
@@ -197,7 +198,7 @@ async fn test_lsp_goto_definition() {
     open_document(&mut service, uri.clone(), "css", css_content, 1).await;
 
     let params = GotoDefinitionParams {
-        text_document_position_params: tower_lsp::lsp_types::TextDocumentPositionParams {
+        text_document_position_params: ls_types::TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position: Position {
                 line: 2,
@@ -237,7 +238,7 @@ async fn test_lsp_find_references() {
     let (mut service, _rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
     let css_content = r#"
         :root {
             --primary-color: #3b82f6;
@@ -255,7 +256,7 @@ async fn test_lsp_find_references() {
     open_document(&mut service, uri.clone(), "css", css_content, 1).await;
 
     let params = ReferenceParams {
-        text_document_position: tower_lsp::lsp_types::TextDocumentPositionParams {
+        text_document_position: ls_types::TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position: Position {
                 line: 2,
@@ -296,7 +297,7 @@ async fn test_lsp_completion_no_context() {
     let (mut service, _rx) = setup_service().await;
     initialize(&mut service).await;
 
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
     let css_content = r#"
         .button {
             background: blue;
@@ -306,7 +307,7 @@ async fn test_lsp_completion_no_context() {
     open_document(&mut service, uri.clone(), "css", css_content, 1).await;
 
     let params = CompletionParams {
-        text_document_position: tower_lsp::lsp_types::TextDocumentPositionParams {
+        text_document_position: ls_types::TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position: Position {
                 line: 2,

@@ -284,7 +284,7 @@ impl CssVariableLsp {
         let path = match to_normalized_fs_path(uri) {
             Some(path) => path,
             None => {
-                tracing::debug!("Could not convert URI to file path: {}", uri);
+                tracing::debug!("Could not convert URI to file path: {:?}", uri);
                 self.manager.remove_document(uri).await;
                 return;
             }

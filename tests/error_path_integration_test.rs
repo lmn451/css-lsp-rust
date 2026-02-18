@@ -1,12 +1,13 @@
 use css_variable_lsp::manager::CssVariableManager;
 use css_variable_lsp::parsers::{parse_css_document, parse_html_document};
 use css_variable_lsp::types::Config;
-use tower_lsp::lsp_types::Url;
+use ls_types::Uri;
+use std::str::FromStr;
 
 #[tokio::test]
 async fn test_css_parser_malformed_selectors() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
 
     let malformed_css = r#"
         :root {
@@ -37,7 +38,7 @@ async fn test_css_parser_malformed_selectors() {
 #[tokio::test]
 async fn test_css_parser_malformed_values() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
 
     let malformed_css = r#"
         :root {
@@ -73,7 +74,7 @@ async fn test_css_parser_malformed_values() {
 #[tokio::test]
 async fn test_css_parser_unclosed_blocks() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
 
     let unclosed_css = r#"
         :root {
@@ -106,7 +107,7 @@ async fn test_css_parser_unclosed_blocks() {
 #[tokio::test]
 async fn test_css_parser_invalid_var_references() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
 
     let css_with_invalid_vars = r#"
         :root {
@@ -135,7 +136,7 @@ async fn test_css_parser_invalid_var_references() {
 #[tokio::test]
 async fn test_html_parser_malformed_structure() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.html").unwrap();
+    let uri = Uri::from_str("file:///test.html").unwrap();
 
     let malformed_html = r#"
         <html>
@@ -175,7 +176,7 @@ async fn test_html_parser_malformed_structure() {
 #[tokio::test]
 async fn test_html_parser_malformed_style_tags() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.html").unwrap();
+    let uri = Uri::from_str("file:///test.html").unwrap();
 
     let html_with_broken_styles = r#"
         <html>
@@ -222,7 +223,7 @@ async fn test_html_parser_malformed_style_tags() {
 #[tokio::test]
 async fn test_css_parser_empty_and_whitespace() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
 
     let edge_case_css = r#"
         
@@ -255,7 +256,7 @@ async fn test_css_parser_empty_and_whitespace() {
 #[tokio::test]
 async fn test_html_parser_missing_tags() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.html").unwrap();
+    let uri = Uri::from_str("file:///test.html").unwrap();
 
     let incomplete_html = r#"
         <head>
@@ -282,7 +283,7 @@ async fn test_html_parser_missing_tags() {
 #[tokio::test]
 async fn test_css_parser_unicode_and_special_chars() {
     let manager = CssVariableManager::new(Config::default());
-    let uri = Url::parse("file:///test.css").unwrap();
+    let uri = Uri::from_str("file:///test.css").unwrap();
 
     let css_with_special_chars = r#"
         :root {
