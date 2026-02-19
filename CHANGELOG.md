@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-02-19
+
+### Fixed
+- Made tracing logs opt-in and routed output to stderr to avoid corrupting LSP stdio transport.
+- Implemented save notification hooks (`willSave`, `willSaveWaitUntil`, `didSave`) to prevent unimplemented save warnings.
+
 ## [0.1.9] - 2026-01-24
 
 ### Added
