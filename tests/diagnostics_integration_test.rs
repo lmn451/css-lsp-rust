@@ -54,6 +54,33 @@ async fn send_request_for_result(
     response.and_then(|resp| resp.result().cloned())
 }
 
+async fn completion_labels(
+    service: &mut LspService<CssVariableLsp>,
+    uri: Uri,
+    position: ls_types::Position,
+) -> Vec<String> {
+    let req = Request::build("textDocument/completion")
+        .id(42)
+        .params(serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": position
+        }))
+        .finish();
+
+    let result = send_request_for_result(service, req)
+        .await
+        .expect("completion should return result");
+    let response: ls_types::CompletionResponse = serde_json::from_value(result).unwrap();
+    match response {
+        ls_types::CompletionResponse::Array(items) => {
+            items.into_iter().map(|item| item.label).collect()
+        }
+        ls_types::CompletionResponse::List(list) => {
+            list.items.into_iter().map(|item| item.label).collect()
+        }
+    }
+}
+
 fn position_of(text: &str, needle: &str) -> ls_types::Position {
     let offset = text.find(needle).expect("needle should exist in text");
     css_variable_lsp::types::offset_to_position(text, offset)
@@ -564,5 +591,156 @@ async fn test_save_notifications_keep_server_responsive() {
     .await;
 
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics.diagnostics[0].code,
+        Some(ls_types::NumberOrString::String(
+            "css-variable-lsp.literal-color-replaceable".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn test_literal_color_diagnostic_and_quick_fixes() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "scss",
+        ":root { --white: #fff; --surface: rgb(255 255 255); }",
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+
+    let text = ".card { color: #ffffff; background: var(--white); }";
+    open_document(&mut service, index_uri.clone(), "scss", text, 1).await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    let diagnostic = &diagnostics.diagnostics[0];
+    assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::INFORMATION));
+    assert_eq!(
+        diagnostic.code,
+        Some(ls_types::NumberOrString::String(
+            "css-variable-lsp.literal-color-replaceable".to_string()
+        ))
+    );
+    assert!(diagnostic.message.contains("2 replacements"));
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier {
+            uri: index_uri.clone(),
+        },
+        range: diagnostic.range,
+        context: CodeActionContext {
+            diagnostics: diagnostics.diagnostics.clone(),
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let req = Request::build("textDocument/codeAction")
+        .id(100)
+        .params(serde_json::to_value(params).unwrap())
+        .finish();
+    let result = send_request_for_result(&mut service, req)
+        .await
+        .expect("codeAction should return result");
+    let actions: CodeActionResponse = serde_json::from_value(result).unwrap();
+
+    let titles: Vec<String> = actions
+        .into_iter()
+        .filter_map(|a| match a {
+            ls_types::CodeActionOrCommand::CodeAction(ca) => Some(ca.title),
+            _ => None,
+        })
+        .collect();
+    assert!(titles
+        .iter()
+        .any(|title| title == "Replace with var(--surface)"));
+    assert!(titles
+        .iter()
+        .any(|title| title == "Replace with var(--white)"));
+}
+
+#[tokio::test]
+async fn test_literal_color_completion_returns_exact_matches_only() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "scss",
+        ":root { --white: white; --accent: red; --spacing: 1rem; }",
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+
+    let text = ".card { color: #fff; margin: 10px; }";
+    open_document(&mut service, index_uri.clone(), "scss", text, 1).await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+
+    let color_position = position_of(text, "#fff");
+    let labels = completion_labels(&mut service, index_uri.clone(), color_position).await;
+    assert!(labels.contains(&"--white".to_string()));
+    assert!(!labels.contains(&"--accent".to_string()));
+    assert!(!labels.contains(&"--spacing".to_string()));
+
+    let margin_position = position_of(text, ".card");
+    let labels = completion_labels(&mut service, index_uri, margin_position).await;
+    assert!(!labels.contains(&"--white".to_string()));
+}
+
+#[tokio::test]
+async fn test_literal_color_revalidation_on_variable_color_change() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "scss",
+        ":root { --white: #fff; }",
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+
+    open_document(
+        &mut service,
+        index_uri.clone(),
+        "scss",
+        ".card { color: #fff; }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+
+    change_document(
+        &mut service,
+        vars_uri.clone(),
+        2,
+        ":root { --white: #000; }",
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 0);
 }

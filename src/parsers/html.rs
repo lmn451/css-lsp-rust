@@ -89,6 +89,26 @@ mod tests {
         assert!(contexts.contains(".card"));
         assert!(contexts.contains("inline-style"));
     }
+
+    #[tokio::test]
+    async fn parse_html_document_extracts_literal_colors_from_style_and_inline() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///test.html").unwrap();
+        let text = r#"
+            <style>
+                .card { color: #fff; }
+            </style>
+            <div style="background: rgb(255, 0, 0); color: var(--primary, blue)"></div>
+        "#;
+
+        parse_html_document(text, &uri, &manager).await.unwrap();
+
+        let occurrences = manager.get_document_literal_colors(&uri).await;
+        let literals: HashSet<String> = occurrences.into_iter().map(|occ| occ.text).collect();
+        assert!(literals.contains("#fff"));
+        assert!(literals.contains("rgb(255, 0, 0)"));
+        assert!(!literals.contains("blue"));
+    }
 }
 
 #[cfg(test)]
