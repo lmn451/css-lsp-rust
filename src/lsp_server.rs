@@ -500,6 +500,7 @@ impl LanguageServer for CssVariableLsp {
 
         Ok(InitializeResult {
             capabilities,
+            offset_encoding: None,
             server_info: Some(ls_types::ServerInfo {
                 name: "css-variable-lsp-rust".to_string(),
                 version: Some("0.1.0".to_string()),
