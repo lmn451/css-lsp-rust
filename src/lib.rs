@@ -3,6 +3,7 @@
 
 pub mod color;
 pub mod dom_tree;
+pub mod flags;
 pub mod lsp_server;
 pub mod manager;
 pub mod parsers;
