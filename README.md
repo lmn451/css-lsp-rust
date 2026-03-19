@@ -66,9 +66,41 @@ The LSP server communicates via stdin/stdout using the Language Server Protocol.
 - `dom_tree.rs` - Lightweight HTML scanner for selector matching
 - `specificity.rs` - Specificity calculation and cascade ordering
 - `workspace.rs` - Workspace scanning and file discovery
+- `flags.rs` - Reusable flag parsing helper functions
 - `runtime_config.rs` - CLI/env configuration parsing
 - `path_display.rs` - Path formatting for hover/completion
 - `color.rs` - Color parsing and color provider helpers
+
+## Configuration
+
+The LSP server accepts configuration via CLI flags and environment variables.
+
+### Feature Flags
+
+| Flag | CLI (disable) | Env var | Default | Description |
+|------|--------------|---------|---------|-------------|
+| Color preview | `--no-color-preview` | `CSS_LSP_COLOR_PREVIEW=0` | true | Enable color picker |
+| Color only variables | `--color-only-variables` | `CSS_LSP_COLOR_ONLY_VARIABLES=1` | false | Colors only on var() |
+| Lookup files | `--lookup-files` | `CSS_LSP_LOOKUP_FILES` | None | File extensions to scan |
+| Ignore globs | `--ignore-globs` | `CSS_LSP_IGNORE_GLOBS` | None | Patterns to exclude |
+| Path display | `--path-display` | `CSS_LSP_PATH_DISPLAY` | relative | Path format mode |
+| Path length | `--path-display-length` | `CSS_LSP_PATH_DISPLAY_LENGTH` | 1 | Abbreviation length |
+| Undefined fallback | `--undefined-var-fallback` | `CSS_LSP_UNDEFINED_VAR_FALLBACK` | warning | Fallback diagnostic level |
+| Suggest add fallback | `--no-suggest-add-fallback` | `CSS_LSP_SUGGEST_ADD_FALLBACK=0` | true | Add fallback quickfix |
+| Suggest color vars | `--no-suggest-exact-color-variables` | `CSS_LSP_SUGGEST_EXACT_COLOR_VARIABLES=0` | true | Color replacement suggestions |
+
+### Examples
+
+```bash
+# Disable color preview
+./css-variable-lsp --no-color-preview
+
+# Set lookup files via env
+CSS_LSP_LOOKUP_FILES="*.css,*.scss" ./css-variable-lsp
+
+# Combine options
+./css-variable-lsp --path-display=abbreviated:2 --no-suggest-add-fallback
+```
 
 ## Dependencies
 
