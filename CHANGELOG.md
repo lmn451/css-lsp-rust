@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Feature flags for controlling code action suggestions:
+  - `--no-suggest-add-fallback` / `CSS_LSP_SUGGEST_ADD_FALLBACK=0`: Disable "Add fallback" quickfix for undefined variables
+  - `--no-suggest-exact-color-variables` / `CSS_LSP_SUGGEST_EXACT_COLOR_VARIABLES=0`: Disable color variable replacement suggestions
+
+### Changed
+- Refactored flag parsing into reusable helpers (`src/flags.rs`) to reduce boilerplate
+
 ## [0.2.1] - 2026-02-19
 
 ### Fixed
