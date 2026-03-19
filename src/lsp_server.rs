@@ -1579,9 +1579,30 @@ async fn validate_document_text_with(
     }
 
     for occurrence in manager.get_document_literal_colors(uri).await {
-        let replacements = manager
+        let all_replacements = manager
             .get_variables_by_color_key(&occurrence.normalized_color)
             .await;
+
+        // Filter out replacement variables where this color is in their own value.
+        // This prevents suggesting replacing #ffd166 with --accent-2 when editing
+        // the definition: --accent-2: #ffd166;
+        let replacements: Vec<_> = all_replacements
+            .iter()
+            .filter(|var| {
+                // Keep if the variable is in a different file
+                if var.uri != *uri {
+                    return true;
+                }
+                // Keep if no value_range available (can't determine overlap)
+                let Some(value_range) = &var.value_range else {
+                    return true;
+                };
+                // Filter out if occurrence is within this variable's value range
+                !range_contains(value_range, &occurrence.range)
+            })
+            .cloned()
+            .collect();
+
         if replacements.is_empty() {
             continue;
         }
@@ -1667,6 +1688,11 @@ fn is_html_like_extension(ext: &str) -> bool {
 
 fn range_contains_position(range: &Range, position: Position) -> bool {
     range.start <= position && position <= range.end
+}
+
+/// Check if `outer` range completely contains `inner` range
+fn range_contains(outer: &Range, inner: &Range) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
 }
 
 fn language_id_kind(language_id: &str) -> Option<DocumentKind> {
