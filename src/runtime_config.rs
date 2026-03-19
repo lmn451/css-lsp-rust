@@ -4,8 +4,7 @@ use crate::flags::{
     flag_bool, flag_bool_simple, flag_enum, flag_opt, get_arg_value, parse_optional_int,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PathDisplayMode {
     #[default]
     Relative,
@@ -13,16 +12,13 @@ pub enum PathDisplayMode {
     Abbreviated,
 }
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UndefinedVarFallbackMode {
     #[default]
     Warning,
     Info,
     Off,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
