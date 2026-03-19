@@ -590,14 +590,9 @@ async fn test_save_notifications_keep_server_responsive() {
     )
     .await;
 
+    // Should not suggest replacing #000 with --dark when #000 is the value of --dark
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
-    assert_eq!(diagnostics.diagnostics.len(), 1);
-    assert_eq!(
-        diagnostics.diagnostics[0].code,
-        Some(ls_types::NumberOrString::String(
-            "css-variable-lsp.literal-color-replaceable".to_string()
-        ))
-    );
+    assert_eq!(diagnostics.diagnostics.len(), 0);
 }
 
 #[tokio::test]
