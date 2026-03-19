@@ -1599,11 +1599,12 @@ async fn validate_document_text_with(
             .collect();
         let replacement_count = replacement_data.len();
         let message = if replacement_count == 1 {
-            "A matching CSS variable exists for this literal color".to_string()
+            format!("Consider using {} for this color", replacements[0].name)
         } else {
+            let var_names: Vec<&str> = replacements.iter().map(|v| v.name.as_str()).collect();
             format!(
-                "Matching CSS variables exist for this literal color ({} replacements)",
-                replacement_count
+                "Consider using one of these variables: {}",
+                var_names.join(", ")
             )
         };
 
