@@ -40,6 +40,7 @@ fn code_actions_for_undefined_variables(
     uri: &Uri,
     text: &str,
     context: &CodeActionContext,
+    runtime_config: &RuntimeConfig,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
 
@@ -94,37 +95,40 @@ fn code_actions_for_undefined_variables(
 
         // Optional quickfix: add fallback to `var(--name)` -> `var(--name, )`
         // Only offered when the diagnostic covers a `var(...)` call without a comma.
-        if let (Some(start), Some(end)) = (
-            crate::types::position_to_offset(text, diag.range.start),
-            crate::types::position_to_offset(text, diag.range.end),
-        ) {
-            if start < end && end <= text.len() {
-                let slice = &text[start..end];
-                if slice.starts_with("var(") && slice.ends_with(')') && !slice.contains(',') {
-                    let new_text = slice.trim_end_matches(')').to_string() + ", )";
-                    let edit = WorkspaceEdit {
-                        changes: Some(HashMap::from([(
-                            uri.clone(),
-                            vec![TextEdit {
-                                range: diag.range,
-                                new_text,
-                            }],
-                        )])),
-                        document_changes: None,
-                        change_annotations: None,
-                    };
+        // Can be disabled via --no-suggest-add-fallback or CSS_LSP_SUGGEST_ADD_FALLBACK=0
+        if runtime_config.suggest_add_fallback {
+            if let (Some(start), Some(end)) = (
+                crate::types::position_to_offset(text, diag.range.start),
+                crate::types::position_to_offset(text, diag.range.end),
+            ) {
+                if start < end && end <= text.len() {
+                    let slice = &text[start..end];
+                    if slice.starts_with("var(") && slice.ends_with(')') && !slice.contains(',') {
+                        let new_text = slice.trim_end_matches(')').to_string() + ", )";
+                        let edit = WorkspaceEdit {
+                            changes: Some(HashMap::from([(
+                                uri.clone(),
+                                vec![TextEdit {
+                                    range: diag.range,
+                                    new_text,
+                                }],
+                            )])),
+                            document_changes: None,
+                            change_annotations: None,
+                        };
 
-                    let action = CodeAction {
-                        title: format!("Add fallback to {}", name),
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        diagnostics: Some(vec![diag.clone()]),
-                        edit: Some(edit),
-                        command: None,
-                        is_preferred: Some(false),
-                        disabled: None,
-                        data: None,
-                    };
-                    actions.push(CodeActionOrCommand::CodeAction(action));
+                        let action = CodeAction {
+                            title: format!("Add fallback to {}", name),
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            diagnostics: Some(vec![diag.clone()]),
+                            edit: Some(edit),
+                            command: None,
+                            is_preferred: Some(false),
+                            disabled: None,
+                            data: None,
+                        };
+                        actions.push(CodeActionOrCommand::CodeAction(action));
+                    }
                 }
             }
         }
@@ -136,7 +140,12 @@ fn code_actions_for_undefined_variables(
 fn code_actions_for_replaceable_literal_colors(
     uri: &Uri,
     context: &CodeActionContext,
+    runtime_config: &RuntimeConfig,
 ) -> Vec<CodeActionOrCommand> {
+    if !runtime_config.suggest_exact_color_variables {
+        return Vec::new();
+    }
+
     let mut actions = Vec::new();
 
     for diag in &context.diagnostics {
@@ -1117,10 +1126,12 @@ impl LanguageServer for CssVariableLsp {
             &uri,
             &text,
             &params.context,
+            &self.runtime_config,
         ));
         actions.extend(code_actions_for_replaceable_literal_colors(
             &uri,
             &params.context,
+            &self.runtime_config,
         ));
 
         Ok(Some(actions))

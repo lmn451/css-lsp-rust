@@ -1,18 +1,28 @@
 use std::collections::HashMap;
 
+use crate::flags::{
+    flag_bool, flag_bool_simple, flag_enum, flag_opt, get_arg_value, parse_optional_int,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PathDisplayMode {
+    #[default]
     Relative,
     Absolute,
     Abbreviated,
 }
 
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum UndefinedVarFallbackMode {
+    #[default]
     Warning,
     Info,
     Off,
 }
+
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -23,46 +33,26 @@ pub struct RuntimeConfig {
     pub path_display_mode: PathDisplayMode,
     pub path_display_abbrev_length: usize,
     pub undefined_var_fallback: UndefinedVarFallbackMode,
-}
-
-fn get_arg_value(args: &[String], name: &str) -> Option<String> {
-    let flag = format!("--{name}");
-    if let Some(idx) = args.iter().position(|arg| arg == &flag) {
-        if let Some(candidate) = args.get(idx + 1) {
-            if !candidate.starts_with('-') {
-                return Some(candidate.to_string());
-            }
-        }
-        return None;
-    }
-
-    let prefix = format!("{}=", flag);
-    for arg in args {
-        if arg.starts_with(&prefix) {
-            return Some(arg[prefix.len()..].to_string());
-        }
-    }
-
-    None
-}
-
-fn parse_optional_int(value: Option<&str>) -> Option<i64> {
-    let raw = value?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    raw.parse::<i64>().ok()
+    pub suggest_add_fallback: bool,
+    pub suggest_exact_color_variables: bool,
 }
 
 fn normalize_path_display_mode(value: Option<&str>) -> Option<PathDisplayMode> {
-    let raw = value?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    match raw.to_lowercase().as_str() {
+    let raw = value?.trim().to_lowercase();
+    match raw.as_str() {
         "relative" => Some(PathDisplayMode::Relative),
         "absolute" => Some(PathDisplayMode::Absolute),
         "abbreviated" | "abbr" | "fish" => Some(PathDisplayMode::Abbreviated),
+        _ => None,
+    }
+}
+
+fn normalize_undefined_var_fallback_mode(value: Option<&str>) -> Option<UndefinedVarFallbackMode> {
+    let raw = value?.trim().to_lowercase();
+    match raw.as_str() {
+        "warning" | "warn" => Some(UndefinedVarFallbackMode::Warning),
+        "info" | "information" => Some(UndefinedVarFallbackMode::Info),
+        "off" | "omit" | "none" | "disable" | "disabled" => Some(UndefinedVarFallbackMode::Off),
         _ => None,
     }
 }
@@ -83,148 +73,35 @@ fn parse_path_display(value: Option<&str>) -> (Option<PathDisplayMode>, Option<i
     )
 }
 
-fn normalize_undefined_var_fallback_mode(value: Option<&str>) -> Option<UndefinedVarFallbackMode> {
-    let raw = value?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    match raw.to_lowercase().as_str() {
-        "warning" | "warn" => Some(UndefinedVarFallbackMode::Warning),
-        "info" | "information" => Some(UndefinedVarFallbackMode::Info),
-        "off" | "omit" | "none" | "disable" | "disabled" => Some(UndefinedVarFallbackMode::Off),
-        _ => None,
-    }
-}
-
-fn resolve_undefined_var_fallback(
-    args: &[String],
-    env: &HashMap<String, String>,
-) -> UndefinedVarFallbackMode {
-    let cli_value = get_arg_value(args, "undefined-var-fallback");
-    if let Some(mode) = normalize_undefined_var_fallback_mode(cli_value.as_deref()) {
-        return mode;
-    }
-
-    let env_value = env
-        .get("CSS_LSP_UNDEFINED_VAR_FALLBACK")
-        .map(|v| v.as_str());
-    if let Some(mode) = normalize_undefined_var_fallback_mode(env_value) {
-        return mode;
-    }
-
-    UndefinedVarFallbackMode::Warning
-}
-
-fn split_lookup_list(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(|entry| entry.trim())
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| entry.to_string())
-        .collect()
-}
-
-fn resolve_lookup_files(args: &[String], env: &HashMap<String, String>) -> Option<Vec<String>> {
-    let mut cli_files = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--lookup-files" {
-            if let Some(next) = args.get(i + 1) {
-                if !next.starts_with('-') {
-                    cli_files.extend(split_lookup_list(next));
-                    i += 1;
-                }
-            }
-        } else if let Some(rest) = arg.strip_prefix("--lookup-files=") {
-            cli_files.extend(split_lookup_list(rest));
-        } else if arg == "--lookup-file" {
-            if let Some(next) = args.get(i + 1) {
-                if !next.starts_with('-') {
-                    cli_files.push(next.to_string());
-                    i += 1;
-                }
-            }
-        } else if let Some(rest) = arg.strip_prefix("--lookup-file=") {
-            cli_files.push(rest.to_string());
-        }
-        i += 1;
-    }
-
-    if !cli_files.is_empty() {
-        return Some(cli_files);
-    }
-
-    if let Some(env_value) = env.get("CSS_LSP_LOOKUP_FILES") {
-        let env_files = split_lookup_list(env_value);
-        if !env_files.is_empty() {
-            return Some(env_files);
-        }
-    }
-
-    None
-}
-
-fn resolve_ignore_globs(args: &[String], env: &HashMap<String, String>) -> Option<Vec<String>> {
-    let mut cli_globs = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--ignore-globs" {
-            if let Some(next) = args.get(i + 1) {
-                if !next.starts_with('-') {
-                    cli_globs.extend(split_lookup_list(next));
-                    i += 1;
-                }
-            }
-        } else if let Some(rest) = arg.strip_prefix("--ignore-globs=") {
-            cli_globs.extend(split_lookup_list(rest));
-        } else if arg == "--ignore-glob" {
-            if let Some(next) = args.get(i + 1) {
-                if !next.starts_with('-') {
-                    cli_globs.push(next.to_string());
-                    i += 1;
-                }
-            }
-        } else if let Some(rest) = arg.strip_prefix("--ignore-glob=") {
-            cli_globs.push(rest.to_string());
-        }
-        i += 1;
-    }
-
-    if !cli_globs.is_empty() {
-        return Some(cli_globs);
-    }
-
-    if let Some(env_value) = env.get("CSS_LSP_IGNORE_GLOBS") {
-        let env_globs = split_lookup_list(env_value);
-        if !env_globs.is_empty() {
-            return Some(env_globs);
-        }
-    }
-
-    None
-}
-
 pub fn build_runtime_config_with_env(
     args: &[String],
     env: &HashMap<String, String>,
 ) -> RuntimeConfig {
-    let enable_color_provider = !args.iter().any(|arg| arg == "--no-color-preview");
-    let color_only_on_variables = args.iter().any(|arg| arg == "--color-only-variables")
-        || env
-            .get("CSS_LSP_COLOR_ONLY_VARIABLES")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+    let enable_color_provider = flag_bool(
+        args,
+        env,
+        "color-preview",
+        "CSS_LSP_COLOR_PREVIEW",
+        "--no-color-preview",
+        true,
+    );
 
-    let lookup_files = resolve_lookup_files(args, env);
-    let ignore_globs = resolve_ignore_globs(args, env);
+    let color_only_on_variables = flag_bool_simple(
+        args,
+        env,
+        "CSS_LSP_COLOR_ONLY_VARIABLES",
+        "--color-only-variables",
+        false,
+    );
+
+    let lookup_files = flag_opt(args, env, "lookup-files", "CSS_LSP_LOOKUP_FILES", None);
+
+    let ignore_globs = flag_opt(args, env, "ignore-globs", "CSS_LSP_IGNORE_GLOBS", None);
 
     let path_display_arg = get_arg_value(args, "path-display");
     let path_display_env = env.get("CSS_LSP_PATH_DISPLAY").cloned();
     let (mode_override, length_override) =
         parse_path_display(path_display_arg.as_deref().or(path_display_env.as_deref()));
-
     let path_display_mode = mode_override.unwrap_or(PathDisplayMode::Relative);
 
     let length_arg = get_arg_value(args, "path-display-length");
@@ -233,7 +110,34 @@ pub fn build_runtime_config_with_env(
         .or(length_override)
         .unwrap_or(1);
     let path_display_abbrev_length = length_raw.max(0) as usize;
-    let undefined_var_fallback = resolve_undefined_var_fallback(args, env);
+
+    let undefined_var_fallback = flag_enum(
+        args,
+        env,
+        "undefined-var-fallback",
+        "CSS_LSP_UNDEFINED_VAR_FALLBACK",
+        None,
+        normalize_undefined_var_fallback_mode,
+        UndefinedVarFallbackMode::Warning,
+    );
+
+    let suggest_add_fallback = flag_bool(
+        args,
+        env,
+        "suggest-add-fallback",
+        "CSS_LSP_SUGGEST_ADD_FALLBACK",
+        "--no-suggest-add-fallback",
+        true,
+    );
+
+    let suggest_exact_color_variables = flag_bool(
+        args,
+        env,
+        "suggest-exact-color-variables",
+        "CSS_LSP_SUGGEST_EXACT_COLOR_VARIABLES",
+        "--no-suggest-exact-color-variables",
+        true,
+    );
 
     RuntimeConfig {
         enable_color_provider,
@@ -243,6 +147,8 @@ pub fn build_runtime_config_with_env(
         path_display_mode,
         path_display_abbrev_length,
         undefined_var_fallback,
+        suggest_add_fallback,
+        suggest_exact_color_variables,
     }
 }
 
@@ -262,7 +168,7 @@ mod tests {
             "--color-only-variables".to_string(),
             "--lookup-files".to_string(),
             "a.css,b.html".to_string(),
-            "--ignore-glob=dist/**".to_string(),
+            "--ignore-globs=dist/**".to_string(),
             "--path-display=abbreviated:2".to_string(),
             "--undefined-var-fallback=info".to_string(),
         ];
@@ -349,5 +255,67 @@ mod tests {
             config.undefined_var_fallback,
             UndefinedVarFallbackMode::Warning
         );
+    }
+
+    #[test]
+    fn runtime_config_suggest_add_fallback_enabled_by_default() {
+        let args: Vec<String> = Vec::new();
+        let env = HashMap::new();
+        let config = build_runtime_config_with_env(&args, &env);
+        assert!(config.suggest_add_fallback);
+    }
+
+    #[test]
+    fn runtime_config_suggest_add_fallback_disabled_by_flag() {
+        let args = vec!["--no-suggest-add-fallback".to_string()];
+        let env = HashMap::new();
+        let config = build_runtime_config_with_env(&args, &env);
+        assert!(!config.suggest_add_fallback);
+    }
+
+    #[test]
+    fn runtime_config_suggest_add_fallback_disabled_by_env() {
+        let args: Vec<String> = Vec::new();
+        let mut env = HashMap::new();
+        env.insert("CSS_LSP_SUGGEST_ADD_FALLBACK".to_string(), "0".to_string());
+        let config = build_runtime_config_with_env(&args, &env);
+        assert!(!config.suggest_add_fallback);
+    }
+
+    #[test]
+    fn runtime_config_suggest_add_fallback_enabled_by_env() {
+        let args: Vec<String> = Vec::new();
+        let mut env = HashMap::new();
+        env.insert("CSS_LSP_SUGGEST_ADD_FALLBACK".to_string(), "1".to_string());
+        let config = build_runtime_config_with_env(&args, &env);
+        assert!(config.suggest_add_fallback);
+    }
+
+    #[test]
+    fn runtime_config_suggest_exact_color_variables_enabled_by_default() {
+        let args: Vec<String> = Vec::new();
+        let env = HashMap::new();
+        let config = build_runtime_config_with_env(&args, &env);
+        assert!(config.suggest_exact_color_variables);
+    }
+
+    #[test]
+    fn runtime_config_suggest_exact_color_variables_disabled_by_flag() {
+        let args = vec!["--no-suggest-exact-color-variables".to_string()];
+        let env = HashMap::new();
+        let config = build_runtime_config_with_env(&args, &env);
+        assert!(!config.suggest_exact_color_variables);
+    }
+
+    #[test]
+    fn runtime_config_suggest_exact_color_variables_disabled_by_env() {
+        let args: Vec<String> = Vec::new();
+        let mut env = HashMap::new();
+        env.insert(
+            "CSS_LSP_SUGGEST_EXACT_COLOR_VARIABLES".to_string(),
+            "0".to_string(),
+        );
+        let config = build_runtime_config_with_env(&args, &env);
+        assert!(!config.suggest_exact_color_variables);
     }
 }
