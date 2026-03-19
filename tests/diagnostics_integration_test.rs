@@ -631,7 +631,7 @@ async fn test_literal_color_diagnostic_and_quick_fixes() {
             "css-variable-lsp.literal-color-replaceable".to_string()
         ))
     );
-    assert!(diagnostic.message.contains("2 replacements"));
+    assert!(diagnostic.message.contains("variables:"));
 
     let params = CodeActionParams {
         text_document: TextDocumentIdentifier {
@@ -743,4 +743,74 @@ async fn test_literal_color_revalidation_on_variable_color_change() {
     let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 0);
+}
+
+#[tokio::test]
+async fn test_literal_color_diagnostic_shows_single_variable_name() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "scss",
+        ":root { --primary: #3b82f6; }",
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+
+    open_document(
+        &mut service,
+        index_uri.clone(),
+        "scss",
+        ".card { color: #3b82f6; }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    let diagnostic = &diagnostics.diagnostics[0];
+    assert!(diagnostic.message.contains("--primary"));
+    assert!(diagnostic
+        .message
+        .contains("Consider using --primary for this color"));
+}
+
+#[tokio::test]
+async fn test_literal_color_diagnostic_shows_multiple_variable_names() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "scss",
+        ":root { --white: #fff; --snow: #fff; --ghost: #ffffff; }",
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+
+    open_document(
+        &mut service,
+        index_uri.clone(),
+        "scss",
+        ".card { color: #fff; }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    let diagnostic = &diagnostics.diagnostics[0];
+    assert!(diagnostic.message.contains("variables:"));
+    assert!(diagnostic.message.contains("--white"));
+    assert!(diagnostic.message.contains("--snow"));
+    assert!(diagnostic.message.contains("--ghost"));
 }
