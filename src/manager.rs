@@ -1,12 +1,15 @@
-use ls_types::Uri;
+use ls_types::{Position, Uri};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::color::parse_color;
+use crate::color::{color_from_key, normalize_color, parse_color, NormalizedColorKey};
 use crate::dom_tree::DomTree;
 use crate::specificity::sort_by_cascade;
-use crate::types::{Config, CssVariable, CssVariableUsage};
+use crate::types::{Config, CssVariable, CssVariableUsage, LiteralColorOccurrence};
+
+type LiteralColorMap = HashMap<Uri, HashMap<u32, Vec<LiteralColorOccurrence>>>;
 
 /// Manages CSS variables across the workspace
 #[derive(Clone)]
@@ -16,6 +19,19 @@ pub struct CssVariableManager {
 
     /// Map of variable name -> list of usages
     usages: Arc<RwLock<HashMap<String, Vec<CssVariableUsage>>>>,
+
+    /// Literal color occurrences grouped by document and line
+    /// Outer map: URI -> Inner map (line number -> colors on that line)
+    literal_colors: Arc<RwLock<LiteralColorMap>>,
+
+    /// Map of normalized colors to matching variable names
+    color_variables: Arc<RwLock<HashMap<NormalizedColorKey, HashSet<String>>>>,
+
+    /// Flag indicating if color index needs rebuilding
+    color_variables_dirty: Arc<AtomicBool>,
+
+    /// Counter for rebuilds (for testing/benchmarking)
+    rebuild_count: Arc<AtomicUsize>,
 
     /// Configuration
     config: Arc<RwLock<Config>>,
@@ -29,6 +45,10 @@ impl CssVariableManager {
         Self {
             variables: Arc::new(RwLock::new(HashMap::new())),
             usages: Arc::new(RwLock::new(HashMap::new())),
+            literal_colors: Arc::new(RwLock::new(HashMap::new())),
+            color_variables: Arc::new(RwLock::new(HashMap::new())),
+            color_variables_dirty: Arc::new(AtomicBool::new(true)),
+            rebuild_count: Arc::new(AtomicUsize::new(0)),
             config: Arc::new(RwLock::new(config)),
             dom_trees: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -51,6 +71,18 @@ impl CssVariableManager {
             .push(usage);
     }
 
+    /// Add a literal color occurrence
+    pub async fn add_literal_color(&self, occurrence: LiteralColorOccurrence) {
+        let mut literal_colors = self.literal_colors.write().await;
+        let line = occurrence.range.start.line;
+        literal_colors
+            .entry(occurrence.uri.clone())
+            .or_default()
+            .entry(line)
+            .or_default()
+            .push(occurrence);
+    }
+
     /// Get all definitions of a variable
     pub async fn get_variables(&self, name: &str) -> Vec<CssVariable> {
         let vars = self.variables.read().await;
@@ -65,30 +97,15 @@ impl CssVariableManager {
 
     /// Resolve a variable name to a color using cascade ordering and var() chains.
     pub async fn resolve_variable_color(&self, name: &str) -> Option<ls_types::Color> {
-        let mut seen = std::collections::HashSet::new();
-        let mut current = name.to_string();
+        self.resolve_variable_color_key(name)
+            .await
+            .map(color_from_key)
+    }
 
-        loop {
-            if seen.contains(&current) {
-                return None;
-            }
-            seen.insert(current.clone());
-
-            let mut variables = self.get_variables(&current).await;
-            if variables.is_empty() {
-                return None;
-            }
-
-            sort_by_cascade(&mut variables);
-            let variable = &variables[0];
-
-            if let Some(next_name) = extract_var_reference(&variable.value) {
-                current = next_name;
-                continue;
-            }
-
-            return parse_color(&variable.value);
-        }
+    /// Resolve a variable name to a normalized color key using cascade ordering and var() chains.
+    pub async fn resolve_variable_color_key(&self, name: &str) -> Option<NormalizedColorKey> {
+        let vars = self.variables.read().await;
+        resolve_variable_color_key_from_map(name, &vars)
     }
 
     /// Get all variables (for completion)
@@ -104,10 +121,64 @@ impl CssVariableManager {
         (definitions, usages)
     }
 
+    /// Get literal color occurrences in a specific document.
+    pub async fn get_document_literal_colors(&self, uri: &Uri) -> Vec<LiteralColorOccurrence> {
+        let literal_colors = self.literal_colors.read().await;
+        literal_colors
+            .get(uri)
+            .map(|by_line| by_line.values().flatten().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get literal color occurrences at a specific position (O(1) line lookup + O(k) scan).
+    pub async fn get_literal_colors_at_position(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> Vec<LiteralColorOccurrence> {
+        let literal_colors = self.literal_colors.read().await;
+        literal_colors
+            .get(uri)
+            .and_then(|by_line| by_line.get(&position.line).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Get all variables whose resolved color exactly matches the normalized color key.
+    pub async fn get_variables_by_color_key(&self, key: &NormalizedColorKey) -> Vec<CssVariable> {
+        let names = {
+            let index = self.color_variables.read().await;
+            index.get(key).cloned().unwrap_or_default()
+        };
+        let vars = self.variables.read().await;
+        let mut matches = Vec::new();
+        for name in names {
+            if let Some(definitions) = vars.get(&name) {
+                let mut definitions = definitions.clone();
+                sort_by_cascade(&mut definitions);
+                if let Some(variable) = definitions.into_iter().next() {
+                    matches.push(variable);
+                }
+            }
+        }
+        matches.sort_by(|a, b| a.name.cmp(&b.name));
+        matches
+    }
+
+    /// Get the set of resolved variable colors currently defined in a specific document.
+    pub async fn get_document_resolved_color_keys(&self, uri: &Uri) -> HashSet<NormalizedColorKey> {
+        let names = self.get_document_variable_names(uri).await;
+        let vars = self.variables.read().await;
+        names
+            .into_iter()
+            .filter_map(|name| resolve_variable_color_key_from_map(&name, &vars))
+            .collect()
+    }
+
     /// Remove all data for a document
     pub async fn remove_document(&self, uri: &Uri) {
         let mut vars = self.variables.write().await;
         let mut usages = self.usages.write().await;
+        let mut literal_colors = self.literal_colors.write().await;
         let mut dom_trees = self.dom_trees.write().await;
 
         // Remove variables from this document
@@ -122,6 +193,7 @@ impl CssVariableManager {
         }
         usages.retain(|_, usage_list| !usage_list.is_empty());
 
+        literal_colors.remove(uri);
         dom_trees.remove(uri);
     }
 
@@ -174,6 +246,52 @@ impl CssVariableManager {
         let mut stored = self.config.write().await;
         *stored = config;
     }
+
+    /// Rebuild the normalized-color -> variable-name lookup from current workspace state.
+    pub async fn rebuild_color_index(&self) {
+        self.rebuild_count.fetch_add(1, Ordering::SeqCst);
+
+        let snapshot = {
+            let vars = self.variables.read().await;
+            vars.clone()
+        };
+
+        let mut color_variables: HashMap<NormalizedColorKey, HashSet<String>> = HashMap::new();
+        for name in snapshot.keys() {
+            if let Some(key) = resolve_variable_color_key_from_map(name, &snapshot) {
+                color_variables.entry(key).or_default().insert(name.clone());
+            }
+        }
+
+        let mut stored = self.color_variables.write().await;
+        *stored = color_variables;
+        self.color_variables_dirty.store(false, Ordering::SeqCst);
+    }
+
+    /// Get the number of rebuilds performed (for testing).
+    #[cfg(test)]
+    pub fn get_rebuild_count(&self) -> usize {
+        self.rebuild_count.load(Ordering::SeqCst)
+    }
+
+    /// Reset the rebuild counter (for testing).
+    #[cfg(test)]
+    pub fn reset_rebuild_count(&self) {
+        self.rebuild_count.store(0, Ordering::SeqCst);
+    }
+
+    /// Mark the color index as needing a rebuild.
+    pub fn mark_color_index_dirty(&self) {
+        self.color_variables_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Ensure the color index is valid, rebuilding if necessary.
+    /// Call this before any operation that depends on the color index.
+    pub async fn ensure_color_index_valid(&self) {
+        if self.color_variables_dirty.load(Ordering::SeqCst) {
+            self.rebuild_color_index().await;
+        }
+    }
 }
 
 fn extract_var_reference(value: &str) -> Option<String> {
@@ -215,6 +333,36 @@ fn extract_var_reference(value: &str) -> Option<String> {
     Some(format!("--{}", &inner[..name_len]))
 }
 
+fn resolve_variable_color_key_from_map(
+    name: &str,
+    variables: &HashMap<String, Vec<CssVariable>>,
+) -> Option<NormalizedColorKey> {
+    let mut seen = HashSet::new();
+    let mut current = name.to_string();
+
+    loop {
+        if seen.contains(&current) {
+            return None;
+        }
+        seen.insert(current.clone());
+
+        let mut definitions = variables.get(&current)?.clone();
+        if definitions.is_empty() {
+            return None;
+        }
+
+        sort_by_cascade(&mut definitions);
+        let variable = &definitions[0];
+
+        if let Some(next_name) = extract_var_reference(&variable.value) {
+            current = next_name;
+            continue;
+        }
+
+        return parse_color(&variable.value).map(normalize_color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +392,21 @@ mod tests {
             uri: Uri::from_str(uri).unwrap(),
             usage_context: context.to_string(),
             dom_node: None,
+        }
+    }
+
+    fn create_literal_color(
+        text: &str,
+        uri: &str,
+        color: &str,
+        context: &str,
+    ) -> LiteralColorOccurrence {
+        LiteralColorOccurrence {
+            text: text.to_string(),
+            uri: Uri::from_str(uri).unwrap(),
+            range: Range::new(Position::new(0, 0), Position::new(0, text.len() as u32)),
+            usage_context: context.to_string(),
+            normalized_color: crate::color::normalized_color_key(color).unwrap(),
         }
     }
 
@@ -325,13 +488,16 @@ mod tests {
 
         let var = create_test_variable("--primary", "blue", ":root", "file:///test.css");
         let usage = create_test_usage("--primary", ".button", "file:///test.css");
+        let literal = create_literal_color("blue", "file:///test.css", "blue", ".button");
 
         manager.add_variable(var).await;
         manager.add_usage(usage).await;
+        manager.add_literal_color(literal).await;
 
         // Verify they exist
         assert_eq!(manager.get_variables("--primary").await.len(), 1);
         assert_eq!(manager.get_usages("--primary").await.len(), 1);
+        assert_eq!(manager.get_document_literal_colors(&uri).await.len(), 1);
 
         // Remove document
         manager.remove_document(&uri).await;
@@ -339,6 +505,7 @@ mod tests {
         // Verify they're gone
         assert_eq!(manager.get_variables("--primary").await.len(), 0);
         assert_eq!(manager.get_usages("--primary").await.len(), 0);
+        assert_eq!(manager.get_document_literal_colors(&uri).await.len(), 0);
     }
 
     #[tokio::test]
@@ -383,6 +550,92 @@ mod tests {
 
         let color = manager.resolve_variable_color("--primary-color").await;
         assert!(color.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_manager_resolve_variable_color_key_chain() {
+        let manager = CssVariableManager::new(Config::default());
+
+        manager
+            .add_variable(create_test_variable(
+                "--base-color",
+                "#fff",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
+        manager
+            .add_variable(create_test_variable(
+                "--alias-color",
+                "var(--base-color)",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
+
+        let key = manager.resolve_variable_color_key("--alias-color").await;
+        assert_eq!(key, crate::color::normalized_color_key("white"));
+    }
+
+    #[tokio::test]
+    async fn test_manager_get_variables_by_color_key_excludes_non_colors() {
+        let manager = CssVariableManager::new(Config::default());
+
+        manager
+            .add_variable(create_test_variable(
+                "--spacing",
+                "1rem",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
+        manager
+            .add_variable(create_test_variable(
+                "--text-color",
+                "#fff",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
+
+        manager.rebuild_color_index().await;
+
+        let matches = manager
+            .get_variables_by_color_key(&crate::color::normalized_color_key("white").unwrap())
+            .await;
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "--text-color");
+    }
+
+    #[tokio::test]
+    async fn test_manager_get_variables_by_color_key_multiple_names() {
+        let manager = CssVariableManager::new(Config::default());
+
+        manager
+            .add_variable(create_test_variable(
+                "--text-color",
+                "#fff",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
+        manager
+            .add_variable(create_test_variable(
+                "--surface",
+                "rgb(255 255 255)",
+                ":root",
+                "file:///test.css",
+            ))
+            .await;
+
+        manager.rebuild_color_index().await;
+
+        let matches = manager
+            .get_variables_by_color_key(&crate::color::normalized_color_key("white").unwrap())
+            .await;
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().any(|var| var.name == "--surface"));
+        assert!(matches.iter().any(|var| var.name == "--text-color"));
     }
 
     #[tokio::test]
@@ -487,5 +740,135 @@ mod tests {
         let (defs, usages) = manager.get_references("--does-not-exist").await;
         assert_eq!(defs.len(), 0);
         assert_eq!(usages.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_color_index_rebuild_performance_100k_vars() {
+        use std::time::Instant;
+
+        let manager = CssVariableManager::new(Config::default());
+
+        // Add 100_000 color variables with chains
+        for i in 0..100_000 {
+            let value = if i % 2 == 0 {
+                "#ffffff".to_string()
+            } else {
+                format!("var(--color-{})", (i + 1) % 100_000)
+            };
+            manager
+                .add_variable(create_test_variable(
+                    &format!("--color-{}", i),
+                    &value,
+                    ":root",
+                    "file:///test.css",
+                ))
+                .await;
+        }
+
+        // Measure rebuild time
+        let start = Instant::now();
+        manager.rebuild_color_index().await;
+        let duration = start.elapsed();
+
+        println!(
+            "Rebuild time for 100_000 vars (with chains): {:?}",
+            duration
+        );
+
+        // Should complete in reasonable time (baseline: aim for < 1s after optimization)
+        // For now, just log and ensure it completes
+        assert!(
+            duration.as_secs() < 30,
+            "Rebuild took too long: {:?}",
+            duration
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lazy_rebuild_batches_multiple_changes() {
+        let manager = CssVariableManager::new(Config::default());
+
+        // Add some variables
+        for i in 0..10 {
+            manager
+                .add_variable(create_test_variable(
+                    &format!("--color-{}", i),
+                    "#ffffff",
+                    ":root",
+                    "file:///test.css",
+                ))
+                .await;
+        }
+
+        // Mark dirty multiple times
+        manager.mark_color_index_dirty();
+        manager.mark_color_index_dirty();
+        manager.mark_color_index_dirty();
+
+        // Ensure valid - should only rebuild once
+        manager.ensure_color_index_valid().await;
+
+        // Verify the index is populated
+        let white_key = crate::color::normalized_color_key("#ffffff").unwrap();
+        let matches = manager.get_variables_by_color_key(&white_key).await;
+        assert_eq!(matches.len(), 10);
+
+        // After ensure_color_index_valid, calling it again should not rebuild
+        // (dirty flag should be false)
+        manager.ensure_color_index_valid().await;
+
+        // Verify still correct
+        let matches = manager.get_variables_by_color_key(&white_key).await;
+        assert_eq!(matches.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_lazy_rebuild_reduces_rebuild_count() {
+        let manager = CssVariableManager::new(Config::default());
+
+        // Simulate old behavior: rebuild on every change
+        for i in 0..10 {
+            manager
+                .add_variable(create_test_variable(
+                    &format!("--color-{}", i),
+                    "#ffffff",
+                    ":root",
+                    "file:///test.css",
+                ))
+                .await;
+        }
+
+        // OLD pattern: rebuild on every add
+        manager.rebuild_color_index().await;
+        manager.rebuild_color_index().await;
+        manager.rebuild_color_index().await;
+        let old_rebuild_count = manager.get_rebuild_count();
+        manager.reset_rebuild_count();
+
+        // NEW pattern: mark dirty, then ensure valid once
+        manager.mark_color_index_dirty();
+        manager.mark_color_index_dirty();
+        manager.mark_color_index_dirty();
+        manager.ensure_color_index_valid().await;
+        let new_rebuild_count = manager.get_rebuild_count();
+
+        println!(
+            "OLD pattern (immediate rebuild): {} rebuilds",
+            old_rebuild_count
+        );
+        println!("NEW pattern (lazy rebuild): {} rebuilds", new_rebuild_count);
+
+        // New pattern should have far fewer rebuilds
+        assert!(
+            new_rebuild_count < old_rebuild_count,
+            "Lazy rebuild should reduce count from {} to {}, but got {}",
+            old_rebuild_count,
+            new_rebuild_count,
+            new_rebuild_count
+        );
+        assert_eq!(
+            new_rebuild_count, 1,
+            "Should have exactly 1 rebuild after ensure"
+        );
     }
 }

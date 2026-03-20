@@ -25,7 +25,7 @@ use regex::Regex;
 use tokio::sync::RwLock;
 use tower_lsp_server::{Client, LanguageServer};
 
-use crate::color::{generate_color_presentations, parse_color};
+use crate::color::{generate_color_presentations, parse_color, NormalizedColorKey};
 use crate::manager::CssVariableManager;
 use crate::parsers::{parse_css_document, parse_html_document};
 use crate::path_display::{format_uri_for_display, to_normalized_fs_path, PathDisplayOptions};
@@ -40,6 +40,7 @@ fn code_actions_for_undefined_variables(
     uri: &Uri,
     text: &str,
     context: &CodeActionContext,
+    runtime_config: &RuntimeConfig,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
 
@@ -94,39 +95,104 @@ fn code_actions_for_undefined_variables(
 
         // Optional quickfix: add fallback to `var(--name)` -> `var(--name, )`
         // Only offered when the diagnostic covers a `var(...)` call without a comma.
-        if let (Some(start), Some(end)) = (
-            crate::types::position_to_offset(text, diag.range.start),
-            crate::types::position_to_offset(text, diag.range.end),
-        ) {
-            if start < end && end <= text.len() {
-                let slice = &text[start..end];
-                if slice.starts_with("var(") && slice.ends_with(')') && !slice.contains(',') {
-                    let new_text = slice.trim_end_matches(')').to_string() + ", )";
-                    let edit = WorkspaceEdit {
-                        changes: Some(HashMap::from([(
-                            uri.clone(),
-                            vec![TextEdit {
-                                range: diag.range,
-                                new_text,
-                            }],
-                        )])),
-                        document_changes: None,
-                        change_annotations: None,
-                    };
+        // Can be disabled via --no-suggest-add-fallback or CSS_LSP_SUGGEST_ADD_FALLBACK=0
+        if runtime_config.suggest_add_fallback {
+            if let (Some(start), Some(end)) = (
+                crate::types::position_to_offset(text, diag.range.start),
+                crate::types::position_to_offset(text, diag.range.end),
+            ) {
+                if start < end && end <= text.len() {
+                    let slice = &text[start..end];
+                    if slice.starts_with("var(") && slice.ends_with(')') && !slice.contains(',') {
+                        let new_text = slice.trim_end_matches(')').to_string() + ", )";
+                        let edit = WorkspaceEdit {
+                            changes: Some(HashMap::from([(
+                                uri.clone(),
+                                vec![TextEdit {
+                                    range: diag.range,
+                                    new_text,
+                                }],
+                            )])),
+                            document_changes: None,
+                            change_annotations: None,
+                        };
 
-                    let action = CodeAction {
-                        title: format!("Add fallback to {}", name),
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        diagnostics: Some(vec![diag.clone()]),
-                        edit: Some(edit),
-                        command: None,
-                        is_preferred: Some(false),
-                        disabled: None,
-                        data: None,
-                    };
-                    actions.push(CodeActionOrCommand::CodeAction(action));
+                        let action = CodeAction {
+                            title: format!("Add fallback to {}", name),
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            diagnostics: Some(vec![diag.clone()]),
+                            edit: Some(edit),
+                            command: None,
+                            is_preferred: Some(false),
+                            disabled: None,
+                            data: None,
+                        };
+                        actions.push(CodeActionOrCommand::CodeAction(action));
+                    }
                 }
             }
+        }
+    }
+
+    actions
+}
+
+fn code_actions_for_replaceable_literal_colors(
+    uri: &Uri,
+    context: &CodeActionContext,
+    runtime_config: &RuntimeConfig,
+) -> Vec<CodeActionOrCommand> {
+    if !runtime_config.suggest_exact_color_variables {
+        return Vec::new();
+    }
+
+    let mut actions = Vec::new();
+
+    for diag in &context.diagnostics {
+        let code = match diag.code.as_ref() {
+            Some(ls_types::NumberOrString::String(code)) => code.as_str(),
+            _ => continue,
+        };
+        if code != "css-variable-lsp.literal-color-replaceable" {
+            continue;
+        }
+
+        let replacements = diag
+            .data
+            .as_ref()
+            .and_then(|d| d.get("replacements"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for replacement in replacements {
+            let name = match replacement.get("name").and_then(|v| v.as_str()) {
+                Some(name) => name,
+                None => continue,
+            };
+
+            let edit = WorkspaceEdit {
+                changes: Some(HashMap::from([(
+                    uri.clone(),
+                    vec![TextEdit {
+                        range: diag.range,
+                        new_text: format!("var({})", name),
+                    }],
+                )])),
+                document_changes: None,
+                change_annotations: None,
+            };
+
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Replace with var({})", name),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(edit),
+                command: None,
+                is_preferred: Some(false),
+                disabled: None,
+                data: None,
+            }));
         }
     }
 
@@ -180,6 +246,8 @@ pub struct CssVariableLsp {
     document_language_map: Arc<RwLock<HashMap<Uri, String>>>,
     document_usage_map: Arc<RwLock<HashMap<Uri, HashSet<String>>>>,
     usage_index: Arc<RwLock<HashMap<String, HashSet<Uri>>>>,
+    /// URIs of documents that contain literal color occurrences
+    color_occurrence_uris: Arc<RwLock<HashSet<Uri>>>,
 }
 
 impl CssVariableLsp {
@@ -203,6 +271,7 @@ impl CssVariableLsp {
             document_language_map: Arc::new(RwLock::new(HashMap::new())),
             document_usage_map: Arc::new(RwLock::new(HashMap::new())),
             usage_index: Arc::new(RwLock::new(HashMap::new())),
+            color_occurrence_uris: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -237,10 +306,13 @@ impl CssVariableLsp {
                 .log_message(MessageType::ERROR, format!("Parse error: {}", e))
                 .await;
         }
+
+        self.manager.mark_color_index_dirty();
     }
 
     async fn validate_document_text(&self, uri: &Uri, text: &str) {
         let has_related_info = *self.has_diagnostic_related_information.read().await;
+        self.manager.ensure_color_index_valid().await;
         validate_document_text_with(
             &self.client,
             self.manager.as_ref(),
@@ -251,6 +323,7 @@ impl CssVariableLsp {
             text,
             &self.document_usage_map,
             &self.usage_index,
+            Some(&self.color_occurrence_uris),
         )
         .await;
     }
@@ -275,6 +348,71 @@ impl CssVariableLsp {
                 &text,
                 &self.document_usage_map,
                 &self.usage_index,
+                Some(&self.color_occurrence_uris),
+            )
+            .await;
+        }
+    }
+
+    async fn revalidate_affected_documents(
+        &self,
+        changed_names: &HashSet<String>,
+        exclude_uri: Option<&Uri>,
+        revalidate_color_occurrences: bool,
+    ) {
+        if changed_names.is_empty() && !revalidate_color_occurrences {
+            return;
+        }
+
+        let mut affected_uris = HashSet::new();
+        {
+            let index = self.usage_index.read().await;
+            for name in changed_names {
+                if let Some(uris) = index.get(name) {
+                    for uri in uris {
+                        if exclude_uri != Some(uri) {
+                            affected_uris.insert(uri.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also revalidate documents with literal color occurrences if colors may have changed
+        if revalidate_color_occurrences {
+            let color_uris = self.color_occurrence_uris.read().await;
+            for uri in color_uris.iter() {
+                if exclude_uri != Some(uri) {
+                    affected_uris.insert(uri.clone());
+                }
+            }
+        }
+
+        if affected_uris.is_empty() {
+            return;
+        }
+
+        let has_related_info = *self.has_diagnostic_related_information.read().await;
+        let affected_snapshot = {
+            let docs = self.document_map.read().await;
+            affected_uris
+                .into_iter()
+                .filter_map(|uri| docs.get(&uri).map(|text| (uri.clone(), text.clone())))
+                .collect::<Vec<_>>()
+        };
+
+        for (uri, text) in affected_snapshot {
+            validate_document_text_with(
+                &self.client,
+                self.manager.as_ref(),
+                &self.usage_regex,
+                self.runtime_config.undefined_var_fallback,
+                has_related_info,
+                &uri,
+                &text,
+                &self.document_usage_map,
+                &self.usage_index,
+                Some(&self.color_occurrence_uris),
             )
             .await;
         }
@@ -295,6 +433,7 @@ impl CssVariableLsp {
             }
             Err(_) => {
                 self.manager.remove_document(uri).await;
+                self.manager.mark_color_index_dirty();
             }
         }
     }
@@ -346,54 +485,6 @@ impl CssVariableLsp {
     async fn is_document_open(&self, uri: &Uri) -> bool {
         let docs = self.document_map.read().await;
         docs.contains_key(uri)
-    }
-
-    async fn revalidate_affected_documents(
-        &self,
-        changed_names: &HashSet<String>,
-        exclude_uri: Option<&Uri>,
-    ) {
-        let mut affected_uris = HashSet::new();
-        {
-            let index = self.usage_index.read().await;
-            for name in changed_names {
-                if let Some(uris) = index.get(name) {
-                    for uri in uris {
-                        if exclude_uri != Some(uri) {
-                            affected_uris.insert(uri.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        if affected_uris.is_empty() {
-            return;
-        }
-
-        let has_related_info = *self.has_diagnostic_related_information.read().await;
-        let affected_snapshot = {
-            let docs = self.document_map.read().await;
-            affected_uris
-                .into_iter()
-                .filter_map(|uri| docs.get(&uri).map(|text| (uri, text.clone())))
-                .collect::<Vec<_>>()
-        };
-
-        for (uri, text) in affected_snapshot {
-            validate_document_text_with(
-                &self.client,
-                self.manager.as_ref(),
-                &self.usage_regex,
-                self.runtime_config.undefined_var_fallback,
-                has_related_info,
-                &uri,
-                &text,
-                &self.document_usage_map,
-                &self.usage_index,
-            )
-            .await;
-        }
     }
 }
 
@@ -488,6 +579,7 @@ impl LanguageServer for CssVariableLsp {
 
         Ok(InitializeResult {
             capabilities,
+            offset_encoding: None,
             server_info: Some(ls_types::ServerInfo {
                 name: "css-variable-lsp-rust".to_string(),
                 version: Some("0.1.0".to_string()),
@@ -576,6 +668,7 @@ impl LanguageServer for CssVariableLsp {
         let language_id = params.text_document.language_id;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
+        let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         {
             let mut docs = self.document_map.write().await;
@@ -589,15 +682,17 @@ impl LanguageServer for CssVariableLsp {
             .await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
+        let new_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         self.validate_document_text(&uri, &text).await;
 
-        if old_names != new_names {
-            let changed_names: HashSet<_> = old_names
-                .symmetric_difference(&new_names)
-                .cloned()
-                .collect();
-            self.revalidate_affected_documents(&changed_names, Some(&uri))
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
                 .await;
         }
     }
@@ -607,6 +702,7 @@ impl LanguageServer for CssVariableLsp {
         let changes = params.content_changes;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
+        let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         let updated_text = match self.apply_content_changes(&uri, changes).await {
             Some(text) => text,
@@ -620,15 +716,17 @@ impl LanguageServer for CssVariableLsp {
             .await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
+        let new_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         self.validate_document_text(&uri, &updated_text).await;
 
-        if old_names != new_names {
-            let changed_names: HashSet<_> = old_names
-                .symmetric_difference(&new_names)
-                .cloned()
-                .collect();
-            self.revalidate_affected_documents(&changed_names, Some(&uri))
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
                 .await;
         }
     }
@@ -653,6 +751,7 @@ impl LanguageServer for CssVariableLsp {
         let uri = params.text_document.uri;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
+        let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         {
             let mut docs = self.document_map.write().await;
@@ -682,13 +781,15 @@ impl LanguageServer for CssVariableLsp {
         self.update_document_from_disk(&uri).await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
+        let new_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
-        if old_names != new_names {
-            let changed_names: HashSet<_> = old_names
-                .symmetric_difference(&new_names)
-                .cloned()
-                .collect();
-            self.revalidate_affected_documents(&changed_names, None)
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
                 .await;
         }
     }
@@ -819,6 +920,40 @@ impl LanguageServer for CssVariableLsp {
         }
         let property_name = value_context.property_name;
         let in_var_context = is_var_function_context_slice(context.slice);
+        let workspace_folder_paths = self.workspace_folder_paths.read().await.clone();
+        let root_folder_path = self.root_folder_path.read().await.clone();
+
+        if !in_var_context {
+            if let Some(color_key) = self.literal_color_under_cursor(&uri, position).await {
+                self.manager.ensure_color_index_valid().await;
+                let variables = self.manager.get_variables_by_color_key(&color_key).await;
+                let items = variables
+                    .into_iter()
+                    .map(|var| {
+                        let options = PathDisplayOptions {
+                            mode: self.runtime_config.path_display_mode,
+                            abbrev_length: self.runtime_config.path_display_abbrev_length,
+                            workspace_folder_paths: &workspace_folder_paths,
+                            root_folder_path: root_folder_path.as_ref(),
+                        };
+                        let display_path = format_uri_for_display(&var.uri, options);
+                        CompletionItem {
+                            label: var.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(format!("{} • {}", var.value, display_path)),
+                            insert_text: Some(format!("var({})", var.name)),
+                            documentation: Some(ls_types::Documentation::String(format!(
+                                "Defined in {}",
+                                display_path
+                            ))),
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+                return Ok(Some(CompletionResponse::Array(items)));
+            }
+        }
+
         let variables = self.manager.get_all_variables().await;
 
         let mut unique_vars = HashMap::new();
@@ -841,9 +976,6 @@ impl LanguageServer for CssVariableLsp {
             }
             var_a.name.cmp(&var_b.name)
         });
-
-        let workspace_folder_paths = self.workspace_folder_paths.read().await.clone();
-        let root_folder_path = self.root_folder_path.read().await.clone();
 
         let items = scored_vars
             .into_iter()
@@ -1082,6 +1214,12 @@ impl LanguageServer for CssVariableLsp {
             &uri,
             &text,
             &params.context,
+            &self.runtime_config,
+        ));
+        actions.extend(code_actions_for_replaceable_literal_colors(
+            &uri,
+            &params.context,
+            &self.runtime_config,
         ));
 
         Ok(Some(actions))
@@ -1383,6 +1521,21 @@ impl LanguageServer for CssVariableLsp {
 }
 
 impl CssVariableLsp {
+    async fn literal_color_under_cursor(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> Option<NormalizedColorKey> {
+        let occurrences = self
+            .manager
+            .get_literal_colors_at_position(uri, position)
+            .await;
+        occurrences
+            .into_iter()
+            .find(|occurrence| range_contains_position(&occurrence.range, position))
+            .map(|occurrence| occurrence.normalized_color)
+    }
+
     /// Scan workspace folders for CSS and HTML files
     pub async fn scan_workspace_folders(&self, folders: Vec<WorkspaceFolder>) {
         let folder_uris: Vec<Uri> = folders.iter().map(|f| f.uri.clone()).collect();
@@ -1456,9 +1609,11 @@ async fn validate_document_text_with(
     text: &str,
     document_usage_map: &Arc<RwLock<HashMap<Uri, HashSet<String>>>>,
     usage_index: &Arc<RwLock<HashMap<String, HashSet<Uri>>>>,
+    color_occurrence_uris: Option<&Arc<RwLock<HashSet<Uri>>>>,
 ) {
     let mut diagnostics = Vec::new();
     let mut current_usages = HashSet::new();
+    let mut has_literal_colors = false;
     let default_severity = DiagnosticSeverity::WARNING;
 
     for captures in usage_regex.captures_iter(text) {
@@ -1517,6 +1672,78 @@ async fn validate_document_text_with(
         });
     }
 
+    for occurrence in manager.get_document_literal_colors(uri).await {
+        let all_replacements = manager
+            .get_variables_by_color_key(&occurrence.normalized_color)
+            .await;
+
+        // Filter out replacement variables where this color is in their own value.
+        // This prevents suggesting replacing #ffd166 with --accent-2 when editing
+        // the definition: --accent-2: #ffd166;
+        let replacements: Vec<_> = all_replacements
+            .iter()
+            .filter(|var| {
+                // Keep if the variable is in a different file
+                if var.uri != *uri {
+                    return true;
+                }
+                // Keep if no value_range available (can't determine overlap)
+                let Some(value_range) = &var.value_range else {
+                    return true;
+                };
+                // Filter out if occurrence is within this variable's value range
+                !range_contains(value_range, &occurrence.range)
+            })
+            .cloned()
+            .collect();
+
+        if replacements.is_empty() {
+            continue;
+        }
+
+        // Track that this document has literal color occurrences
+        has_literal_colors = true;
+
+        let replacement_data: Vec<_> = replacements
+            .iter()
+            .map(|var| {
+                serde_json::json!({
+                    "name": var.name,
+                    "value": var.value,
+                    "uri": var.uri,
+                })
+            })
+            .collect();
+        let replacement_count = replacement_data.len();
+        let message = if replacement_count == 1 {
+            format!("Consider using {} for this color", replacements[0].name)
+        } else {
+            let var_names: Vec<&str> = replacements.iter().map(|v| v.name.as_str()).collect();
+            format!(
+                "Consider using one of these variables: {}",
+                var_names.join(", ")
+            )
+        };
+
+        diagnostics.push(Diagnostic {
+            range: occurrence.range,
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: Some(ls_types::NumberOrString::String(
+                "css-variable-lsp.literal-color-replaceable".to_string(),
+            )),
+            code_description: None,
+            source: Some("css-variable-lsp".to_string()),
+            message,
+            related_information: None,
+            tags: None,
+            data: Some(serde_json::json!({
+                "literal": occurrence.text,
+                "usageContext": occurrence.usage_context,
+                "replacements": replacement_data,
+            })),
+        });
+    }
+
     // Update usage maps
     {
         let mut usage_map = document_usage_map.write().await;
@@ -1547,6 +1774,16 @@ async fn validate_document_text_with(
         }
     }
 
+    // Update color occurrence URIs index
+    if let Some(color_uris) = color_occurrence_uris {
+        let mut color_uris = color_uris.write().await;
+        if has_literal_colors {
+            color_uris.insert(uri.clone());
+        } else {
+            color_uris.remove(uri);
+        }
+    }
+
     client
         .publish_diagnostics(uri.clone(), diagnostics, None)
         .await;
@@ -1554,6 +1791,15 @@ async fn validate_document_text_with(
 
 fn is_html_like_extension(ext: &str) -> bool {
     matches!(ext, ".html" | ".vue" | ".svelte" | ".astro" | ".ripple")
+}
+
+fn range_contains_position(range: &Range, position: Position) -> bool {
+    range.start <= position && position <= range.end
+}
+
+/// Check if `outer` range completely contains `inner` range
+fn range_contains(outer: &Range, inner: &Range) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
 }
 
 fn language_id_kind(language_id: &str) -> Option<DocumentKind> {

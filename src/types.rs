@@ -1,6 +1,7 @@
 use ls_types::{Position, Range, Uri};
 use serde::{Deserialize, Serialize};
 
+use crate::color::NormalizedColorKey;
 use crate::runtime_config::RuntimeConfig;
 
 /// Represents a CSS variable definition
@@ -57,6 +58,25 @@ pub struct CssVariableUsage {
 
     /// DOM node info if usage is in HTML (for inline styles)
     pub dom_node: Option<DOMNodeInfo>,
+}
+
+/// Represents a literal color token found in a CSS value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiteralColorOccurrence {
+    /// Original token text (for example `#fff` or `rgb(255, 255, 255)`)
+    pub text: String,
+
+    /// Document URI where the token appears
+    pub uri: Uri,
+
+    /// Range of just the literal color token
+    pub range: Range,
+
+    /// Selector or context where the token appears
+    pub usage_context: String,
+
+    /// Normalized RGBA key used for exact matching
+    pub normalized_color: NormalizedColorKey,
 }
 
 /// Information about a DOM node

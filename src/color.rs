@@ -1,9 +1,39 @@
 use csscolorparser::Color as CssColor;
 use ls_types::{Color, ColorPresentation, Range, TextEdit};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct NormalizedColorKey {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: u8,
+}
+
 /// Parse a CSS color value and return an LSP Color
 pub fn parse_color(value: &str) -> Option<Color> {
     parse_csscolorparser(value.trim())
+}
+
+pub fn normalized_color_key(value: &str) -> Option<NormalizedColorKey> {
+    parse_color(value).map(normalize_color)
+}
+
+pub fn normalize_color(color: Color) -> NormalizedColorKey {
+    NormalizedColorKey {
+        red: color_channel_to_u8(color.red),
+        green: color_channel_to_u8(color.green),
+        blue: color_channel_to_u8(color.blue),
+        alpha: color_channel_to_u8(color.alpha),
+    }
+}
+
+pub fn color_from_key(key: NormalizedColorKey) -> Color {
+    Color {
+        red: key.red as f32 / 255.0,
+        green: key.green as f32 / 255.0,
+        blue: key.blue as f32 / 255.0,
+        alpha: key.alpha as f32 / 255.0,
+    }
 }
 
 fn parse_csscolorparser(value: &str) -> Option<Color> {
@@ -121,6 +151,10 @@ fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (h, s, l)
 }
 
+fn color_channel_to_u8(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +198,28 @@ mod tests {
 
         let color = parse_color("rgba(255, 0, 0, 50%)").expect("rgba percent");
         assert!(approx_eq(color.alpha, 0.5));
+    }
+
+    #[test]
+    fn normalized_color_key_matches_equivalent_inputs() {
+        let white = normalized_color_key("white").expect("white");
+        assert_eq!(white, normalized_color_key("#fff").expect("#fff"));
+        assert_eq!(white, normalized_color_key("#ffffff").expect("#ffffff"));
+        assert_eq!(
+            white,
+            normalized_color_key("rgb(255 255 255)").expect("rgb")
+        );
+        assert_eq!(white, normalized_color_key("hsl(0 0% 100%)").expect("hsl"));
+    }
+
+    #[test]
+    fn normalized_color_key_preserves_alpha() {
+        let translucent = normalized_color_key("rgba(255, 255, 255, 0.5)").expect("rgba");
+        assert_eq!(
+            translucent,
+            normalized_color_key("#ffffff80").expect("hex alpha")
+        );
+        assert_ne!(translucent, normalized_color_key("white").expect("white"));
     }
 
     #[test]
