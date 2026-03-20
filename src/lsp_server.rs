@@ -492,6 +492,7 @@ impl LanguageServer for CssVariableLsp {
                 name: "css-variable-lsp-rust".to_string(),
                 version: Some("0.1.0".to_string()),
             }),
+            offset_encoding: Some("utf-16".to_string()),
         })
     }
 
