@@ -246,6 +246,8 @@ pub struct CssVariableLsp {
     document_language_map: Arc<RwLock<HashMap<Uri, String>>>,
     document_usage_map: Arc<RwLock<HashMap<Uri, HashSet<String>>>>,
     usage_index: Arc<RwLock<HashMap<String, HashSet<Uri>>>>,
+    /// URIs of documents that contain literal color occurrences
+    color_occurrence_uris: Arc<RwLock<HashSet<Uri>>>,
 }
 
 impl CssVariableLsp {
@@ -269,6 +271,7 @@ impl CssVariableLsp {
             document_language_map: Arc::new(RwLock::new(HashMap::new())),
             document_usage_map: Arc::new(RwLock::new(HashMap::new())),
             usage_index: Arc::new(RwLock::new(HashMap::new())),
+            color_occurrence_uris: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -319,6 +322,7 @@ impl CssVariableLsp {
             text,
             &self.document_usage_map,
             &self.usage_index,
+            Some(&self.color_occurrence_uris),
         )
         .await;
     }
@@ -343,6 +347,7 @@ impl CssVariableLsp {
                 &text,
                 &self.document_usage_map,
                 &self.usage_index,
+                Some(&self.color_occurrence_uris),
             )
             .await;
         }
@@ -352,8 +357,9 @@ impl CssVariableLsp {
         &self,
         changed_names: &HashSet<String>,
         exclude_uri: Option<&Uri>,
+        revalidate_color_occurrences: bool,
     ) {
-        if changed_names.is_empty() {
+        if changed_names.is_empty() && !revalidate_color_occurrences {
             return;
         }
 
@@ -367,6 +373,16 @@ impl CssVariableLsp {
                             affected_uris.insert(uri.clone());
                         }
                     }
+                }
+            }
+        }
+
+        // Also revalidate documents with literal color occurrences if colors may have changed
+        if revalidate_color_occurrences {
+            let color_uris = self.color_occurrence_uris.read().await;
+            for uri in color_uris.iter() {
+                if exclude_uri != Some(uri) {
+                    affected_uris.insert(uri.clone());
                 }
             }
         }
@@ -395,6 +411,7 @@ impl CssVariableLsp {
                 &text,
                 &self.document_usage_map,
                 &self.usage_index,
+                Some(&self.color_occurrence_uris),
             )
             .await;
         }
@@ -669,12 +686,13 @@ impl LanguageServer for CssVariableLsp {
 
         self.validate_document_text(&uri, &text).await;
 
-        if old_names != new_names || old_colors != new_colors {
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
             let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
             let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
             let mut changed_names = added_names;
             changed_names.extend(removed_names);
-            self.revalidate_affected_documents(&changed_names, Some(&uri))
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
                 .await;
         }
     }
@@ -702,8 +720,14 @@ impl LanguageServer for CssVariableLsp {
 
         self.validate_document_text(&uri, &updated_text).await;
 
-        if old_names != new_names || old_colors != new_colors {
-            self.validate_all_open_documents().await;
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
+                .await;
         }
     }
 
@@ -759,12 +783,13 @@ impl LanguageServer for CssVariableLsp {
         let new_names = self.manager.get_document_variable_names(&uri).await;
         let new_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
-        if old_names != new_names || old_colors != new_colors {
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
             let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
             let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
             let mut changed_names = added_names;
             changed_names.extend(removed_names);
-            self.revalidate_affected_documents(&changed_names, Some(&uri))
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
                 .await;
         }
     }
@@ -1583,9 +1608,11 @@ async fn validate_document_text_with(
     text: &str,
     document_usage_map: &Arc<RwLock<HashMap<Uri, HashSet<String>>>>,
     usage_index: &Arc<RwLock<HashMap<String, HashSet<Uri>>>>,
+    color_occurrence_uris: Option<&Arc<RwLock<HashSet<Uri>>>>,
 ) {
     let mut diagnostics = Vec::new();
     let mut current_usages = HashSet::new();
+    let mut has_literal_colors = false;
     let default_severity = DiagnosticSeverity::WARNING;
 
     for captures in usage_regex.captures_iter(text) {
@@ -1673,6 +1700,9 @@ async fn validate_document_text_with(
             continue;
         }
 
+        // Track that this document has literal color occurrences
+        has_literal_colors = true;
+
         let replacement_data: Vec<_> = replacements
             .iter()
             .map(|var| {
@@ -1740,6 +1770,16 @@ async fn validate_document_text_with(
                 .entry(name)
                 .or_insert_with(HashSet::new)
                 .insert(uri.clone());
+        }
+    }
+
+    // Update color occurrence URIs index
+    if let Some(color_uris) = color_occurrence_uris {
+        let mut color_uris = color_uris.write().await;
+        if has_literal_colors {
+            color_uris.insert(uri.clone());
+        } else {
+            color_uris.remove(uri);
         }
     }
 
