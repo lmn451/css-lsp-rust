@@ -307,11 +307,12 @@ impl CssVariableLsp {
                 .await;
         }
 
-        self.manager.rebuild_color_index().await;
+        self.manager.mark_color_index_dirty();
     }
 
     async fn validate_document_text(&self, uri: &Uri, text: &str) {
         let has_related_info = *self.has_diagnostic_related_information.read().await;
+        self.manager.ensure_color_index_valid().await;
         validate_document_text_with(
             &self.client,
             self.manager.as_ref(),
@@ -432,7 +433,7 @@ impl CssVariableLsp {
             }
             Err(_) => {
                 self.manager.remove_document(uri).await;
-                self.manager.rebuild_color_index().await;
+                self.manager.mark_color_index_dirty();
             }
         }
     }
@@ -924,6 +925,7 @@ impl LanguageServer for CssVariableLsp {
 
         if !in_var_context {
             if let Some(color_key) = self.literal_color_under_cursor(&uri, position).await {
+                self.manager.ensure_color_index_valid().await;
                 let variables = self.manager.get_variables_by_color_key(&color_key).await;
                 let items = variables
                     .into_iter()

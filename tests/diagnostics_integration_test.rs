@@ -809,3 +809,64 @@ async fn test_literal_color_diagnostic_shows_multiple_variable_names() {
     assert!(diagnostic.message.contains("--snow"));
     assert!(diagnostic.message.contains("--ghost"));
 }
+
+#[tokio::test]
+async fn test_lazy_rebuild_batches_document_changes() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+
+    // Open vars file with color variable
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "scss",
+        ":root { --white: #fff; }",
+        1,
+    )
+    .await;
+
+    // Open index file with literal color - should show diagnostic
+    open_document(
+        &mut service,
+        index_uri.clone(),
+        "scss",
+        ".card { color: #fff; }",
+        1,
+    )
+    .await;
+
+    // Consume initial diagnostic
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+
+    // Change the variable definition 5 times rapidly
+    for i in 0..5 {
+        change_document(
+            &mut service,
+            vars_uri.clone(),
+            (i + 2) as i32,
+            &format!(":root {{ --white: #{:06x}; }}", 0xFFFFFF - i * 0x10000),
+        )
+        .await;
+    }
+
+    // Wait for any async operations to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Consume any final diagnostic updates
+    let final_diagnostic = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+
+    // The final color is #FBFFFF (after 5 changes from #FFFFFF: 0xFFFFFF, 0xFEFFFF, 0xFDFFFF, 0xFCFFFF, 0xFBFFFF)
+    // So there should be no diagnostic for #fff
+    let has_fff_diagnostic = final_diagnostic
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("#fff") || d.message.contains("ffffff"));
+
+    assert!(
+        !has_fff_diagnostic,
+        "Should not have diagnostic for #fff after changing --white to different color"
+    );
+}

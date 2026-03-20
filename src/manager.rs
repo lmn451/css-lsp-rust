@@ -1,5 +1,6 @@
 use ls_types::{Position, Uri};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -26,6 +27,12 @@ pub struct CssVariableManager {
     /// Map of normalized colors to matching variable names
     color_variables: Arc<RwLock<HashMap<NormalizedColorKey, HashSet<String>>>>,
 
+    /// Flag indicating if color index needs rebuilding
+    color_variables_dirty: Arc<AtomicBool>,
+
+    /// Counter for rebuilds (for testing/benchmarking)
+    rebuild_count: Arc<AtomicUsize>,
+
     /// Configuration
     config: Arc<RwLock<Config>>,
 
@@ -40,6 +47,8 @@ impl CssVariableManager {
             usages: Arc::new(RwLock::new(HashMap::new())),
             literal_colors: Arc::new(RwLock::new(HashMap::new())),
             color_variables: Arc::new(RwLock::new(HashMap::new())),
+            color_variables_dirty: Arc::new(AtomicBool::new(true)),
+            rebuild_count: Arc::new(AtomicUsize::new(0)),
             config: Arc::new(RwLock::new(config)),
             dom_trees: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -240,6 +249,8 @@ impl CssVariableManager {
 
     /// Rebuild the normalized-color -> variable-name lookup from current workspace state.
     pub async fn rebuild_color_index(&self) {
+        self.rebuild_count.fetch_add(1, Ordering::SeqCst);
+
         let snapshot = {
             let vars = self.variables.read().await;
             vars.clone()
@@ -254,6 +265,32 @@ impl CssVariableManager {
 
         let mut stored = self.color_variables.write().await;
         *stored = color_variables;
+        self.color_variables_dirty.store(false, Ordering::SeqCst);
+    }
+
+    /// Get the number of rebuilds performed (for testing).
+    #[cfg(test)]
+    pub fn get_rebuild_count(&self) -> usize {
+        self.rebuild_count.load(Ordering::SeqCst)
+    }
+
+    /// Reset the rebuild counter (for testing).
+    #[cfg(test)]
+    pub fn reset_rebuild_count(&self) {
+        self.rebuild_count.store(0, Ordering::SeqCst);
+    }
+
+    /// Mark the color index as needing a rebuild.
+    pub fn mark_color_index_dirty(&self) {
+        self.color_variables_dirty.store(true, Ordering::SeqCst);
+    }
+
+    /// Ensure the color index is valid, rebuilding if necessary.
+    /// Call this before any operation that depends on the color index.
+    pub async fn ensure_color_index_valid(&self) {
+        if self.color_variables_dirty.load(Ordering::SeqCst) {
+            self.rebuild_color_index().await;
+        }
     }
 }
 
@@ -703,5 +740,135 @@ mod tests {
         let (defs, usages) = manager.get_references("--does-not-exist").await;
         assert_eq!(defs.len(), 0);
         assert_eq!(usages.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_color_index_rebuild_performance_100k_vars() {
+        use std::time::Instant;
+
+        let manager = CssVariableManager::new(Config::default());
+
+        // Add 100_000 color variables with chains
+        for i in 0..100_000 {
+            let value = if i % 2 == 0 {
+                "#ffffff".to_string()
+            } else {
+                format!("var(--color-{})", (i + 1) % 100_000)
+            };
+            manager
+                .add_variable(create_test_variable(
+                    &format!("--color-{}", i),
+                    &value,
+                    ":root",
+                    "file:///test.css",
+                ))
+                .await;
+        }
+
+        // Measure rebuild time
+        let start = Instant::now();
+        manager.rebuild_color_index().await;
+        let duration = start.elapsed();
+
+        println!(
+            "Rebuild time for 100_000 vars (with chains): {:?}",
+            duration
+        );
+
+        // Should complete in reasonable time (baseline: aim for < 1s after optimization)
+        // For now, just log and ensure it completes
+        assert!(
+            duration.as_secs() < 30,
+            "Rebuild took too long: {:?}",
+            duration
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lazy_rebuild_batches_multiple_changes() {
+        let manager = CssVariableManager::new(Config::default());
+
+        // Add some variables
+        for i in 0..10 {
+            manager
+                .add_variable(create_test_variable(
+                    &format!("--color-{}", i),
+                    "#ffffff",
+                    ":root",
+                    "file:///test.css",
+                ))
+                .await;
+        }
+
+        // Mark dirty multiple times
+        manager.mark_color_index_dirty();
+        manager.mark_color_index_dirty();
+        manager.mark_color_index_dirty();
+
+        // Ensure valid - should only rebuild once
+        manager.ensure_color_index_valid().await;
+
+        // Verify the index is populated
+        let white_key = crate::color::normalized_color_key("#ffffff").unwrap();
+        let matches = manager.get_variables_by_color_key(&white_key).await;
+        assert_eq!(matches.len(), 10);
+
+        // After ensure_color_index_valid, calling it again should not rebuild
+        // (dirty flag should be false)
+        manager.ensure_color_index_valid().await;
+
+        // Verify still correct
+        let matches = manager.get_variables_by_color_key(&white_key).await;
+        assert_eq!(matches.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_lazy_rebuild_reduces_rebuild_count() {
+        let manager = CssVariableManager::new(Config::default());
+
+        // Simulate old behavior: rebuild on every change
+        for i in 0..10 {
+            manager
+                .add_variable(create_test_variable(
+                    &format!("--color-{}", i),
+                    "#ffffff",
+                    ":root",
+                    "file:///test.css",
+                ))
+                .await;
+        }
+
+        // OLD pattern: rebuild on every add
+        manager.rebuild_color_index().await;
+        manager.rebuild_color_index().await;
+        manager.rebuild_color_index().await;
+        let old_rebuild_count = manager.get_rebuild_count();
+        manager.reset_rebuild_count();
+
+        // NEW pattern: mark dirty, then ensure valid once
+        manager.mark_color_index_dirty();
+        manager.mark_color_index_dirty();
+        manager.mark_color_index_dirty();
+        manager.ensure_color_index_valid().await;
+        let new_rebuild_count = manager.get_rebuild_count();
+
+        println!(
+            "OLD pattern (immediate rebuild): {} rebuilds",
+            old_rebuild_count
+        );
+        println!("NEW pattern (lazy rebuild): {} rebuilds", new_rebuild_count);
+
+        // New pattern should have far fewer rebuilds
+        assert!(
+            new_rebuild_count < old_rebuild_count,
+            "Lazy rebuild should reduce count from {} to {}, but got {}",
+            old_rebuild_count,
+            new_rebuild_count,
+            new_rebuild_count
+        );
+        assert_eq!(
+            new_rebuild_count, 1,
+            "Should have exactly 1 rebuild after ensure"
+        );
     }
 }
