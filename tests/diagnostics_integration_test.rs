@@ -846,7 +846,7 @@ async fn test_lazy_rebuild_batches_document_changes() {
         change_document(
             &mut service,
             vars_uri.clone(),
-            (i + 2) as i32,
+            i + 2,
             &format!(":root {{ --white: #{:06x}; }}", 0xFFFFFF - i * 0x10000),
         )
         .await;
