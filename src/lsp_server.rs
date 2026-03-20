@@ -348,6 +348,58 @@ impl CssVariableLsp {
         }
     }
 
+    async fn revalidate_affected_documents(
+        &self,
+        changed_names: &HashSet<String>,
+        exclude_uri: Option<&Uri>,
+    ) {
+        if changed_names.is_empty() {
+            return;
+        }
+
+        let mut affected_uris = HashSet::new();
+        {
+            let index = self.usage_index.read().await;
+            for name in changed_names {
+                if let Some(uris) = index.get(name) {
+                    for uri in uris {
+                        if exclude_uri != Some(uri) {
+                            affected_uris.insert(uri.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if affected_uris.is_empty() {
+            return;
+        }
+
+        let has_related_info = *self.has_diagnostic_related_information.read().await;
+        let affected_snapshot = {
+            let docs = self.document_map.read().await;
+            affected_uris
+                .into_iter()
+                .filter_map(|uri| docs.get(&uri).map(|text| (uri.clone(), text.clone())))
+                .collect::<Vec<_>>()
+        };
+
+        for (uri, text) in affected_snapshot {
+            validate_document_text_with(
+                &self.client,
+                self.manager.as_ref(),
+                &self.usage_regex,
+                self.runtime_config.undefined_var_fallback,
+                has_related_info,
+                &uri,
+                &text,
+                &self.document_usage_map,
+                &self.usage_index,
+            )
+            .await;
+        }
+    }
+
     async fn update_document_from_disk(&self, uri: &Uri) {
         let path = match to_normalized_fs_path(uri) {
             Some(path) => path,
@@ -617,7 +669,12 @@ impl LanguageServer for CssVariableLsp {
         self.validate_document_text(&uri, &text).await;
 
         if old_names != new_names || old_colors != new_colors {
-            self.validate_all_open_documents().await;
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri))
+                .await;
         }
     }
 
@@ -702,7 +759,12 @@ impl LanguageServer for CssVariableLsp {
         let new_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         if old_names != new_names || old_colors != new_colors {
-            self.validate_all_open_documents().await;
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri))
+                .await;
         }
     }
 
@@ -1437,7 +1499,10 @@ impl CssVariableLsp {
         uri: &Uri,
         position: Position,
     ) -> Option<NormalizedColorKey> {
-        let occurrences = self.manager.get_document_literal_colors(uri).await;
+        let occurrences = self
+            .manager
+            .get_literal_colors_at_position(uri, position)
+            .await;
         occurrences
             .into_iter()
             .find(|occurrence| range_contains_position(&occurrence.range, position))

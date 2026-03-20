@@ -1,4 +1,4 @@
-use ls_types::Uri;
+use ls_types::{Position, Uri};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -7,6 +7,8 @@ use crate::color::{color_from_key, normalize_color, parse_color, NormalizedColor
 use crate::dom_tree::DomTree;
 use crate::specificity::sort_by_cascade;
 use crate::types::{Config, CssVariable, CssVariableUsage, LiteralColorOccurrence};
+
+type LiteralColorMap = HashMap<Uri, HashMap<u32, Vec<LiteralColorOccurrence>>>;
 
 /// Manages CSS variables across the workspace
 #[derive(Clone)]
@@ -17,8 +19,9 @@ pub struct CssVariableManager {
     /// Map of variable name -> list of usages
     usages: Arc<RwLock<HashMap<String, Vec<CssVariableUsage>>>>,
 
-    /// Literal color occurrences grouped by document
-    literal_colors: Arc<RwLock<HashMap<Uri, Vec<LiteralColorOccurrence>>>>,
+    /// Literal color occurrences grouped by document and line
+    /// Outer map: URI -> Inner map (line number -> colors on that line)
+    literal_colors: Arc<RwLock<LiteralColorMap>>,
 
     /// Map of normalized colors to matching variable names
     color_variables: Arc<RwLock<HashMap<NormalizedColorKey, HashSet<String>>>>,
@@ -62,9 +65,12 @@ impl CssVariableManager {
     /// Add a literal color occurrence
     pub async fn add_literal_color(&self, occurrence: LiteralColorOccurrence) {
         let mut literal_colors = self.literal_colors.write().await;
+        let line = occurrence.range.start.line;
         literal_colors
             .entry(occurrence.uri.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
+            .entry(line)
+            .or_default()
             .push(occurrence);
     }
 
@@ -109,7 +115,23 @@ impl CssVariableManager {
     /// Get literal color occurrences in a specific document.
     pub async fn get_document_literal_colors(&self, uri: &Uri) -> Vec<LiteralColorOccurrence> {
         let literal_colors = self.literal_colors.read().await;
-        literal_colors.get(uri).cloned().unwrap_or_default()
+        literal_colors
+            .get(uri)
+            .map(|by_line| by_line.values().flatten().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get literal color occurrences at a specific position (O(1) line lookup + O(k) scan).
+    pub async fn get_literal_colors_at_position(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> Vec<LiteralColorOccurrence> {
+        let literal_colors = self.literal_colors.read().await;
+        literal_colors
+            .get(uri)
+            .and_then(|by_line| by_line.get(&position.line).cloned())
+            .unwrap_or_default()
     }
 
     /// Get all variables whose resolved color exactly matches the normalized color key.
