@@ -26,10 +26,11 @@ use tokio::sync::RwLock;
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::color::{generate_color_presentations, parse_color, NormalizedColorKey};
+#[cfg(test)]
+use crate::completion_context::find_js_string_segment;
 use crate::completion_context::{
     completion_value_context_slice, find_html_style_attribute_slice, find_html_style_block_slice,
-    find_html_style_context_slice, find_js_string_segment, get_value_context_info,
-    score_variable_relevance, CompletionContextSlice, ValueContext,
+    get_value_context_info, score_variable_relevance,
 };
 use crate::document_kind::{
     apply_config_patch, build_lookup_extension_map, normalize_extension, resolve_document_kind,

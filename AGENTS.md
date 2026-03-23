@@ -14,7 +14,10 @@ For cross-project status visibility, track work in Linear project `rust-css-lsp`
 
 ### Source Code Layout
 - **`src/main.rs`**: Application entry point with LSP server initialization
-- **`src/lsp_server.rs`**: Core LSP protocol handlers (completion, hover, goto-definition, rename, etc.)
+- **`src/lsp_server.rs`**: Core LSP protocol handlers (completion, hover, goto-definition, rename, etc.) — ~2048 lines after refactoring
+- **`src/completion_context.rs`**: Completion context analysis (HTML style detection, JS string segments, relevance scoring) — extracted from lsp_server.rs
+- **`src/document_kind.rs`**: DocumentKind enum + resolution helpers (Css vs Html classification) — extracted from lsp_server.rs
+- **`src/text_utils.rs`**: Pure text utilities (char boundary, word detection, range ops) — extracted from lsp_server.rs
 - **`src/manager.rs`**: CSS variable storage and management with thread-safe operations
 - **`src/types.rs`**: Core data structures (`CssVariable`, `CssVariableUsage`, `Config`, etc.)
 - **`src/parsers/`**: CSS/HTML parsing logic
@@ -28,6 +31,17 @@ For cross-project status visibility, track work in Linear project `rust-css-lsp`
 - **`src/runtime_config.rs`**: Runtime configuration from CLI args and env vars
 - **`src/path_display.rs`**: Path formatting for hover/completion display
 - **`tests/integration_test.rs`**: Integration tests covering end-to-end functionality
+
+### Module Dependency Graph
+```
+text_utils (no deps)
+    ↓
+document_kind (uses types::Config)
+    ↓
+completion_context (uses document_kind + text_utils)
+    ↓
+lsp_server (uses all modules above)
+```
 
 ### Key Design Patterns
 - **Async-first**: All I/O operations use `tokio` async runtime
