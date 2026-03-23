@@ -541,7 +541,7 @@ fn matches_selector_parts(tree: &DomTree, node_index: usize, parts: &[SelectorPa
 
 fn matches_simple_selector(node: &DomNode, selector: &SimpleSelector) -> bool {
     if let Some(tag) = &selector.tag {
-        if node.tag != tag.to_lowercase() {
+        if !node.tag.eq_ignore_ascii_case(tag) {
             return false;
         }
     }

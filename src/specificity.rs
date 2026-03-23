@@ -1,7 +1,16 @@
+use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::dom_tree::DomTree;
 use crate::types::{CssVariable, DOMNodeInfo};
+
+/// Memoized regex patterns for specificity calculation
+static PSEUDO_ELEMENT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"::[a-zA-Z-]+").unwrap());
+static ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#[a-zA-Z0-9_-]+").unwrap());
+static CLASS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.[a-zA-Z0-9_-]+").unwrap());
+static ATTR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"\[[^\]'"']*\]"#).unwrap());
+static NOT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r":not\((?:[^()]|\([^)]*\))+\)").unwrap());
+static PSEUDO_CLASS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r":[a-zA-Z-]+(\([^)]*\))?").unwrap());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Specificity {
@@ -20,6 +29,121 @@ impl Specificity {
     }
 }
 
+/// Extract the argument of a top-level :not() call.
+/// Uses a depth tracker to handle nested parentheses correctly.
+fn extract_not_arg(selector: &str) -> Option<&str> {
+    let bytes = selector.as_bytes();
+    let len = bytes.len();
+
+    let not_prefix = b":not(";
+    let not_len = not_prefix.len();
+
+    for i in 0..len {
+        if bytes[i] != b':' || i + not_len > len {
+            continue;
+        }
+        let mut match_not = true;
+        for j in 0..not_len {
+            if bytes[i + j] != not_prefix[j] {
+                match_not = false;
+                break;
+            }
+        }
+        if !match_not {
+            continue;
+        }
+
+        // Found :not( at position i. Now find matching ) at depth 1.
+        let mut depth = 1;
+        let mut pos = i + not_len;
+        while pos < len {
+            match bytes[pos] {
+                b'(' => {
+                    depth += 1;
+                }
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&selector[i + not_len..pos]);
+                    }
+                }
+                _ => {}
+            }
+            pos += 1;
+        }
+        return None;
+    }
+    None
+}
+
+/// Calculate the full specificity of a :not(), :is(), :where() argument.
+/// Per CSS spec: :not(.foo, #bar) → take max IDs=1, max classes=1.
+fn specificity_of_not_arg(arg: &str) -> Specificity {
+    let parts: Vec<&str> = arg
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return Specificity::new(0, 0, 0);
+    }
+    let mut max_ids: u32 = 0;
+    let mut max_classes: u32 = 0;
+    let mut max_elements: u32 = 0;
+    for part in parts {
+        let spec = specificity_of_selector_part(part);
+        max_ids = max_ids.max(spec.ids);
+        max_classes = max_classes.max(spec.classes);
+        max_elements = max_elements.max(spec.elements);
+    }
+    Specificity::new(max_ids, max_classes, max_elements)
+}
+
+/// Calculate specificity for a single selector part (no comma-separated handling).
+/// Handles nested :not()/:is()/:where() recursively.
+fn specificity_of_selector_part(selector: &str) -> Specificity {
+    let selector = selector.trim();
+    if selector.is_empty() || selector == "*" {
+        return Specificity::new(0, 0, 0);
+    }
+    let mut working = selector.to_string();
+
+    let pseudo_elements = PSEUDO_ELEMENT_RE.find_iter(&working).count() as u32;
+    working = PSEUDO_ELEMENT_RE.replace_all(&working, "").to_string();
+
+    let ids = ID_RE.find_iter(&working).count() as u32;
+    working = ID_RE.replace_all(&working, "").to_string();
+
+    let classes = CLASS_RE.find_iter(&working).count() as u32;
+    working = CLASS_RE.replace_all(&working, "").to_string();
+
+    working = ATTR_RE.replace_all(&working, "").to_string();
+
+    // Recursively handle nested :not() in this argument.
+    let not_arg = extract_not_arg(selector);
+    let (extra_ids, extra_classes, extra_elements) = if let Some(arg) = not_arg {
+        let spec = specificity_of_not_arg(arg);
+        (spec.ids, spec.classes, spec.elements)
+    } else {
+        (0, 0, 0)
+    };
+    // Remove :not() for remaining pseudo-class counting
+    // Remove :not() blocks so they aren't double-counted by ID/class regexes
+    // Handles nested parens via (?:[^()]|\([^)]*\))+
+    working = NOT_RE.replace_all(&working, "").to_string();
+
+    working = PSEUDO_CLASS_RE.replace_all(&working, "").to_string();
+
+    let mut elements = pseudo_elements + extra_elements;
+    working = working.replace(['>', '+', '~', ' '], " ");
+    for part in working.split_whitespace() {
+        if !part.is_empty() && part != "*" {
+            elements += 1;
+        }
+    }
+    Specificity::new(ids + extra_ids, classes + extra_classes, elements)
+}
+
 pub fn calculate_specificity(selector: &str) -> Specificity {
     let selector = selector.trim();
     if selector.is_empty() || selector == "*" {
@@ -31,7 +155,14 @@ pub fn calculate_specificity(selector: &str) -> Specificity {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
-    if selectors.len() > 1 {
+    // Only split by comma for top-level selector lists (e.g., "div, .foo")
+    // Don't split for :not(), :is(), etc. with comma-separated arguments -
+    // those are handled separately by extract_not_arg and specificity_of_not_arg
+    if selectors.len() > 1
+        && !selector.contains(":not(")
+        && !selector.contains(":is(")
+        && !selector.contains(":where(")
+    {
         let mut best = Specificity::new(0, 0, 0);
         for sel in selectors {
             let spec = calculate_specificity(sel);
@@ -43,25 +174,34 @@ pub fn calculate_specificity(selector: &str) -> Specificity {
     }
 
     let mut working = selector.to_string();
-    let pseudo_element_re = Regex::new(r"::[a-zA-Z-]+").unwrap();
-    let pseudo_elements = pseudo_element_re.find_iter(&working).count() as u32;
-    working = pseudo_element_re.replace_all(&working, "").to_string();
 
-    let id_re = Regex::new(r"#[a-zA-Z0-9_-]+").unwrap();
-    let ids = id_re.find_iter(&working).count() as u32;
-    working = id_re.replace_all(&working, "").to_string();
+    let pseudo_elements = PSEUDO_ELEMENT_RE.find_iter(&working).count() as u32;
+    working = PSEUDO_ELEMENT_RE.replace_all(&working, "").to_string();
 
-    let class_re = Regex::new(r"\.[a-zA-Z0-9_-]+").unwrap();
-    let classes = class_re.find_iter(&working).count() as u32;
-    working = class_re.replace_all(&working, "").to_string();
+    // Per CSS spec: :not() adds specificity of its argument.
+    // Extract and add :not() specificity BEFORE counting IDs/classes in remaining selector.
+    let not_arg = extract_not_arg(selector);
+    let (not_ids, not_classes, not_elements) = if let Some(arg) = not_arg {
+        let spec = specificity_of_not_arg(arg);
+        (spec.ids, spec.classes, spec.elements)
+    } else {
+        (0, 0, 0)
+    };
+    // Remove :not() blocks so they aren't double-counted by ID/class regexes
+    // Handles nested parens via (?:[^()]|\([^)]*\))+
+    working = NOT_RE.replace_all(&working, "").to_string();
 
-    let attr_re = Regex::new(r#"\[(?:[^\]"']|"[^"]*"|'[^']*')*\]"#).unwrap();
-    let attrs = attr_re.find_iter(&working).count() as u32;
-    working = attr_re.replace_all(&working, "").to_string();
+    let ids = ID_RE.find_iter(&working).count() as u32;
+    working = ID_RE.replace_all(&working, "").to_string();
 
-    let pseudo_class_re = Regex::new(r":[a-zA-Z-]+(\([^)]*\))?").unwrap();
-    let pseudo_classes = pseudo_class_re.find_iter(&working).count() as u32;
-    working = pseudo_class_re.replace_all(&working, "").to_string();
+    let classes = CLASS_RE.find_iter(&working).count() as u32;
+    working = CLASS_RE.replace_all(&working, "").to_string();
+
+    let attrs = ATTR_RE.find_iter(&working).count() as u32;
+    working = ATTR_RE.replace_all(&working, "").to_string();
+
+    let pseudo_classes = PSEUDO_CLASS_RE.find_iter(&working).count() as u32;
+    working = PSEUDO_CLASS_RE.replace_all(&working, "").to_string();
 
     let mut elements = pseudo_elements;
     working = working.replace(['>', '+', '~', ' '], " ");
@@ -71,7 +211,11 @@ pub fn calculate_specificity(selector: &str) -> Specificity {
         }
     }
 
-    Specificity::new(ids, classes + attrs + pseudo_classes, elements)
+    Specificity::new(
+        ids + not_ids,
+        classes + attrs + pseudo_classes + not_classes,
+        elements + not_elements,
+    )
 }
 
 pub fn compare_specificity(a: Specificity, b: Specificity) -> i32 {
@@ -224,5 +368,71 @@ mod tests {
         assert!(matches_context(":root", "div", None, None));
         assert!(matches_context("div", "div", None, None));
         assert!(matches_context(":root", ".button", None, None));
+    }
+
+    #[test]
+    fn not_with_class_specificity() {
+        // :not(.foo) has specificity of .foo → (0,1,0)
+        let spec = calculate_specificity(":not(.foo)");
+        assert_eq!(spec.ids, 0);
+        assert_eq!(spec.classes, 1);
+        assert_eq!(spec.elements, 0);
+    }
+
+    #[test]
+    fn not_with_id_specificity() {
+        // :not(#bar) has specificity of #bar → (1,0,0)
+        let spec = calculate_specificity(":not(#bar)");
+        assert_eq!(spec.ids, 1);
+        assert_eq!(spec.classes, 0);
+        assert_eq!(spec.elements, 0);
+    }
+
+    #[test]
+    fn not_with_multiple_args_specificity() {
+        // :not(.foo, #bar) → take max across args → (1,1,0)
+        let spec = calculate_specificity(":not(.foo, #bar)");
+        assert_eq!(spec.ids, 1);
+        assert_eq!(spec.classes, 1);
+        assert_eq!(spec.elements, 0);
+    }
+
+    #[test]
+    fn not_with_complex_selector_specificity() {
+        // :not(.foo.bar) → specificity of .foo.bar = 2 classes → (0,2,0)
+        let spec = calculate_specificity(":not(.foo.bar)");
+        assert_eq!(spec.ids, 0);
+        assert_eq!(spec.classes, 2);
+        assert_eq!(spec.elements, 0);
+    }
+
+    #[test]
+    fn not_with_element_specificity() {
+        // :not(div) → (0,0,1)
+        let spec = calculate_specificity(":not(div)");
+        assert_eq!(spec.ids, 0);
+        assert_eq!(spec.classes, 0);
+        assert_eq!(spec.elements, 1);
+    }
+
+    #[test]
+    fn not_preserves_other_selectors() {
+        // .foo:not(#bar) → (1,1,0)
+        let spec = calculate_specificity(".foo:not(#bar)");
+        assert_eq!(spec.ids, 1);
+        assert_eq!(spec.classes, 1);
+        assert_eq!(spec.elements, 0);
+    }
+
+    #[test]
+    fn not_nested_is_specificity() {
+        let spec = calculate_specificity(":not(:is(.foo))");
+        eprintln!(
+            "DEBUG: ids={}, classes={}, elements={}",
+            spec.ids, spec.classes, spec.elements
+        );
+        assert_eq!(spec.ids, 0);
+        assert_eq!(spec.classes, 1);
+        assert_eq!(spec.elements, 0);
     }
 }
