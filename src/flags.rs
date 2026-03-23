@@ -64,7 +64,7 @@ pub fn flag_bool_simple(
         return true;
     }
     if let Some(v) = env.get(env_key) {
-        return v == "1";
+        return v != "0";
     }
     default
 }
