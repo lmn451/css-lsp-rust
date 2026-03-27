@@ -31,33 +31,38 @@ impl Specificity {
     }
 }
 
-/// Extract the argument of a top-level :is() call.
+/// Extract the argument of a top-level pseudo-class call with parentheses.
 /// Uses a depth tracker to handle nested parentheses correctly.
-fn extract_is_arg(selector: &str) -> Option<&str> {
+///
+/// # Arguments
+/// * `selector` - The CSS selector string
+/// * `prefix` - The prefix bytes to match (e.g., b":is(" or b":not(")
+///
+/// # Returns
+/// The content between the opening '(' and its matching closing ')', or None if not found.
+fn extract_pseudo_arg<'a>(selector: &'a str, prefix: &[u8]) -> Option<&'a str> {
     let bytes = selector.as_bytes();
     let len = bytes.len();
-
-    let is_prefix = b":is(";
-    let is_len = is_prefix.len();
+    let prefix_len = prefix.len();
 
     for i in 0..len {
-        if bytes[i] != b':' || i + is_len > len {
+        if bytes[i] != b':' || i + prefix_len > len {
             continue;
         }
-        let mut match_is = true;
-        for j in 0..is_len {
-            if bytes[i + j] != is_prefix[j] {
-                match_is = false;
+        let mut match_prefix = true;
+        for j in 0..prefix_len {
+            if bytes[i + j] != prefix[j] {
+                match_prefix = false;
                 break;
             }
         }
-        if !match_is {
+        if !match_prefix {
             continue;
         }
 
-        // Found :is( at position i. Now find matching ) at depth 1.
+        // Found prefix at position i. Now find matching ) at depth 1.
         let mut depth = 1;
-        let mut pos = i + is_len;
+        let mut pos = i + prefix_len;
         while pos < len {
             match bytes[pos] {
                 b'(' => {
@@ -66,7 +71,7 @@ fn extract_is_arg(selector: &str) -> Option<&str> {
                 b')' => {
                     depth -= 1;
                     if depth == 0 {
-                        return Some(&selector[i + is_len..pos]);
+                        return Some(&selector[i + prefix_len..pos]);
                     }
                 }
                 _ => {}
@@ -76,58 +81,21 @@ fn extract_is_arg(selector: &str) -> Option<&str> {
         return None;
     }
     None
+}
+
+/// Extract the argument of a top-level :is() call.
+fn extract_is_arg(selector: &str) -> Option<&str> {
+    extract_pseudo_arg(selector, b":is(")
 }
 
 /// Extract the argument of a top-level :not() call.
-/// Uses a depth tracker to handle nested parentheses correctly.
 fn extract_not_arg(selector: &str) -> Option<&str> {
-    let bytes = selector.as_bytes();
-    let len = bytes.len();
-
-    let not_prefix = b":not(";
-    let not_len = not_prefix.len();
-
-    for i in 0..len {
-        if bytes[i] != b':' || i + not_len > len {
-            continue;
-        }
-        let mut match_not = true;
-        for j in 0..not_len {
-            if bytes[i + j] != not_prefix[j] {
-                match_not = false;
-                break;
-            }
-        }
-        if !match_not {
-            continue;
-        }
-
-        // Found :not( at position i. Now find matching ) at depth 1.
-        let mut depth = 1;
-        let mut pos = i + not_len;
-        while pos < len {
-            match bytes[pos] {
-                b'(' => {
-                    depth += 1;
-                }
-                b')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(&selector[i + not_len..pos]);
-                    }
-                }
-                _ => {}
-            }
-            pos += 1;
-        }
-        return None;
-    }
-    None
+    extract_pseudo_arg(selector, b":not(")
 }
 
-/// Calculate the full specificity of a :not(), :is(), :where() argument.
-/// Per CSS spec: :not(.foo, #bar) → take max IDs=1, max classes=1.
-fn specificity_of_not_arg(arg: &str) -> Specificity {
+/// Calculate the specificity of a pseudo-class argument (:not, :is, :where).
+/// Per CSS spec: :not(.foo, #bar) → take max specificity across comma-separated arguments.
+fn specificity_of_pseudo_argument(arg: &str) -> Specificity {
     let parts: Vec<&str> = arg
         .split(',')
         .map(|s| s.trim())
@@ -163,7 +131,7 @@ fn specificity_of_selector_part(selector: &str) -> Specificity {
     // Recursively handle nested :not() in this argument.
     let not_arg = extract_not_arg(selector);
     let (extra_ids, extra_classes, extra_elements) = if let Some(arg) = not_arg {
-        let spec = specificity_of_not_arg(arg);
+        let spec = specificity_of_pseudo_argument(arg);
         (spec.ids, spec.classes, spec.elements)
     } else {
         (0, 0, 0)
@@ -175,7 +143,7 @@ fn specificity_of_selector_part(selector: &str) -> Specificity {
     // :is() adds specificity of its argument per CSS spec.
     let is_arg = extract_is_arg(selector);
     let (is_ids, is_classes, is_elements) = if let Some(arg) = is_arg {
-        let spec = specificity_of_not_arg(arg);
+        let spec = specificity_of_pseudo_argument(arg);
         (spec.ids, spec.classes, spec.elements)
     } else {
         (0, 0, 0)
@@ -224,7 +192,7 @@ pub fn calculate_specificity(selector: &str) -> Specificity {
         .collect();
     // Only split by comma for top-level selector lists (e.g., "div, .foo")
     // Don't split for :not(), :is(), etc. with comma-separated arguments -
-    // those are handled separately by extract_not_arg and specificity_of_not_arg
+    // those are handled separately by extract_not_arg and specificity_of_pseudo_argument
     if selectors.len() > 1
         && !selector.contains(":not(")
         && !selector.contains(":is(")
@@ -249,7 +217,7 @@ pub fn calculate_specificity(selector: &str) -> Specificity {
     // Extract and add :not() specificity BEFORE counting IDs/classes in remaining selector.
     let not_arg = extract_not_arg(selector);
     let (not_ids, not_classes, not_elements) = if let Some(arg) = not_arg {
-        let spec = specificity_of_not_arg(arg);
+        let spec = specificity_of_pseudo_argument(arg);
         (spec.ids, spec.classes, spec.elements)
     } else {
         (0, 0, 0)
@@ -260,14 +228,14 @@ pub fn calculate_specificity(selector: &str) -> Specificity {
 
     // Per CSS spec: :is() adds specificity of its argument.
     // Extract and add :is() specificity BEFORE counting IDs/classes in remaining selector.
-    // Only do this if :not() is NOT present at top level (handled by specificity_of_not_arg).
+    // Only do this if :not() is NOT present at top level (handled by specificity_of_pseudo_argument).
     let is_arg = if not_arg.is_none() {
         extract_is_arg(selector)
     } else {
         None
     };
     let (is_ids, is_classes, is_elements) = if let Some(arg) = is_arg {
-        let spec = specificity_of_not_arg(arg);
+        let spec = specificity_of_pseudo_argument(arg);
         (spec.ids, spec.classes, spec.elements)
     } else {
         (0, 0, 0)

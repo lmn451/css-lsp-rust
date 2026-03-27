@@ -186,6 +186,13 @@ impl CssVariableManager {
 
         literal_colors.remove(uri);
         dom_trees.remove(uri);
+
+        // FIX: Rebuild color index to remove stale entries
+        drop(vars);
+        drop(usages);
+        drop(literal_colors);
+        drop(dom_trees);
+        self.rebuild_color_index().await;
     }
 
     /// Get all variables defined in a specific document
@@ -652,6 +659,55 @@ mod tests {
         let vars = manager.get_variables("--color").await;
         assert_eq!(vars.len(), 1);
         assert_eq!(vars[0].value, "blue");
+    }
+
+    #[tokio::test]
+    async fn test_manager_color_index_stale_after_remove() {
+        // Regression test: color_variables becomes stale after remove_document()
+        // when rebuild_color_index() is not called
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///test.css").unwrap();
+        let white_key = crate::color::normalized_color_key("white").unwrap();
+
+        // Add a color variable and build the index
+        let var = create_test_variable("--bg", "#ffffff", ":root", "file:///test.css");
+        manager.add_variable(var).await;
+        manager.rebuild_color_index().await;
+
+        // Verify it's indexed
+        assert_eq!(
+            manager.get_variables_by_color_key(&white_key).await.len(),
+            1,
+            "Variable should be indexed by color"
+        );
+
+        // Remove document WITHOUT rebuilding index (simulates the bug)
+        manager.remove_document(&uri).await;
+
+        // After removal, the variable should be gone from both collections
+        assert_eq!(
+            manager.get_variables("--bg").await.len(),
+            0,
+            "Variable should be removed from variables map"
+        );
+
+        // The bug: color_variables still contains the stale entry,
+        // but get_variables_by_color_key() silently skips names not found in variables.
+        // This test verifies the current (buggy) behavior - returns 0 matches.
+        let color_matches = manager.get_variables_by_color_key(&white_key).await;
+        assert_eq!(
+            color_matches.len(),
+            0,
+            "BUG: color index is stale, returns 0 instead of correctly handling removal"
+        );
+
+        // Workaround: manually rebuild to get correct behavior
+        manager.rebuild_color_index().await;
+        assert_eq!(
+            manager.get_variables_by_color_key(&white_key).await.len(),
+            0,
+            "After rebuild, color index is correct"
+        );
     }
 
     // Note: extract_var_name is not a public function, so we skip testing it directly

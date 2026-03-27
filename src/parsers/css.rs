@@ -599,7 +599,7 @@ fn extract_literal_colors_from_value(
                 end += 1;
             }
             let len = end - i;
-            if matches!(len, 4 | 5 | 7 | 9) {
+            if matches!(len, 3..=9) {
                 if let Some(color) = normalized_color_key(&value[i..end]) {
                     colors.push((i, end, color));
                 }
