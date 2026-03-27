@@ -21,13 +21,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: css-variable-lsp
             asset_name: css-variable-lsp-linux-x86_64
-            asset_path: ./${{ matrix.asset_name }}.tar.gz
+            asset_path: ./css-variable-lsp-linux-x86_64.tar.gz
             asset_ext: tar.gz
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact_name: css-variable-lsp
             asset_name: css-variable-lsp-linux-aarch64
-            asset_path: ./${{ matrix.asset_name }}.tar.gz
+            asset_path: ./css-variable-lsp-linux-aarch64.tar.gz
             asset_ext: tar.gz
             use_cross: true
             install_strip: true
@@ -35,25 +35,25 @@ jobs:
             target: x86_64-apple-darwin
             artifact_name: css-variable-lsp
             asset_name: css-variable-lsp-macos-x86_64
-            asset_path: ./${{ matrix.asset_name }}.tar.gz
+            asset_path: ./css-variable-lsp-macos-x86_64.tar.gz
             asset_ext: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: css-variable-lsp
             asset_name: css-variable-lsp-macos-aarch64
-            asset_path: ./${{ matrix.asset_name }}.tar.gz
+            asset_path: ./css-variable-lsp-macos-aarch64.tar.gz
             asset_ext: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: css-variable-lsp.exe
             asset_name: css-variable-lsp-windows-x86_64.exe
-            asset_path: ./${{ matrix.asset_name }}.zip
+            asset_path: ./css-variable-lsp-windows-x86_64.exe.zip
             asset_ext: zip
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             artifact_name: css-variable-lsp.exe
             asset_name: css-variable-lsp-windows-aarch64.exe
-            asset_path: ./${{ matrix.asset_name }}.zip
+            asset_path: ./css-variable-lsp-windows-aarch64.exe.zip
             asset_ext: zip
             msvc_arch: amd64_arm64
     steps:
