@@ -112,6 +112,9 @@ pub struct Config {
 
     /// Only show colors on variables (not inline values)
     pub color_only_on_variables: bool,
+
+    /// Maximum number of documents to track (0 = unlimited)
+    pub max_documents: usize,
 }
 
 impl Default for Config {
@@ -138,6 +141,7 @@ impl Default for Config {
             ],
             enable_color_provider: true,
             color_only_on_variables: false,
+            max_documents: 10_000, // Default limit of 10,000 documents
         }
     }
 }

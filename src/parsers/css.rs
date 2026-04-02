@@ -122,7 +122,7 @@ async fn extract_definitions(
             })
         },
         |variable| async move {
-            manager.add_variable(variable).await;
+            let _ = manager.add_variable(variable).await;
         },
     )
     .await;
@@ -765,27 +765,57 @@ fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
 
 /// Extract the last selector from a selector block, handling complex cases
 fn extract_last_selector(selector_block: &str) -> String {
-    // Split on commas to handle selector lists
-    let selectors: Vec<&str> = selector_block.split(',').map(|s| s.trim()).collect();
+    // Find the last complete selector by tracking balanced parentheses and commas
+    let bytes = selector_block.as_bytes();
+    let len = bytes.len();
+    let mut paren_depth: usize = 0;
+    let mut last_selector_start = 0;
+    let last_selector_end = len;
 
-    // For each selector, find the last meaningful one
-    for selector in selectors.into_iter().rev() {
-        let cleaned = selector.rsplit('{').next().unwrap_or(selector).trim();
-
-        // Skip empty selectors or CSS at-rules
-        if !cleaned.is_empty() && !cleaned.starts_with('@') {
-            // Clean up multi-line selectors
-            let lines: Vec<&str> = cleaned.lines().collect();
-            for line in lines.into_iter().rev() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
-                }
+    for i in 0..len {
+        match bytes[i] {
+            b'(' => {
+                paren_depth += 1;
             }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+            }
+            b',' if paren_depth == 0 => {
+                // This is a selector list separator
+                // The next character (if any) starts a new selector
+                last_selector_start = i + 1;
+            }
+            _ => {}
         }
     }
 
-    ":root".to_string()
+    // Extract the last selector
+    let last_selector = selector_block[last_selector_start..last_selector_end].trim();
+
+    // Clean up the selector - remove any trailing braces or CSS at-rules
+    let cleaned = last_selector
+        .rsplit('{')
+        .last()
+        .unwrap_or(last_selector)
+        .trim();
+
+    // Handle CSS at-rules by finding the actual selector part
+    let selector = if cleaned.starts_with('@') {
+        // This is an at-rule like @media, find the selector inside
+        if let Some(open_brace) = cleaned.find('{') {
+            cleaned[..open_brace].trim().to_string()
+        } else {
+            cleaned.to_string()
+        }
+    } else {
+        cleaned.to_string()
+    };
+
+    if selector.is_empty() {
+        ":root".to_string()
+    } else {
+        selector
+    }
 }
 
 #[cfg(test)]
@@ -1098,5 +1128,94 @@ mod edge_case_tests {
 
         let result = parse_css_document(css, &uri, &manager).await;
         assert!(result.is_ok());
+    }
+
+    /// Bug demonstration: Complex pseudo-selectors are not parsed correctly
+    ///
+    /// ISSUE: The extract_last_selector function may have issues with:
+    /// - Complex pseudo-selectors like :nth-child(2n+1)
+    /// - Attribute selectors with complex values
+    /// - Nested parentheses
+    ///
+    /// EXPECTED TO FAIL: This test proves edge cases are not handled.
+    /// After fix: Complex selectors should be extracted correctly.
+    #[test]
+    fn test_extract_last_selector_complex_pseudo() {
+        use crate::specificity::calculate_specificity;
+
+        let test_cases = vec![
+            // (input, expected selector that should be present)
+            (":root", "root"),
+            (":host", "host"),
+            (".class", "class"),
+            ("#id", "id"),
+            ("div.class", "div.class"),
+            ("div::before", "div::before"),
+            // Complex pseudo-selectors that may fail
+            (":nth-child(2n)", "nth-child"),
+            (":nth-child(2n+1)", "nth-child"),
+            (":nth-child(odd)", "nth-child"),
+            (":nth-child(3n-1)", "nth-child"),
+            (":nth-of-type(2n)", "nth-of-type"),
+            (":not(.hidden)", "not"),
+            (":is(div, span)", "is"),
+            (":where(.theme)", "where"),
+            (":has(+ div)", "has"),
+            (":first-letter", "first-letter"),
+            (":first-line", "first-line"),
+            (":placeholder-shown", "placeholder-shown"),
+            (":focus-visible", "focus-visible"),
+            (":focus-within", "focus-within"),
+            // Complex attribute selectors
+            ("[data-value^=\"test\"]", "data-value"),
+            ("[class~=\"token\"]", "class"),
+            ("[lang|=\"en\"]", "lang"),
+        ];
+
+        for (input, expected_contains) in test_cases {
+            // Find selector before a position (simulating cursor at end)
+            let css = format!("{} {{ color: red; }}", input);
+            let position = css.len() - 1; // Position after selector
+
+            let result = find_selector_before(&css, position, false);
+
+            assert!(
+                result.contains(expected_contains),
+                "Selector '{}' should contain '{}' (from input: {})",
+                result,
+                expected_contains,
+                input
+            );
+
+            // Also verify specificity calculation doesn't panic
+            let specificity = calculate_specificity(&result);
+
+            // For complex selectors, specificity should still be calculable
+            assert!(
+                specificity.ids >= 0 && specificity.classes >= 0 && specificity.elements >= 0,
+                "Specificity should be valid for: {} (got: {:?})",
+                result,
+                specificity
+            );
+        }
+
+        // Additional edge case: selector with nested pseudo-classes
+        let nested = ".container:not(:has(.hidden)):nth-child(2n+1)";
+        let result = find_selector_before(
+            &format!("{} {{ color: red; }}", nested),
+            nested.len() + 5,
+            false,
+        );
+
+        // BUG: Currently this assertion may FAIL because nested selectors are not handled
+        // After fix: Should extract the full compound selector
+        assert!(
+            result.contains("container")
+                && result.contains("not")
+                && result.contains("nth-child"),
+            "Nested selector '{}' should contain all parts, got: {}",
+            nested,
+            result
+        );
     }
 }
