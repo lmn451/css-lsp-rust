@@ -783,10 +783,10 @@ impl LanguageServer for CssVariableLsp {
                 FileChangeType::DELETED => {
                     self.manager.remove_document(&change.uri).await;
                 }
-                FileChangeType::CREATED | FileChangeType::CHANGED => {
-                    if !self.is_document_open(&change.uri).await {
-                        self.update_document_from_disk(&change.uri).await;
-                    }
+                FileChangeType::CREATED | FileChangeType::CHANGED
+                    if !self.is_document_open(&change.uri).await =>
+                {
+                    self.update_document_from_disk(&change.uri).await;
                 }
                 _ => {}
             }

@@ -1,4 +1,5 @@
 use ls_types::{Range, Uri};
+use tracing::warn;
 
 use crate::color::normalized_color_key;
 use crate::manager::CssVariableManager;
@@ -122,7 +123,9 @@ async fn extract_definitions(
             })
         },
         |variable| async move {
-            let _ = manager.add_variable(variable).await;
+            if let Err(e) = manager.add_variable(variable).await {
+                warn!("Failed to add CSS variable: {}", e);
+            }
         },
     )
     .await;
@@ -772,8 +775,8 @@ fn extract_last_selector(selector_block: &str) -> String {
     let mut last_selector_start = 0;
     let last_selector_end = len;
 
-    for i in 0..len {
-        match bytes[i] {
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
             b'(' => {
                 paren_depth += 1;
             }
@@ -794,8 +797,8 @@ fn extract_last_selector(selector_block: &str) -> String {
 
     // Clean up the selector - remove any trailing braces or CSS at-rules
     let cleaned = last_selector
-        .rsplit('{')
-        .last()
+        .split('{')
+        .next()
         .unwrap_or(last_selector)
         .trim();
 
@@ -1191,12 +1194,7 @@ mod edge_case_tests {
             let specificity = calculate_specificity(&result);
 
             // For complex selectors, specificity should still be calculable
-            assert!(
-                specificity.ids >= 0 && specificity.classes >= 0 && specificity.elements >= 0,
-                "Specificity should be valid for: {} (got: {:?})",
-                result,
-                specificity
-            );
+            let _ = specificity; // verify calculate_specificity doesn't panic
         }
 
         // Additional edge case: selector with nested pseudo-classes
@@ -1210,9 +1208,7 @@ mod edge_case_tests {
         // BUG: Currently this assertion may FAIL because nested selectors are not handled
         // After fix: Should extract the full compound selector
         assert!(
-            result.contains("container")
-                && result.contains("not")
-                && result.contains("nth-child"),
+            result.contains("container") && result.contains("not") && result.contains("nth-child"),
             "Nested selector '{}' should contain all parts, got: {}",
             nested,
             result

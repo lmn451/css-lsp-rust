@@ -26,10 +26,10 @@ fn decode_html_entities(s: &str) -> String {
                     let value = if entity.starts_with('x') || entity.starts_with('X') {
                         // Hexadecimal
                         let hex = &entity[1..];
-                        u32::from_str_radix(hex, 16).ok().and_then(|v| char::from_u32(v))
+                        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
                     } else {
                         // Decimal
-                        u32::from_str_radix(entity, 10).ok().and_then(|v| char::from_u32(v))
+                        entity.parse::<u32>().ok().and_then(char::from_u32)
                     };
 
                     if let Some(c) = value {
@@ -63,7 +63,7 @@ fn decode_html_entities(s: &str) -> String {
                 let mut found = false;
                 for (name, char) in named_entities {
                     let name_len = name.len();
-                    if i + 1 + name_len + 1 <= bytes.len() // & + name + ;
+                    if i + 1 + name_len < bytes.len() // & + name + ;
                         && bytes[i + 1..].starts_with(name.as_bytes())
                         && bytes[i + 1 + name_len] == b';'
                     {
@@ -562,10 +562,8 @@ fn parse_simple_selector(token: &str) -> SimpleSelector {
 
     if !current.is_empty() {
         match mode {
-            't' => {
-                if current != "*" {
-                    tag = Some(current);
-                }
+            't' if current != "*" => {
+                tag = Some(current);
             }
             'i' => id = Some(current),
             'c' => classes.push(current),
@@ -924,7 +922,11 @@ mod tests {
             let result = DomTree::parse(&html);
 
             let tree = result.dom_tree;
-            assert!(!tree.roots.is_empty(), "Tree should have nodes for: {}", entity);
+            assert!(
+                !tree.roots.is_empty(),
+                "Tree should have nodes for: {}",
+                entity
+            );
 
             // Inline styles are stored in the HtmlParseResult, not in DomNode
             // We need to check the inline_styles collection

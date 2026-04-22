@@ -432,7 +432,10 @@ mod tests {
         let manager = CssVariableManager::new(Config::default());
         let var = create_test_variable("--primary", "#3b82f6", ":root", "file:///test.css");
 
-        manager.add_variable(var.clone()).await;
+        manager
+            .add_variable(var.clone())
+            .await
+            .expect("add_variable failed");
 
         let variables = manager.get_variables("--primary").await;
         assert_eq!(variables.len(), 1);
@@ -447,8 +450,14 @@ mod tests {
         let var1 = create_test_variable("--color", "red", ":root", "file:///test.css");
         let var2 = create_test_variable("--color", "blue", ".class", "file:///test.css");
 
-        manager.add_variable(var1).await;
-        manager.add_variable(var2).await;
+        manager
+            .add_variable(var1)
+            .await
+            .expect("add_variable failed");
+        manager
+            .add_variable(var2)
+            .await
+            .expect("add_variable failed");
 
         let variables = manager.get_variables("--color").await;
         assert_eq!(variables.len(), 2);
@@ -474,7 +483,10 @@ mod tests {
         let var = create_test_variable("--spacing", "1rem", ":root", "file:///test.css");
         let usage = create_test_usage("--spacing", ".card", "file:///test.css");
 
-        manager.add_variable(var).await.expect("add_variable failed");
+        manager
+            .add_variable(var)
+            .await
+            .expect("add_variable failed");
         manager.add_usage(usage).await;
 
         let (defs, usages) = manager.get_references("--spacing").await;
@@ -491,7 +503,10 @@ mod tests {
         let usage = create_test_usage("--primary", ".button", "file:///test.css");
         let literal = create_literal_color("blue", "file:///test.css", "blue", ".button");
 
-        manager.add_variable(var).await.expect("add_variable failed");
+        manager
+            .add_variable(var)
+            .await
+            .expect("add_variable failed");
         manager.add_usage(usage).await;
         manager.add_literal_color(literal).await;
 
@@ -520,7 +535,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
         manager
             .add_variable(create_test_variable(
                 "--secondary",
@@ -528,7 +544,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
         manager
             .add_variable(create_test_variable(
                 "--spacing",
@@ -536,7 +553,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
 
         let all_vars = manager.get_all_variables().await;
         assert_eq!(all_vars.len(), 3);
@@ -547,7 +565,10 @@ mod tests {
         let manager = CssVariableManager::new(Config::default());
 
         let var = create_test_variable("--primary-color", "#3b82f6", ":root", "file:///test.css");
-        manager.add_variable(var).await.expect("add_variable failed");
+        manager
+            .add_variable(var)
+            .await
+            .expect("add_variable failed");
 
         let color = manager.resolve_variable_color("--primary-color").await;
         assert!(color.is_some());
@@ -564,7 +585,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
         manager
             .add_variable(create_test_variable(
                 "--alias-color",
@@ -572,7 +594,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
 
         let key = manager.resolve_variable_color_key("--alias-color").await;
         assert_eq!(key, crate::color::normalized_color_key("white"));
@@ -589,7 +612,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
         manager
             .add_variable(create_test_variable(
                 "--text-color",
@@ -597,7 +621,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
 
         manager.rebuild_color_index().await;
 
@@ -619,7 +644,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
         manager
             .add_variable(create_test_variable(
                 "--surface",
@@ -627,7 +653,8 @@ mod tests {
                 ":root",
                 "file:///test.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
 
         manager.rebuild_color_index().await;
 
@@ -645,7 +672,10 @@ mod tests {
 
         // Variable defined in one file
         let var = create_test_variable("--theme", "dark", ":root", "file:///variables.css");
-        manager.add_variable(var).await.expect("add_variable failed");
+        manager
+            .add_variable(var)
+            .await
+            .expect("add_variable failed");
 
         // Used in another file
         let usage = create_test_usage("--theme", ".app", "file:///app.css");
@@ -670,7 +700,8 @@ mod tests {
                 ":root",
                 "file:///file1.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
         manager
             .add_variable(create_test_variable(
                 "--color",
@@ -678,7 +709,8 @@ mod tests {
                 ":root",
                 "file:///file2.css",
             ))
-            .await;
+            .await
+            .expect("add_variable failed");
 
         // Should have both definitions
         assert_eq!(manager.get_variables("--color").await.len(), 2);
@@ -702,7 +734,10 @@ mod tests {
 
         // Add a color variable and build the index
         let var = create_test_variable("--bg", "#ffffff", ":root", "file:///test.css");
-        manager.add_variable(var).await.expect("add_variable failed");
+        manager
+            .add_variable(var)
+            .await
+            .expect("add_variable failed");
         manager.rebuild_color_index().await;
 
         // Verify it's indexed
@@ -750,7 +785,10 @@ mod tests {
         let mut var = create_test_variable("--color", "red", ":root", "file:///test.css");
         var.important = true;
 
-        manager.add_variable(var).await.expect("add_variable failed");
+        manager
+            .add_variable(var)
+            .await
+            .expect("add_variable failed");
 
         let vars = manager.get_variables("--color").await;
         assert_eq!(vars.len(), 1);
@@ -769,7 +807,10 @@ mod tests {
         );
         var.inline = true;
 
-        manager.add_variable(var).await.expect("add_variable failed");
+        manager
+            .add_variable(var)
+            .await
+            .expect("add_variable failed");
 
         let vars = manager.get_variables("--inline-color").await;
         assert_eq!(vars.len(), 1);
@@ -803,8 +844,10 @@ mod tests {
         use ls_types::{Position, Range};
         use std::str::FromStr;
 
-        let mut config = Config::default();
-        config.max_documents = 100; // Set a low limit for testing
+        let config = Config {
+            max_documents: 100,
+            ..Default::default()
+        };
 
         let manager = CssVariableManager::new(config);
 
@@ -884,7 +927,10 @@ mod tests {
             inline: false,
             source_position: 0,
         };
-        manager.add_variable(var).await.expect("add_variable failed");
+        manager
+            .add_variable(var)
+            .await
+            .expect("add_variable failed");
         manager.rebuild_color_index().await;
 
         // Spawn concurrent readers and writers
@@ -906,7 +952,10 @@ mod tests {
                     inline: false,
                     source_position: 0,
                 };
-                manager_clone.add_variable(var).await.expect("add_variable failed");
+                manager_clone
+                    .add_variable(var)
+                    .await
+                    .expect("add_variable failed");
                 // Rebuild index after each add to simulate real usage
                 manager_clone.rebuild_color_index().await;
             }));
