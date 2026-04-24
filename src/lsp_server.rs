@@ -25,7 +25,18 @@ use regex::Regex;
 use tokio::sync::RwLock;
 use tower_lsp_server::{Client, LanguageServer};
 
-use crate::color::{generate_color_presentations, parse_color};
+use crate::color::{generate_color_presentations, parse_color, NormalizedColorKey};
+use crate::completion_context::{
+    completion_value_context_slice, get_value_context_info, score_variable_relevance,
+};
+#[cfg(test)]
+use crate::completion_context::{
+    find_html_style_attribute_slice, find_html_style_block_slice, find_js_string_segment,
+};
+use crate::document_kind::{
+    apply_config_patch, build_lookup_extension_map, resolve_document_kind, ClientConfigPatch,
+    DocumentKind,
+};
 use crate::manager::CssVariableManager;
 use crate::parsers::{parse_css_document, parse_html_document};
 use crate::path_display::{format_uri_for_display, to_normalized_fs_path, PathDisplayOptions};
@@ -34,12 +45,17 @@ use crate::specificity::{
     calculate_specificity, compare_specificity, format_specificity, matches_context,
     sort_by_cascade,
 };
+use crate::text_utils::{
+    apply_change_to_text, clamp_to_char_boundary, find_value_range_in_definition, is_word_byte,
+    is_word_char, range_contains, range_contains_position,
+};
 use crate::types::{position_to_offset, Config};
 
 fn code_actions_for_undefined_variables(
     uri: &Uri,
     text: &str,
     context: &CodeActionContext,
+    runtime_config: &RuntimeConfig,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
 
@@ -94,37 +110,40 @@ fn code_actions_for_undefined_variables(
 
         // Optional quickfix: add fallback to `var(--name)` -> `var(--name, )`
         // Only offered when the diagnostic covers a `var(...)` call without a comma.
-        if let (Some(start), Some(end)) = (
-            crate::types::position_to_offset(text, diag.range.start),
-            crate::types::position_to_offset(text, diag.range.end),
-        ) {
-            if start < end && end <= text.len() {
-                let slice = &text[start..end];
-                if slice.starts_with("var(") && slice.ends_with(')') && !slice.contains(',') {
-                    let new_text = slice.trim_end_matches(')').to_string() + ", )";
-                    let edit = WorkspaceEdit {
-                        changes: Some(HashMap::from([(
-                            uri.clone(),
-                            vec![TextEdit {
-                                range: diag.range,
-                                new_text,
-                            }],
-                        )])),
-                        document_changes: None,
-                        change_annotations: None,
-                    };
+        // Can be disabled via --no-suggest-add-fallback or CSS_LSP_SUGGEST_ADD_FALLBACK=0
+        if runtime_config.suggest_add_fallback {
+            if let (Some(start), Some(end)) = (
+                crate::types::position_to_offset(text, diag.range.start),
+                crate::types::position_to_offset(text, diag.range.end),
+            ) {
+                if start < end && end <= text.len() {
+                    let slice = &text[start..end];
+                    if slice.starts_with("var(") && slice.ends_with(')') && !slice.contains(',') {
+                        let new_text = slice.trim_end_matches(')').to_string() + ", )";
+                        let edit = WorkspaceEdit {
+                            changes: Some(HashMap::from([(
+                                uri.clone(),
+                                vec![TextEdit {
+                                    range: diag.range,
+                                    new_text,
+                                }],
+                            )])),
+                            document_changes: None,
+                            change_annotations: None,
+                        };
 
-                    let action = CodeAction {
-                        title: format!("Add fallback to {}", name),
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        diagnostics: Some(vec![diag.clone()]),
-                        edit: Some(edit),
-                        command: None,
-                        is_preferred: Some(false),
-                        disabled: None,
-                        data: None,
-                    };
-                    actions.push(CodeActionOrCommand::CodeAction(action));
+                        let action = CodeAction {
+                            title: format!("Add fallback to {}", name),
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            diagnostics: Some(vec![diag.clone()]),
+                            edit: Some(edit),
+                            command: None,
+                            is_preferred: Some(false),
+                            disabled: None,
+                            data: None,
+                        };
+                        actions.push(CodeActionOrCommand::CodeAction(action));
+                    }
                 }
             }
         }
@@ -133,35 +152,66 @@ fn code_actions_for_undefined_variables(
     actions
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClientConfigPatch {
-    lookup_files: Option<Vec<String>>,
-    ignore_globs: Option<Vec<String>>,
-    enable_color_provider: Option<bool>,
-    color_only_on_variables: Option<bool>,
-}
+fn code_actions_for_replaceable_literal_colors(
+    uri: &Uri,
+    context: &CodeActionContext,
+    runtime_config: &RuntimeConfig,
+) -> Vec<CodeActionOrCommand> {
+    if !runtime_config.suggest_exact_color_variables {
+        return Vec::new();
+    }
 
-fn apply_config_patch(mut base: Config, patch: ClientConfigPatch) -> Config {
-    if let Some(lookup_files) = patch.lookup_files {
-        base.lookup_files = lookup_files;
-    }
-    if let Some(ignore_globs) = patch.ignore_globs {
-        base.ignore_globs = ignore_globs;
-    }
-    if let Some(enable_color_provider) = patch.enable_color_provider {
-        base.enable_color_provider = enable_color_provider;
-    }
-    if let Some(color_only_on_variables) = patch.color_only_on_variables {
-        base.color_only_on_variables = color_only_on_variables;
-    }
-    base
-}
+    let mut actions = Vec::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DocumentKind {
-    Css,
-    Html,
+    for diag in &context.diagnostics {
+        let code = match diag.code.as_ref() {
+            Some(ls_types::NumberOrString::String(code)) => code.as_str(),
+            _ => continue,
+        };
+        if code != "css-variable-lsp.literal-color-replaceable" {
+            continue;
+        }
+
+        let replacements = diag
+            .data
+            .as_ref()
+            .and_then(|d| d.get("replacements"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for replacement in replacements {
+            let name = match replacement.get("name").and_then(|v| v.as_str()) {
+                Some(name) => name,
+                None => continue,
+            };
+
+            let edit = WorkspaceEdit {
+                changes: Some(HashMap::from([(
+                    uri.clone(),
+                    vec![TextEdit {
+                        range: diag.range,
+                        new_text: format!("var({})", name),
+                    }],
+                )])),
+                document_changes: None,
+                change_annotations: None,
+            };
+
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Replace with var({})", name),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(edit),
+                command: None,
+                is_preferred: Some(false),
+                disabled: None,
+                data: None,
+            }));
+        }
+    }
+
+    actions
 }
 
 pub struct CssVariableLsp {
@@ -180,6 +230,8 @@ pub struct CssVariableLsp {
     document_language_map: Arc<RwLock<HashMap<Uri, String>>>,
     document_usage_map: Arc<RwLock<HashMap<Uri, HashSet<String>>>>,
     usage_index: Arc<RwLock<HashMap<String, HashSet<Uri>>>>,
+    /// URIs of documents that contain literal color occurrences
+    color_occurrence_uris: Arc<RwLock<HashSet<Uri>>>,
 }
 
 impl CssVariableLsp {
@@ -203,6 +255,7 @@ impl CssVariableLsp {
             document_language_map: Arc::new(RwLock::new(HashMap::new())),
             document_usage_map: Arc::new(RwLock::new(HashMap::new())),
             usage_index: Arc::new(RwLock::new(HashMap::new())),
+            color_occurrence_uris: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -237,6 +290,8 @@ impl CssVariableLsp {
                 .log_message(MessageType::ERROR, format!("Parse error: {}", e))
                 .await;
         }
+
+        self.manager.rebuild_color_index().await;
     }
 
     async fn validate_document_text(&self, uri: &Uri, text: &str) {
@@ -251,6 +306,7 @@ impl CssVariableLsp {
             text,
             &self.document_usage_map,
             &self.usage_index,
+            Some(&self.color_occurrence_uris),
         )
         .await;
     }
@@ -275,6 +331,71 @@ impl CssVariableLsp {
                 &text,
                 &self.document_usage_map,
                 &self.usage_index,
+                Some(&self.color_occurrence_uris),
+            )
+            .await;
+        }
+    }
+
+    async fn revalidate_affected_documents(
+        &self,
+        changed_names: &HashSet<String>,
+        exclude_uri: Option<&Uri>,
+        revalidate_color_occurrences: bool,
+    ) {
+        if changed_names.is_empty() && !revalidate_color_occurrences {
+            return;
+        }
+
+        let mut affected_uris = HashSet::new();
+        {
+            let index = self.usage_index.read().await;
+            for name in changed_names {
+                if let Some(uris) = index.get(name) {
+                    for uri in uris {
+                        if exclude_uri != Some(uri) {
+                            affected_uris.insert(uri.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also revalidate documents with literal color occurrences if colors may have changed
+        if revalidate_color_occurrences {
+            let color_uris = self.color_occurrence_uris.read().await;
+            for uri in color_uris.iter() {
+                if exclude_uri != Some(uri) {
+                    affected_uris.insert(uri.clone());
+                }
+            }
+        }
+
+        if affected_uris.is_empty() {
+            return;
+        }
+
+        let has_related_info = *self.has_diagnostic_related_information.read().await;
+        let affected_snapshot = {
+            let docs = self.document_map.read().await;
+            affected_uris
+                .into_iter()
+                .filter_map(|uri| docs.get(&uri).map(|text| (uri.clone(), text.clone())))
+                .collect::<Vec<_>>()
+        };
+
+        for (uri, text) in affected_snapshot {
+            validate_document_text_with(
+                &self.client,
+                self.manager.as_ref(),
+                &self.usage_regex,
+                self.runtime_config.undefined_var_fallback,
+                has_related_info,
+                &uri,
+                &text,
+                &self.document_usage_map,
+                &self.usage_index,
+                Some(&self.color_occurrence_uris),
             )
             .await;
         }
@@ -295,6 +416,7 @@ impl CssVariableLsp {
             }
             Err(_) => {
                 self.manager.remove_document(uri).await;
+                self.manager.rebuild_color_index().await;
             }
         }
     }
@@ -346,54 +468,6 @@ impl CssVariableLsp {
     async fn is_document_open(&self, uri: &Uri) -> bool {
         let docs = self.document_map.read().await;
         docs.contains_key(uri)
-    }
-
-    async fn revalidate_affected_documents(
-        &self,
-        changed_names: &HashSet<String>,
-        exclude_uri: Option<&Uri>,
-    ) {
-        let mut affected_uris = HashSet::new();
-        {
-            let index = self.usage_index.read().await;
-            for name in changed_names {
-                if let Some(uris) = index.get(name) {
-                    for uri in uris {
-                        if exclude_uri != Some(uri) {
-                            affected_uris.insert(uri.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        if affected_uris.is_empty() {
-            return;
-        }
-
-        let has_related_info = *self.has_diagnostic_related_information.read().await;
-        let affected_snapshot = {
-            let docs = self.document_map.read().await;
-            affected_uris
-                .into_iter()
-                .filter_map(|uri| docs.get(&uri).map(|text| (uri, text.clone())))
-                .collect::<Vec<_>>()
-        };
-
-        for (uri, text) in affected_snapshot {
-            validate_document_text_with(
-                &self.client,
-                self.manager.as_ref(),
-                &self.usage_regex,
-                self.runtime_config.undefined_var_fallback,
-                has_related_info,
-                &uri,
-                &text,
-                &self.document_usage_map,
-                &self.usage_index,
-            )
-            .await;
-        }
     }
 }
 
@@ -488,11 +562,11 @@ impl LanguageServer for CssVariableLsp {
 
         Ok(InitializeResult {
             capabilities,
+            offset_encoding: Some("utf-16".to_string()),
             server_info: Some(ls_types::ServerInfo {
                 name: "css-variable-lsp-rust".to_string(),
                 version: Some("0.1.0".to_string()),
             }),
-            offset_encoding: Some("utf-16".to_string()),
         })
     }
 
@@ -577,6 +651,7 @@ impl LanguageServer for CssVariableLsp {
         let language_id = params.text_document.language_id;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
+        let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         {
             let mut docs = self.document_map.write().await;
@@ -590,15 +665,17 @@ impl LanguageServer for CssVariableLsp {
             .await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
+        let new_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         self.validate_document_text(&uri, &text).await;
 
-        if old_names != new_names {
-            let changed_names: HashSet<_> = old_names
-                .symmetric_difference(&new_names)
-                .cloned()
-                .collect();
-            self.revalidate_affected_documents(&changed_names, Some(&uri))
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
                 .await;
         }
     }
@@ -608,6 +685,7 @@ impl LanguageServer for CssVariableLsp {
         let changes = params.content_changes;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
+        let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         let updated_text = match self.apply_content_changes(&uri, changes).await {
             Some(text) => text,
@@ -621,15 +699,17 @@ impl LanguageServer for CssVariableLsp {
             .await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
+        let new_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         self.validate_document_text(&uri, &updated_text).await;
 
-        if old_names != new_names {
-            let changed_names: HashSet<_> = old_names
-                .symmetric_difference(&new_names)
-                .cloned()
-                .collect();
-            self.revalidate_affected_documents(&changed_names, Some(&uri))
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
                 .await;
         }
     }
@@ -654,6 +734,7 @@ impl LanguageServer for CssVariableLsp {
         let uri = params.text_document.uri;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
+        let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
         {
             let mut docs = self.document_map.write().await;
@@ -683,13 +764,15 @@ impl LanguageServer for CssVariableLsp {
         self.update_document_from_disk(&uri).await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
+        let new_colors = self.manager.get_document_resolved_color_keys(&uri).await;
 
-        if old_names != new_names {
-            let changed_names: HashSet<_> = old_names
-                .symmetric_difference(&new_names)
-                .cloned()
-                .collect();
-            self.revalidate_affected_documents(&changed_names, None)
+        let colors_changed = old_colors != new_colors;
+        if old_names != new_names || colors_changed {
+            let added_names: HashSet<_> = new_names.difference(&old_names).cloned().collect();
+            let removed_names: HashSet<_> = old_names.difference(&new_names).cloned().collect();
+            let mut changed_names = added_names;
+            changed_names.extend(removed_names);
+            self.revalidate_affected_documents(&changed_names, Some(&uri), colors_changed)
                 .await;
         }
     }
@@ -700,10 +783,10 @@ impl LanguageServer for CssVariableLsp {
                 FileChangeType::DELETED => {
                     self.manager.remove_document(&change.uri).await;
                 }
-                FileChangeType::CREATED | FileChangeType::CHANGED => {
-                    if !self.is_document_open(&change.uri).await {
-                        self.update_document_from_disk(&change.uri).await;
-                    }
+                FileChangeType::CREATED | FileChangeType::CHANGED
+                    if !self.is_document_open(&change.uri).await =>
+                {
+                    self.update_document_from_disk(&change.uri).await;
                 }
                 _ => {}
             }
@@ -820,6 +903,39 @@ impl LanguageServer for CssVariableLsp {
         }
         let property_name = value_context.property_name;
         let in_var_context = is_var_function_context_slice(context.slice);
+        let workspace_folder_paths = self.workspace_folder_paths.read().await.clone();
+        let root_folder_path = self.root_folder_path.read().await.clone();
+
+        if !in_var_context {
+            if let Some(color_key) = self.literal_color_under_cursor(&uri, position).await {
+                let variables = self.manager.get_variables_by_color_key(&color_key).await;
+                let items = variables
+                    .into_iter()
+                    .map(|var| {
+                        let options = PathDisplayOptions {
+                            mode: self.runtime_config.path_display_mode,
+                            abbrev_length: self.runtime_config.path_display_abbrev_length,
+                            workspace_folder_paths: &workspace_folder_paths,
+                            root_folder_path: root_folder_path.as_ref(),
+                        };
+                        let display_path = format_uri_for_display(&var.uri, options);
+                        CompletionItem {
+                            label: var.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some(format!("{} • {}", var.value, display_path)),
+                            insert_text: Some(format!("var({})", var.name)),
+                            documentation: Some(ls_types::Documentation::String(format!(
+                                "Defined in {}",
+                                display_path
+                            ))),
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
+                return Ok(Some(CompletionResponse::Array(items)));
+            }
+        }
+
         let variables = self.manager.get_all_variables().await;
 
         let mut unique_vars = HashMap::new();
@@ -842,9 +958,6 @@ impl LanguageServer for CssVariableLsp {
             }
             var_a.name.cmp(&var_b.name)
         });
-
-        let workspace_folder_paths = self.workspace_folder_paths.read().await.clone();
-        let root_folder_path = self.root_folder_path.read().await.clone();
 
         let items = scored_vars
             .into_iter()
@@ -1083,6 +1196,12 @@ impl LanguageServer for CssVariableLsp {
             &uri,
             &text,
             &params.context,
+            &self.runtime_config,
+        ));
+        actions.extend(code_actions_for_replaceable_literal_colors(
+            &uri,
+            &params.context,
+            &self.runtime_config,
         ));
 
         Ok(Some(actions))
@@ -1384,6 +1503,21 @@ impl LanguageServer for CssVariableLsp {
 }
 
 impl CssVariableLsp {
+    async fn literal_color_under_cursor(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> Option<NormalizedColorKey> {
+        let occurrences = self
+            .manager
+            .get_literal_colors_at_position(uri, position)
+            .await;
+        occurrences
+            .into_iter()
+            .find(|occurrence| range_contains_position(&occurrence.range, position))
+            .map(|occurrence| occurrence.normalized_color)
+    }
+
     /// Scan workspace folders for CSS and HTML files
     pub async fn scan_workspace_folders(&self, folders: Vec<WorkspaceFolder>) {
         let folder_uris: Vec<Uri> = folders.iter().map(|f| f.uri.clone()).collect();
@@ -1457,9 +1591,11 @@ async fn validate_document_text_with(
     text: &str,
     document_usage_map: &Arc<RwLock<HashMap<Uri, HashSet<String>>>>,
     usage_index: &Arc<RwLock<HashMap<String, HashSet<Uri>>>>,
+    color_occurrence_uris: Option<&Arc<RwLock<HashSet<Uri>>>>,
 ) {
     let mut diagnostics = Vec::new();
     let mut current_usages = HashSet::new();
+    let mut has_literal_colors = false;
     let default_severity = DiagnosticSeverity::WARNING;
 
     for captures in usage_regex.captures_iter(text) {
@@ -1518,6 +1654,78 @@ async fn validate_document_text_with(
         });
     }
 
+    for occurrence in manager.get_document_literal_colors(uri).await {
+        let all_replacements = manager
+            .get_variables_by_color_key(&occurrence.normalized_color)
+            .await;
+
+        // Filter out replacement variables where this color is in their own value.
+        // This prevents suggesting replacing #ffd166 with --accent-2 when editing
+        // the definition: --accent-2: #ffd166;
+        let replacements: Vec<_> = all_replacements
+            .iter()
+            .filter(|var| {
+                // Keep if the variable is in a different file
+                if var.uri != *uri {
+                    return true;
+                }
+                // Keep if no value_range available (can't determine overlap)
+                let Some(value_range) = &var.value_range else {
+                    return true;
+                };
+                // Filter out if occurrence is within this variable's value range
+                !range_contains(value_range, &occurrence.range)
+            })
+            .cloned()
+            .collect();
+
+        if replacements.is_empty() {
+            continue;
+        }
+
+        // Track that this document has literal color occurrences
+        has_literal_colors = true;
+
+        let replacement_data: Vec<_> = replacements
+            .iter()
+            .map(|var| {
+                serde_json::json!({
+                    "name": var.name,
+                    "value": var.value,
+                    "uri": var.uri,
+                })
+            })
+            .collect();
+        let replacement_count = replacement_data.len();
+        let message = if replacement_count == 1 {
+            format!("Consider using {} for this color", replacements[0].name)
+        } else {
+            let var_names: Vec<&str> = replacements.iter().map(|v| v.name.as_str()).collect();
+            format!(
+                "Consider using one of these variables: {}",
+                var_names.join(", ")
+            )
+        };
+
+        diagnostics.push(Diagnostic {
+            range: occurrence.range,
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: Some(ls_types::NumberOrString::String(
+                "css-variable-lsp.literal-color-replaceable".to_string(),
+            )),
+            code_description: None,
+            source: Some("css-variable-lsp".to_string()),
+            message,
+            related_information: None,
+            tags: None,
+            data: Some(serde_json::json!({
+                "literal": occurrence.text,
+                "usageContext": occurrence.usage_context,
+                "replacements": replacement_data,
+            })),
+        });
+    }
+
     // Update usage maps
     {
         let mut usage_map = document_usage_map.write().await;
@@ -1548,96 +1756,19 @@ async fn validate_document_text_with(
         }
     }
 
+    // Update color occurrence URIs index
+    if let Some(color_uris) = color_occurrence_uris {
+        let mut color_uris = color_uris.write().await;
+        if has_literal_colors {
+            color_uris.insert(uri.clone());
+        } else {
+            color_uris.remove(uri);
+        }
+    }
+
     client
         .publish_diagnostics(uri.clone(), diagnostics, None)
         .await;
-}
-
-fn is_html_like_extension(ext: &str) -> bool {
-    matches!(ext, ".html" | ".vue" | ".svelte" | ".astro" | ".ripple")
-}
-
-fn language_id_kind(language_id: &str) -> Option<DocumentKind> {
-    match language_id.to_lowercase().as_str() {
-        "html" | "vue" | "svelte" | "astro" | "ripple" => Some(DocumentKind::Html),
-        "css" | "scss" | "sass" | "less" => Some(DocumentKind::Css),
-        _ => None,
-    }
-}
-
-fn normalize_extension(ext: &str) -> Option<String> {
-    let trimmed = ext.trim().trim_start_matches('.');
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(format!(".{}", trimmed.to_lowercase()))
-}
-
-fn extract_extensions(pattern: &str) -> Vec<String> {
-    let pattern = pattern.trim();
-    if let (Some(start), Some(end)) = (pattern.find('{'), pattern.find('}')) {
-        if end > start + 1 {
-            let inner = &pattern[start + 1..end];
-            return inner.split(',').filter_map(normalize_extension).collect();
-        }
-    }
-
-    let ext = std::path::Path::new(pattern)
-        .extension()
-        .and_then(|ext| ext.to_str());
-    ext.and_then(normalize_extension).into_iter().collect()
-}
-
-fn build_lookup_extension_map(lookup_files: &[String]) -> HashMap<String, DocumentKind> {
-    let mut map = HashMap::new();
-    for pattern in lookup_files {
-        for ext in extract_extensions(pattern) {
-            let kind = if is_html_like_extension(&ext) {
-                DocumentKind::Html
-            } else {
-                DocumentKind::Css
-            };
-            map.insert(ext, kind);
-        }
-    }
-    map
-}
-
-fn resolve_document_kind(
-    path: &str,
-    language_id: Option<&str>,
-    lookup_extension_map: &HashMap<String, DocumentKind>,
-) -> Option<DocumentKind> {
-    if let Some(language_id) = language_id {
-        if let Some(kind) = language_id_kind(language_id) {
-            return Some(kind);
-        }
-    }
-
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(normalize_extension)?;
-
-    lookup_extension_map.get(&ext).copied()
-}
-
-fn clamp_to_char_boundary(text: &str, mut idx: usize) -> usize {
-    if idx > text.len() {
-        idx = text.len();
-    }
-    while idx > 0 && !text.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
-}
-
-fn is_word_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '-' || c == '_'
-}
-
-fn is_word_byte(b: u8) -> bool {
-    is_word_char(b as char)
 }
 
 fn is_var_function_context_slice(before_cursor: &str) -> bool {
@@ -1678,513 +1809,6 @@ fn is_var_function_context_slice(before_cursor: &str) -> bool {
         return true;
     }
     !is_word_byte(bytes[start - 1])
-}
-
-struct CompletionContextSlice<'a> {
-    slice: &'a str,
-    allow_without_braces: bool,
-}
-
-struct ValueContext {
-    is_value_context: bool,
-    property_name: Option<String>,
-}
-
-fn completion_value_context_slice<'a>(
-    text: &'a str,
-    position: Position,
-    language_id: Option<&str>,
-    uri: &Uri,
-    lookup_extension_map: &HashMap<String, DocumentKind>,
-) -> Option<CompletionContextSlice<'a>> {
-    let offset = position_to_offset(text, position)?;
-    let start = clamp_to_char_boundary(text, offset.saturating_sub(400));
-    let offset = clamp_to_char_boundary(text, offset);
-    let before_cursor = &text[start..offset];
-
-    if is_js_like_document(uri.path().as_str(), language_id) {
-        let slice = find_js_string_segment(before_cursor)?;
-        return Some(CompletionContextSlice {
-            slice,
-            allow_without_braces: true,
-        });
-    }
-
-    match resolve_document_kind(uri.path().as_str(), language_id, lookup_extension_map) {
-        Some(DocumentKind::Html) => find_html_style_context_slice(before_cursor),
-        Some(DocumentKind::Css) => Some(CompletionContextSlice {
-            slice: before_cursor,
-            allow_without_braces: false,
-        }),
-        None => None,
-    }
-}
-
-fn is_js_like_language_id(language_id: &str) -> bool {
-    matches!(
-        language_id.to_lowercase().as_str(),
-        "javascript"
-            | "javascriptreact"
-            | "typescript"
-            | "typescriptreact"
-            | "js"
-            | "jsx"
-            | "ts"
-            | "tsx"
-    )
-}
-
-fn is_js_like_extension(ext: &str) -> bool {
-    matches!(
-        ext,
-        ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" | ".mts" | ".cts"
-    )
-}
-
-fn is_js_like_document(path: &str, language_id: Option<&str>) -> bool {
-    if let Some(language_id) = language_id {
-        if is_js_like_language_id(language_id) {
-            return true;
-        }
-    }
-
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(normalize_extension);
-    ext.as_deref().map(is_js_like_extension).unwrap_or(false)
-}
-
-fn find_html_style_attribute_slice(before_cursor: &str) -> Option<&str> {
-    let lower = before_cursor.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mut search_end = lower.len();
-
-    while let Some(idx) = lower[..search_end].rfind("style") {
-        if idx > 0 && is_word_byte(bytes[idx - 1]) {
-            search_end = idx;
-            continue;
-        }
-        let after_idx = idx + 5;
-        if after_idx < bytes.len() && is_word_byte(bytes[after_idx]) {
-            search_end = idx;
-            continue;
-        }
-
-        let mut j = after_idx;
-        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if j >= bytes.len() || bytes[j] != b'=' {
-            search_end = idx;
-            continue;
-        }
-        j += 1;
-        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if j >= bytes.len() {
-            return None;
-        }
-
-        let quote = bytes[j];
-        if quote != b'"' && quote != b'\'' {
-            search_end = idx;
-            continue;
-        }
-        let value_start = j + 1;
-        let rest = &bytes[value_start..];
-        if !rest.contains(&quote) {
-            return Some(&before_cursor[value_start..]);
-        }
-
-        search_end = idx;
-    }
-
-    None
-}
-
-fn find_html_style_block_slice(before_cursor: &str) -> Option<&str> {
-    let lower = before_cursor.to_ascii_lowercase();
-    let open_idx = lower.rfind("<style")?;
-    if let Some(close_idx) = lower.rfind("</style") {
-        if close_idx > open_idx {
-            return None;
-        }
-    }
-
-    let tag_end_rel = lower[open_idx..].find('>')?;
-    let tag_end = open_idx + tag_end_rel;
-    if tag_end + 1 > before_cursor.len() {
-        return None;
-    }
-
-    Some(&before_cursor[tag_end + 1..])
-}
-
-fn find_html_style_context_slice(before_cursor: &str) -> Option<CompletionContextSlice<'_>> {
-    if let Some(slice) = find_html_style_attribute_slice(before_cursor) {
-        return Some(CompletionContextSlice {
-            slice,
-            allow_without_braces: true,
-        });
-    }
-    if let Some(slice) = find_html_style_block_slice(before_cursor) {
-        return Some(CompletionContextSlice {
-            slice,
-            allow_without_braces: false,
-        });
-    }
-    None
-}
-
-fn find_js_string_segment(before_cursor: &str) -> Option<&str> {
-    let bytes = before_cursor.as_bytes();
-    let mut in_quote: Option<u8> = None;
-    let mut in_template = false;
-    let mut template_expr_depth: i32 = 0;
-    let mut expr_quote: Option<u8> = None;
-    let mut segment_start: Option<usize> = None;
-
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = in_quote {
-            if b == b'\\' {
-                i = i.saturating_add(2);
-                continue;
-            }
-            if b == q {
-                in_quote = None;
-                segment_start = None;
-            }
-            i += 1;
-            continue;
-        }
-
-        if in_template {
-            if template_expr_depth > 0 {
-                if let Some(q) = expr_quote {
-                    if b == b'\\' {
-                        i = i.saturating_add(2);
-                        continue;
-                    }
-                    if b == q {
-                        expr_quote = None;
-                    }
-                    i += 1;
-                    continue;
-                }
-
-                if b == b'\'' || b == b'"' || b == b'`' {
-                    expr_quote = Some(b);
-                    i += 1;
-                    continue;
-                }
-                if b == b'{' {
-                    template_expr_depth += 1;
-                } else if b == b'}' {
-                    template_expr_depth -= 1;
-                    if template_expr_depth == 0 {
-                        segment_start = Some(i + 1);
-                    }
-                }
-                i += 1;
-                continue;
-            }
-
-            if b == b'\\' {
-                i = i.saturating_add(2);
-                continue;
-            }
-            if b == b'`' {
-                in_template = false;
-                segment_start = None;
-                i += 1;
-                continue;
-            }
-            if b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-                template_expr_depth = 1;
-                segment_start = None;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-
-        if b == b'\'' || b == b'"' {
-            in_quote = Some(b);
-            segment_start = Some(i + 1);
-            i += 1;
-            continue;
-        }
-        if b == b'`' {
-            in_template = true;
-            segment_start = Some(i + 1);
-            i += 1;
-            continue;
-        }
-        i += 1;
-    }
-
-    if in_quote.is_some() {
-        return segment_start.map(|start| &before_cursor[start..]);
-    }
-    if in_template && template_expr_depth == 0 {
-        return segment_start.map(|start| &before_cursor[start..]);
-    }
-    None
-}
-
-fn find_context_colon(before_cursor: &str, allow_without_braces: bool) -> Option<usize> {
-    let mut in_braces = 0i32;
-    let mut in_parens = 0i32;
-    let mut last_colon: i32 = -1;
-    let mut last_semicolon: i32 = -1;
-    let mut last_brace: i32 = -1;
-
-    for (idx, ch) in before_cursor.char_indices().rev() {
-        match ch {
-            ')' => in_parens += 1,
-            '(' => {
-                in_parens -= 1;
-                if in_parens < 0 {
-                    in_parens = 0;
-                }
-            }
-            '}' => in_braces += 1,
-            '{' => {
-                in_braces -= 1;
-                if in_braces < 0 {
-                    last_brace = idx as i32;
-                    break;
-                }
-            }
-            ':' if in_parens == 0 && in_braces == 0 && last_colon == -1 => {
-                last_colon = idx as i32;
-            }
-            ';' if in_parens == 0 && in_braces == 0 && last_semicolon == -1 => {
-                last_semicolon = idx as i32;
-            }
-            _ => {}
-        }
-    }
-
-    if !allow_without_braces && last_brace == -1 {
-        return None;
-    }
-
-    if last_colon > last_semicolon && last_colon > last_brace {
-        Some(last_colon as usize)
-    } else {
-        None
-    }
-}
-
-fn get_value_context_info(before_cursor: &str, allow_without_braces: bool) -> ValueContext {
-    let colon_pos = match find_context_colon(before_cursor, allow_without_braces) {
-        Some(pos) => pos,
-        None => {
-            return ValueContext {
-                is_value_context: false,
-                property_name: None,
-            }
-        }
-    };
-    let before_colon = before_cursor[..colon_pos].trim_end();
-    if before_colon.is_empty() {
-        return ValueContext {
-            is_value_context: true,
-            property_name: None,
-        };
-    }
-
-    let mut start = before_colon.len();
-    for (idx, ch) in before_colon.char_indices().rev() {
-        if is_word_char(ch) {
-            start = idx;
-        } else {
-            break;
-        }
-    }
-
-    if start >= before_colon.len() {
-        return ValueContext {
-            is_value_context: true,
-            property_name: None,
-        };
-    }
-
-    ValueContext {
-        is_value_context: true,
-        property_name: Some(before_colon[start..].to_lowercase()),
-    }
-}
-
-fn score_variable_relevance(var_name: &str, property_name: Option<&str>) -> i32 {
-    let property_name = match property_name {
-        Some(name) => name,
-        None => return -1,
-    };
-
-    let lower_var_name = var_name.to_lowercase();
-
-    let color_properties = [
-        "color",
-        "background-color",
-        "background",
-        "border-color",
-        "outline-color",
-        "text-decoration-color",
-        "fill",
-        "stroke",
-    ];
-    if color_properties.contains(&property_name) {
-        if lower_var_name.contains("color")
-            || lower_var_name.contains("bg")
-            || lower_var_name.contains("background")
-            || lower_var_name.contains("primary")
-            || lower_var_name.contains("secondary")
-            || lower_var_name.contains("accent")
-            || lower_var_name.contains("text")
-            || lower_var_name.contains("border")
-            || lower_var_name.contains("link")
-        {
-            return 10;
-        }
-        if lower_var_name.contains("spacing")
-            || lower_var_name.contains("margin")
-            || lower_var_name.contains("padding")
-            || lower_var_name.contains("size")
-            || lower_var_name.contains("width")
-            || lower_var_name.contains("height")
-            || lower_var_name.contains("font")
-            || lower_var_name.contains("weight")
-            || lower_var_name.contains("radius")
-        {
-            return 0;
-        }
-        return 5;
-    }
-
-    let spacing_properties = [
-        "margin",
-        "margin-top",
-        "margin-right",
-        "margin-bottom",
-        "margin-left",
-        "padding",
-        "padding-top",
-        "padding-right",
-        "padding-bottom",
-        "padding-left",
-        "gap",
-        "row-gap",
-        "column-gap",
-    ];
-    if spacing_properties.contains(&property_name) {
-        if lower_var_name.contains("spacing")
-            || lower_var_name.contains("margin")
-            || lower_var_name.contains("padding")
-            || lower_var_name.contains("gap")
-        {
-            return 10;
-        }
-        if lower_var_name.contains("color")
-            || lower_var_name.contains("bg")
-            || lower_var_name.contains("background")
-        {
-            return 0;
-        }
-        return 5;
-    }
-
-    let size_properties = [
-        "width",
-        "height",
-        "max-width",
-        "max-height",
-        "min-width",
-        "min-height",
-        "font-size",
-    ];
-    if size_properties.contains(&property_name) {
-        if lower_var_name.contains("width")
-            || lower_var_name.contains("height")
-            || lower_var_name.contains("size")
-        {
-            return 10;
-        }
-        if lower_var_name.contains("color")
-            || lower_var_name.contains("bg")
-            || lower_var_name.contains("background")
-        {
-            return 0;
-        }
-        return 5;
-    }
-
-    if property_name.contains("radius") {
-        if lower_var_name.contains("radius") || lower_var_name.contains("rounded") {
-            return 10;
-        }
-        if lower_var_name.contains("color")
-            || lower_var_name.contains("bg")
-            || lower_var_name.contains("background")
-        {
-            return 0;
-        }
-        return 5;
-    }
-
-    let font_properties = ["font-family", "font-weight", "font-style"];
-    if font_properties.contains(&property_name) {
-        if lower_var_name.contains("font") {
-            return 10;
-        }
-        if lower_var_name.contains("color") || lower_var_name.contains("spacing") {
-            return 0;
-        }
-        return 5;
-    }
-
-    -1
-}
-
-fn apply_change_to_text(text: &mut String, change: &TextDocumentContentChangeEvent) {
-    if let Some(range) = change.range {
-        let start = position_to_offset(text, range.start);
-        let end = position_to_offset(text, range.end);
-        if let (Some(start), Some(end)) = (start, end) {
-            if start <= end && end <= text.len() {
-                text.replace_range(start..end, &change.text);
-                return;
-            }
-        }
-    }
-    *text = change.text.clone();
-}
-
-fn find_value_range_in_definition(text: &str, def: &crate::types::CssVariable) -> Option<Range> {
-    let start = position_to_offset(text, def.range.start)?;
-    let end = position_to_offset(text, def.range.end)?;
-    if start >= end || end > text.len() {
-        return None;
-    }
-    let def_text = &text[start..end];
-    let colon_index = def_text.find(':')?;
-    let after_colon = &def_text[colon_index + 1..];
-    let value_trim = def.value.trim();
-    let value_index = after_colon.find(value_trim)?;
-
-    let absolute_start = start + colon_index + 1 + value_index;
-    let absolute_end = absolute_start + value_trim.len();
-
-    Some(Range::new(
-        crate::types::offset_to_position(text, absolute_start),
-        crate::types::offset_to_position(text, absolute_end),
-    ))
 }
 
 #[cfg(test)]

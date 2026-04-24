@@ -14,7 +14,10 @@ For cross-project status visibility, track work in Linear project `rust-css-lsp`
 
 ### Source Code Layout
 - **`src/main.rs`**: Application entry point with LSP server initialization
-- **`src/lsp_server.rs`**: Core LSP protocol handlers (completion, hover, goto-definition, rename, etc.)
+- **`src/lsp_server.rs`**: Core LSP protocol handlers (completion, hover, goto-definition, rename, etc.) — ~2048 lines after refactoring
+- **`src/completion_context.rs`**: Completion context analysis (HTML style detection, JS string segments, relevance scoring) — extracted from lsp_server.rs
+- **`src/document_kind.rs`**: DocumentKind enum + resolution helpers (Css vs Html classification) — extracted from lsp_server.rs
+- **`src/text_utils.rs`**: Pure text utilities (char boundary, word detection, range ops) — extracted from lsp_server.rs
 - **`src/manager.rs`**: CSS variable storage and management with thread-safe operations
 - **`src/types.rs`**: Core data structures (`CssVariable`, `CssVariableUsage`, `Config`, etc.)
 - **`src/parsers/`**: CSS/HTML parsing logic
@@ -24,9 +27,21 @@ For cross-project status visibility, track work in Linear project `rust-css-lsp`
 - **`src/specificity.rs`**: CSS specificity calculation for cascade ordering
 - **`src/color.rs`**: Color parsing and LSP color provider implementation
 - **`src/workspace.rs`**: Workspace scanning and file discovery
-- **`src/runtime_config.rs`**: CLI argument and environment variable parsing
+- **`src/flags.rs`**: Reusable flag parsing helper functions
+- **`src/runtime_config.rs`**: Runtime configuration from CLI args and env vars
 - **`src/path_display.rs`**: Path formatting for hover/completion display
 - **`tests/integration_test.rs`**: Integration tests covering end-to-end functionality
+
+### Module Dependency Graph
+```
+text_utils (no deps)
+    ↓
+document_kind (uses types::Config)
+    ↓
+completion_context (uses document_kind + text_utils)
+    ↓
+lsp_server (uses all modules above)
+```
 
 ### Key Design Patterns
 - **Async-first**: All I/O operations use `tokio` async runtime
@@ -269,3 +284,34 @@ mod tests {
 - **CLI flags**: Follow `--kebab-case` convention
 - **Default values**: Provide sensible defaults in `Default` implementations
 - **Validation**: Validate configuration at startup, not runtime
+
+#### Feature Flags Architecture
+Flags are defined in `RuntimeConfig` and parsed via helper functions in `flags.rs`:
+
+```rust
+// Adding a new flag (only ~3 lines needed):
+// 1. Add field to RuntimeConfig
+pub suggest_new_feature: bool,
+
+// 2. Use helper function in build()
+let suggest_new_feature = flag_bool(
+    args, env,
+    "suggest-new-feature",           // CLI: --no-suggest-new-feature to disable
+    "CSS_LSP_SUGGEST_NEW_FEATURE",   // Env var
+    "--no-suggest-new-feature",     // CLI disable flag
+    true,                            // Default value
+);
+```
+
+#### Available Feature Flags
+| Flag | CLI (disable) | Env var | Default | Description |
+|------|--------------|---------|---------|-------------|
+| Color preview | `--no-color-preview` | `CSS_LSP_COLOR_PREVIEW=0` | true | Enable color picker |
+| Color only variables | `--color-only-variables` | `CSS_LSP_COLOR_ONLY_VARIABLES=1` | false | Colors only on var() |
+| Lookup files | `--lookup-files` | `CSS_LSP_LOOKUP_FILES` | None | File extensions to scan |
+| Ignore globs | `--ignore-globs` | `CSS_LSP_IGNORE_GLOBS` | None | Patterns to exclude |
+| Path display | `--path-display` | `CSS_LSP_PATH_DISPLAY` | relative | Path format mode |
+| Path length | `--path-display-length` | `CSS_LSP_PATH_DISPLAY_LENGTH` | 1 | Abbreviation length |
+| Undefined fallback | `--undefined-var-fallback` | `CSS_LSP_UNDEFINED_VAR_FALLBACK` | warning | Fallback diagnostic level |
+| Suggest add fallback | `--no-suggest-add-fallback` | `CSS_LSP_SUGGEST_ADD_FALLBACK=0` | true | Add fallback quickfix |
+| Suggest color vars | `--no-suggest-exact-color-variables` | `CSS_LSP_SUGGEST_EXACT_COLOR_VARIABLES=0` | true | Color replacement suggestions |

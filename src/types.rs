@@ -1,6 +1,7 @@
 use ls_types::{Position, Range, Uri};
 use serde::{Deserialize, Serialize};
 
+use crate::color::NormalizedColorKey;
 use crate::runtime_config::RuntimeConfig;
 
 /// Represents a CSS variable definition
@@ -59,6 +60,25 @@ pub struct CssVariableUsage {
     pub dom_node: Option<DOMNodeInfo>,
 }
 
+/// Represents a literal color token found in a CSS value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiteralColorOccurrence {
+    /// Original token text (for example `#fff` or `rgb(255, 255, 255)`)
+    pub text: String,
+
+    /// Document URI where the token appears
+    pub uri: Uri,
+
+    /// Range of just the literal color token
+    pub range: Range,
+
+    /// Selector or context where the token appears
+    pub usage_context: String,
+
+    /// Normalized RGBA key used for exact matching
+    pub normalized_color: NormalizedColorKey,
+}
+
 /// Information about a DOM node
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DOMNodeInfo {
@@ -92,6 +112,9 @@ pub struct Config {
 
     /// Only show colors on variables (not inline values)
     pub color_only_on_variables: bool,
+
+    /// Maximum number of documents to track (0 = unlimited)
+    pub max_documents: usize,
 }
 
 impl Default for Config {
@@ -118,6 +141,7 @@ impl Default for Config {
             ],
             enable_color_provider: true,
             color_only_on_variables: false,
+            max_documents: 10_000, // Default limit of 10,000 documents
         }
     }
 }

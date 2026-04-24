@@ -1,6 +1,6 @@
 [package]
 name = "css-variable-lsp"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["lmn451"]
 description = "A fast, Rust-based Language Server Protocol implementation for CSS Variables"
@@ -57,6 +57,7 @@ url = "2.5"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 regex = "1.10"
+once_cell = "1.19"
 
 [dev-dependencies]
 futures = "0.3"

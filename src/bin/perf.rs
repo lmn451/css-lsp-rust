@@ -142,16 +142,8 @@ async fn run() -> Result<(), String> {
     fs::create_dir_all(&css_dir).map_err(|e| format!("Failed to create {css_dir:?}: {e}"))?;
     fs::create_dir_all(&html_dir).map_err(|e| format!("Failed to create {html_dir:?}: {e}"))?;
 
-    let usage_base = if total_files > 0 {
-        color_usages / total_files
-    } else {
-        0
-    };
-    let usage_remainder = if total_files > 0 {
-        color_usages % total_files
-    } else {
-        0
-    };
+    let usage_base = color_usages.checked_div(total_files).unwrap_or(0);
+    let usage_remainder = color_usages.checked_rem(total_files).unwrap_or(0);
 
     let mut usage_names = Vec::with_capacity(color_usages);
 

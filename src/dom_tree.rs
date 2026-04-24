@@ -1,5 +1,92 @@
 use crate::types::DOMNodeInfo;
 
+/// Decode HTML entities in a string
+fn decode_html_entities(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            // Check for numeric entities
+            if i + 2 < bytes.len() && bytes[i + 1] == b'#' {
+                let start = i + 2;
+                let mut end = start;
+                while end < bytes.len() && end < start + 10 {
+                    if bytes[end] == b';' {
+                        break;
+                    }
+                    end += 1;
+                }
+
+                if end < bytes.len() && bytes[end] == b';' {
+                    let entity = &s[start..end];
+
+                    // Check for hex (x) or decimal
+                    let value = if entity.starts_with('x') || entity.starts_with('X') {
+                        // Hexadecimal
+                        let hex = &entity[1..];
+                        u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+                    } else {
+                        // Decimal
+                        entity.parse::<u32>().ok().and_then(char::from_u32)
+                    };
+
+                    if let Some(c) = value {
+                        result.push(c);
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            } else {
+                // Check for named entities
+                let named_entities = [
+                    ("nbsp", '\u{00A0}'),
+                    ("amp", '&'),
+                    ("lt", '<'),
+                    ("gt", '>'),
+                    ("quot", '"'),
+                    ("apos", '\''),
+                    ("copy", '©'),
+                    ("reg", '®'),
+                    ("trade", '™'),
+                    ("ndash", '–'),
+                    ("mdash", '—'),
+                    ("hellip", '…'),
+                    ("laquo", '«'),
+                    ("raquo", '»'),
+                    ("euro", '€'),
+                    ("pound", '£'),
+                    ("yen", '¥'),
+                ];
+
+                let mut found = false;
+                for (name, char) in named_entities {
+                    let name_len = name.len();
+                    if i + 1 + name_len < bytes.len() // & + name + ;
+                        && bytes[i + 1..].starts_with(name.as_bytes())
+                        && bytes[i + 1 + name_len] == b';'
+                    {
+                        result.push(char);
+                        i += 1 + name_len + 1;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if found {
+                    continue;
+                }
+            }
+        }
+
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+
+    result
+}
+
 #[derive(Debug, Clone)]
 pub struct DomNode {
     pub tag: String,
@@ -172,7 +259,8 @@ impl DomTree {
                             i += 1;
                         }
                         let end = i.min(len);
-                        value = Some(html[start..end].to_string());
+                        let raw_value = html[start..end].to_string();
+                        value = Some(decode_html_entities(&raw_value));
                         value_start = Some(start);
                         if i < len {
                             i += 1;
@@ -183,7 +271,8 @@ impl DomTree {
                             i += 1;
                         }
                         let end = i;
-                        value = Some(html[start..end].to_string());
+                        let raw_value = html[start..end].to_string();
+                        value = Some(decode_html_entities(&raw_value));
                         value_start = Some(start);
                     }
                 }
@@ -473,10 +562,8 @@ fn parse_simple_selector(token: &str) -> SimpleSelector {
 
     if !current.is_empty() {
         match mode {
-            't' => {
-                if current != "*" {
-                    tag = Some(current);
-                }
+            't' if current != "*" => {
+                tag = Some(current);
             }
             'i' => id = Some(current),
             'c' => classes.push(current),
@@ -541,7 +628,7 @@ fn matches_selector_parts(tree: &DomTree, node_index: usize, parts: &[SelectorPa
 
 fn matches_simple_selector(node: &DomNode, selector: &SimpleSelector) -> bool {
     if let Some(tag) = &selector.tag {
-        if node.tag != tag.to_lowercase() {
+        if !node.tag.eq_ignore_ascii_case(tag) {
             return false;
         }
     }
@@ -800,5 +887,70 @@ mod tests {
         assert!(!tree.roots.is_empty());
         let node = &tree.nodes[tree.roots[0]];
         assert!(node.classes.contains(&"react-class".to_string()));
+    }
+
+    /// Bug demonstration: HTML entities are not decoded in attribute values
+    ///
+    /// ISSUE: The parser doesn't handle HTML entities (e.g., &nbsp;, &#x27;)
+    /// in attribute values. This could cause issues with inline styles containing entities.
+    ///
+    /// EXPECTED TO FAIL: This test proves entity decoding is not implemented.
+    /// After fix: Entities should be properly decoded.
+    #[test]
+    fn test_dom_tree_html_entity_decoding() {
+        // Test various HTML entities in inline styles
+        let test_cases = vec![
+            // (entity, expected decoded value)
+            ("&nbsp;", " "),
+            ("&amp;", "&"),
+            ("&lt;", "<"),
+            ("&gt;", ">"),
+            ("&quot;", "\""),
+            ("&#39;", "'"),
+            ("&#x27;", "'"),
+            ("&#x20;", " "),
+            ("&copy;", "©"),
+            ("&reg;", "®"),
+        ];
+
+        for (entity, expected) in test_cases {
+            let html = format!(
+                r#"<div style="--test: '{}'; color: blue;">Content</div>"#,
+                entity
+            );
+
+            let result = DomTree::parse(&html);
+
+            let tree = result.dom_tree;
+            assert!(
+                !tree.roots.is_empty(),
+                "Tree should have nodes for: {}",
+                entity
+            );
+
+            // Inline styles are stored in the HtmlParseResult, not in DomNode
+            // We need to check the inline_styles collection
+            let inline_styles = result.inline_styles;
+
+            assert!(
+                !inline_styles.is_empty(),
+                "Should have inline styles for: {}",
+                entity
+            );
+
+            // The inline style should contain the attribute
+            let style = &inline_styles[0].value;
+
+            // BUG: Currently this assertion will FAIL because entities are not decoded
+            // The style value will contain the raw entity string, not the decoded value
+            // After fix: style should contain the decoded entity
+            assert!(
+                style.contains(expected),
+                "Style should contain decoded entity '{}' but got: {} (for entity: {})",
+                expected,
+                style,
+                entity
+            );
+        }
     }
 }

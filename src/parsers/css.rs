@@ -1,7 +1,11 @@
 use ls_types::{Range, Uri};
+use tracing::warn;
 
+use crate::color::normalized_color_key;
 use crate::manager::CssVariableManager;
-use crate::types::{offset_to_position, CssVariable, CssVariableUsage, DOMNodeInfo};
+use crate::types::{
+    offset_to_position, CssVariable, CssVariableUsage, DOMNodeInfo, LiteralColorOccurrence,
+};
 
 /// Configuration for parsing CSS snippets
 pub struct CssParseContext<'a> {
@@ -56,6 +60,15 @@ pub async fn parse_css_snippet(context: CssParseContext<'_>) -> Result<(), Strin
         context.dom_node,
     )
     .await;
+    extract_literal_colors(
+        context.css_text,
+        context.full_text,
+        context.uri,
+        context.manager,
+        context.base_offset,
+        context.usage_context_override,
+    )
+    .await;
     Ok(())
 }
 
@@ -68,6 +81,107 @@ async fn extract_definitions(
     inline: bool,
     selector_override: Option<&str>,
 ) {
+    for_each_declaration(
+        css_text,
+        selector_override,
+        |property_name,
+         property_name_start,
+         property_name_end,
+         value_start,
+         value_end,
+         selector| {
+            if !property_name.starts_with("--") {
+                return None;
+            }
+
+            let value = css_text[value_start..value_end].trim().to_string();
+            let abs_name_start = base_offset + property_name_start;
+            let abs_name_end = base_offset + property_name_end;
+            let abs_value_start = base_offset + value_start;
+            let abs_value_end = base_offset + value_end;
+
+            Some(CssVariable {
+                name: property_name.to_string(),
+                value: value.clone(),
+                uri: uri.clone(),
+                range: Range::new(
+                    offset_to_position(full_text, abs_name_start),
+                    offset_to_position(full_text, abs_value_end),
+                ),
+                name_range: Some(Range::new(
+                    offset_to_position(full_text, abs_name_start),
+                    offset_to_position(full_text, abs_name_end),
+                )),
+                value_range: Some(Range::new(
+                    offset_to_position(full_text, abs_value_start),
+                    offset_to_position(full_text, abs_value_end),
+                )),
+                selector,
+                important: value.to_lowercase().contains("!important"),
+                inline,
+                source_position: abs_name_start,
+            })
+        },
+        |variable| async move {
+            if let Err(e) = manager.add_variable(variable).await {
+                warn!("Failed to add CSS variable: {}", e);
+            }
+        },
+    )
+    .await;
+}
+
+async fn extract_literal_colors(
+    css_text: &str,
+    full_text: &str,
+    uri: &Uri,
+    manager: &CssVariableManager,
+    base_offset: usize,
+    selector_override: Option<&str>,
+) {
+    for_each_declaration(
+        css_text,
+        selector_override,
+        |_, _, _, value_start, value_end, selector| {
+            let value = &css_text[value_start..value_end];
+            let colors = extract_literal_colors_from_value(value)
+                .into_iter()
+                .map(
+                    |(relative_start, relative_end, normalized_color)| LiteralColorOccurrence {
+                        text: value[relative_start..relative_end].to_string(),
+                        uri: uri.clone(),
+                        range: Range::new(
+                            offset_to_position(
+                                full_text,
+                                base_offset + value_start + relative_start,
+                            ),
+                            offset_to_position(full_text, base_offset + value_start + relative_end),
+                        ),
+                        usage_context: selector.clone(),
+                        normalized_color,
+                    },
+                )
+                .collect::<Vec<_>>();
+            Some(colors)
+        },
+        |occurrences| async move {
+            for occurrence in occurrences {
+                manager.add_literal_color(occurrence).await;
+            }
+        },
+    )
+    .await;
+}
+
+async fn for_each_declaration<T, F, Fut>(
+    css_text: &str,
+    selector_override: Option<&str>,
+    mut build: F,
+    mut on_item: impl FnMut(T) -> Fut,
+) where
+    F: FnMut(&str, usize, usize, usize, usize, String) -> Option<T>,
+    Fut: std::future::Future<Output = ()>,
+{
     let bytes = css_text.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -75,6 +189,8 @@ async fn extract_definitions(
     let mut in_string: Option<u8> = None;
     let mut brace_depth = 0;
     let mut in_at_rule = false;
+    let mut declaration_start = 0usize;
+    let allow_without_braces = selector_override.is_some();
 
     while i < len {
         if in_comment {
@@ -111,145 +227,135 @@ async fn extract_definitions(
             continue;
         }
 
-        // Track braces for scope
+        if bytes[i] == b'@' {
+            in_at_rule = true;
+        }
+
         if bytes[i] == b'{' {
             brace_depth += 1;
-        } else if bytes[i] == b'}' {
+            if in_at_rule {
+                in_at_rule = false;
+            }
+            declaration_start = i + 1;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'}' {
             brace_depth -= 1;
             if brace_depth < 0 {
                 brace_depth = 0;
             }
-        }
-
-        // Track @-rules
-        if bytes[i] == b'@' && !in_comment && in_string.is_none() {
-            in_at_rule = true;
-        } else if bytes[i] == b'{' && in_at_rule {
-            in_at_rule = false;
-        }
-
-        if bytes[i] == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
-            let name_start = i;
-            let mut j = i + 2;
-            while j < len && is_ident_char(bytes[j]) {
-                j += 1;
-            }
-            if j == name_start + 2 {
-                i += 2;
-                continue;
-            }
-
-            let name_end = j;
-            let mut k = j;
-            while k < len && bytes[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            if k >= len || bytes[k] != b':' {
-                i = name_end;
-                continue;
-            }
-
-            let mut value_start = k + 1;
-            while value_start < len && bytes[value_start].is_ascii_whitespace() {
-                value_start += 1;
-            }
-
-            let mut value_end = value_start;
-            let mut depth = 0i32;
-            let mut val_in_comment = false;
-            let mut val_in_string: Option<u8> = None;
-            while value_end < len {
-                let b = bytes[value_end];
-                if val_in_comment {
-                    if value_end + 1 < len && b == b'*' && bytes[value_end + 1] == b'/' {
-                        val_in_comment = false;
-                        value_end += 2;
-                        continue;
-                    }
-                    value_end += 1;
-                    continue;
-                }
-                if let Some(q) = val_in_string {
-                    if b == b'\\' {
-                        value_end += 2;
-                        continue;
-                    }
-                    if b == q {
-                        val_in_string = None;
-                    }
-                    value_end += 1;
-                    continue;
-                }
-                if value_end + 1 < len && b == b'/' && bytes[value_end + 1] == b'*' {
-                    val_in_comment = true;
-                    value_end += 2;
-                    continue;
-                }
-                if b == b'"' || b == b'\'' {
-                    val_in_string = Some(b);
-                    value_end += 1;
-                    continue;
-                }
-                if b == b'(' {
-                    depth += 1;
-                    value_end += 1;
-                    continue;
-                }
-                if b == b')' && depth > 0 {
-                    depth -= 1;
-                    value_end += 1;
-                    continue;
-                }
-                if depth == 0 && (b == b';' || b == b'}') {
-                    break;
-                }
-                value_end += 1;
-            }
-
-            let mut value_end_trim = value_end;
-            while value_end_trim > value_start && bytes[value_end_trim - 1].is_ascii_whitespace() {
-                value_end_trim -= 1;
-            }
-
-            let name = css_text[name_start..name_end].to_string();
-            let value = css_text[value_start..value_end_trim].trim().to_string();
-            let selector = selector_override
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| find_selector_before(css_text, name_start, in_at_rule));
-
-            let abs_name_start = base_offset + name_start;
-            let abs_name_end = base_offset + name_end;
-            let abs_value_start = base_offset + value_start;
-            let abs_value_end = base_offset + value_end_trim;
-
-            let variable = CssVariable {
-                name,
-                value: value.clone(),
-                uri: uri.clone(),
-                range: Range::new(
-                    offset_to_position(full_text, abs_name_start),
-                    offset_to_position(full_text, abs_value_end),
-                ),
-                name_range: Some(Range::new(
-                    offset_to_position(full_text, abs_name_start),
-                    offset_to_position(full_text, abs_name_end),
-                )),
-                value_range: Some(Range::new(
-                    offset_to_position(full_text, abs_value_start),
-                    offset_to_position(full_text, abs_value_end),
-                )),
-                selector,
-                important: value.to_lowercase().contains("!important"),
-                inline,
-                source_position: abs_name_start,
-            };
-
-            manager.add_variable(variable).await;
-            i = name_end;
+            declaration_start = i + 1;
+            i += 1;
             continue;
         }
 
-        i += 1;
+        if bytes[i] == b';' {
+            declaration_start = i + 1;
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] != b':' || (brace_depth == 0 && !allow_without_braces) {
+            i += 1;
+            continue;
+        }
+
+        let mut name_end = i;
+        while name_end > declaration_start && bytes[name_end - 1].is_ascii_whitespace() {
+            name_end -= 1;
+        }
+
+        let mut name_start = name_end;
+        while name_start > declaration_start && is_ident_char(bytes[name_start - 1]) {
+            name_start -= 1;
+        }
+
+        if name_end <= name_start {
+            i += 1;
+            continue;
+        }
+
+        let property_name = &css_text[name_start..name_end];
+        let mut value_start = i + 1;
+        while value_start < len && bytes[value_start].is_ascii_whitespace() {
+            value_start += 1;
+        }
+
+        let mut value_end = value_start;
+        let mut depth = 0i32;
+        let mut val_in_comment = false;
+        let mut val_in_string: Option<u8> = None;
+        while value_end < len {
+            let b = bytes[value_end];
+            if val_in_comment {
+                if value_end + 1 < len && b == b'*' && bytes[value_end + 1] == b'/' {
+                    val_in_comment = false;
+                    value_end += 2;
+                    continue;
+                }
+                value_end += 1;
+                continue;
+            }
+            if let Some(q) = val_in_string {
+                if b == b'\\' {
+                    value_end += 2;
+                    continue;
+                }
+                if b == q {
+                    val_in_string = None;
+                }
+                value_end += 1;
+                continue;
+            }
+            if value_end + 1 < len && b == b'/' && bytes[value_end + 1] == b'*' {
+                val_in_comment = true;
+                value_end += 2;
+                continue;
+            }
+            if b == b'"' || b == b'\'' {
+                val_in_string = Some(b);
+                value_end += 1;
+                continue;
+            }
+            if b == b'(' {
+                depth += 1;
+                value_end += 1;
+                continue;
+            }
+            if b == b')' && depth > 0 {
+                depth -= 1;
+                value_end += 1;
+                continue;
+            }
+            if depth == 0 && (b == b';' || b == b'}') {
+                break;
+            }
+            value_end += 1;
+        }
+
+        let mut value_end_trim = value_end;
+        while value_end_trim > value_start && bytes[value_end_trim - 1].is_ascii_whitespace() {
+            value_end_trim -= 1;
+        }
+
+        let selector = selector_override
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| find_selector_before(css_text, name_start, in_at_rule));
+
+        if let Some(item) = build(
+            property_name,
+            name_start,
+            name_end,
+            value_start,
+            value_end_trim,
+            selector,
+        ) {
+            on_item(item).await;
+        }
+
+        i = value_end;
     }
 }
 
@@ -453,6 +559,180 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
+fn extract_literal_colors_from_value(
+    value: &str,
+) -> Vec<(usize, usize, crate::color::NormalizedColorKey)> {
+    let bytes = value.as_bytes();
+    let ignored_ranges = find_ignored_var_ranges(value);
+    let mut colors = Vec::new();
+    let mut i = 0usize;
+    let mut ignored_idx = 0usize;
+    let mut in_string: Option<u8> = None;
+
+    while i < bytes.len() {
+        while ignored_idx < ignored_ranges.len() && i >= ignored_ranges[ignored_idx].1 {
+            ignored_idx += 1;
+        }
+        if ignored_idx < ignored_ranges.len() && i >= ignored_ranges[ignored_idx].0 {
+            i = ignored_ranges[ignored_idx].1;
+            continue;
+        }
+
+        if let Some(quote) = in_string {
+            if bytes[i] == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if bytes[i] == quote {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            in_string = Some(bytes[i]);
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'#' {
+            let mut end = i + 1;
+            while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+                end += 1;
+            }
+            let len = end - i;
+            if matches!(len, 3..=9) {
+                if let Some(color) = normalized_color_key(&value[i..end]) {
+                    colors.push((i, end, color));
+                }
+            }
+            i = end;
+            continue;
+        }
+
+        if bytes[i].is_ascii_alphabetic() {
+            let start = i;
+            let mut end = i + 1;
+            while end < bytes.len() && is_ident_char(bytes[end]) {
+                end += 1;
+            }
+
+            let mut j = end;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+
+            if j < bytes.len() && bytes[j] == b'(' {
+                let ident = value[start..end].to_ascii_lowercase();
+                if matches!(ident.as_str(), "rgb" | "rgba" | "hsl" | "hsla") {
+                    if let Some(func_end) = find_balanced_call_end(value, j) {
+                        if let Some(color) = normalized_color_key(&value[start..func_end]) {
+                            colors.push((start, func_end, color));
+                        }
+                        i = func_end;
+                        continue;
+                    }
+                }
+            } else if let Some(color) = normalized_color_key(&value[start..end]) {
+                colors.push((start, end, color));
+            }
+
+            i = end;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    colors
+}
+
+fn find_ignored_var_ranges(value: &str) -> Vec<(usize, usize)> {
+    let bytes = value.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0usize;
+    let mut in_string: Option<u8> = None;
+
+    while i < bytes.len() {
+        if let Some(quote) = in_string {
+            if bytes[i] == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if bytes[i] == quote {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            in_string = Some(bytes[i]);
+            i += 1;
+            continue;
+        }
+
+        if is_var_function(bytes, i) {
+            let mut j = i + 3;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                if let Some(end) = find_balanced_call_end(value, j) {
+                    ranges.push((i, end));
+                    i = end;
+                    continue;
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    ranges
+}
+
+fn find_balanced_call_end(value: &str, open_paren_idx: usize) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let mut depth = 0i32;
+    let mut i = open_paren_idx;
+    let mut in_string: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_string {
+            if b == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if b == q {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'"' || b == b'\'' {
+            in_string = Some(b);
+            i += 1;
+            continue;
+        }
+
+        if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+        i += 1;
+    }
+
+    None
+}
+
 fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
     let before = &text[..offset];
 
@@ -488,27 +768,57 @@ fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
 
 /// Extract the last selector from a selector block, handling complex cases
 fn extract_last_selector(selector_block: &str) -> String {
-    // Split on commas to handle selector lists
-    let selectors: Vec<&str> = selector_block.split(',').map(|s| s.trim()).collect();
+    // Find the last complete selector by tracking balanced parentheses and commas
+    let bytes = selector_block.as_bytes();
+    let len = bytes.len();
+    let mut paren_depth: usize = 0;
+    let mut last_selector_start = 0;
+    let last_selector_end = len;
 
-    // For each selector, find the last meaningful one
-    for selector in selectors.into_iter().rev() {
-        let cleaned = selector.rsplit('{').next().unwrap_or(selector).trim();
-
-        // Skip empty selectors or CSS at-rules
-        if !cleaned.is_empty() && !cleaned.starts_with('@') {
-            // Clean up multi-line selectors
-            let lines: Vec<&str> = cleaned.lines().collect();
-            for line in lines.into_iter().rev() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
-                }
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => {
+                paren_depth += 1;
             }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+            }
+            b',' if paren_depth == 0 => {
+                // This is a selector list separator
+                // The next character (if any) starts a new selector
+                last_selector_start = i + 1;
+            }
+            _ => {}
         }
     }
 
-    ":root".to_string()
+    // Extract the last selector
+    let last_selector = selector_block[last_selector_start..last_selector_end].trim();
+
+    // Clean up the selector - remove any trailing braces or CSS at-rules
+    let cleaned = last_selector
+        .split('{')
+        .next()
+        .unwrap_or(last_selector)
+        .trim();
+
+    // Handle CSS at-rules by finding the actual selector part
+    let selector = if cleaned.starts_with('@') {
+        // This is an at-rule like @media, find the selector inside
+        if let Some(open_brace) = cleaned.find('{') {
+            cleaned[..open_brace].trim().to_string()
+        } else {
+            cleaned.to_string()
+        }
+    } else {
+        cleaned.to_string()
+    };
+
+    if selector.is_empty() {
+        ":root".to_string()
+    } else {
+        selector
+    }
 }
 
 #[cfg(test)]
@@ -557,6 +867,48 @@ mod tests {
 
         let fallback_usages = manager.get_usages("--fallback").await;
         assert_eq!(fallback_usages.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn parse_css_document_extracts_literal_colors_in_compound_values() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///test.css").unwrap();
+        let text = r#"
+            .button {
+                color: #fff;
+                background: linear-gradient(red, rgb(255 255 255));
+                box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+            }
+        "#;
+
+        parse_css_document(text, &uri, &manager).await.unwrap();
+
+        let occurrences = manager.get_document_literal_colors(&uri).await;
+        let literals: HashSet<String> = occurrences.into_iter().map(|occ| occ.text).collect();
+        assert!(literals.contains("#fff"));
+        assert!(literals.contains("red"));
+        assert!(literals.contains("rgb(255 255 255)"));
+        assert!(literals.contains("rgba(0, 0, 0, 0.5)"));
+    }
+
+    #[tokio::test]
+    async fn parse_css_document_ignores_literal_colors_inside_var_calls() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///test.css").unwrap();
+        let text = r#"
+            .button {
+                color: var(--primary, #fff);
+                background: linear-gradient(var(--from, red), blue);
+            }
+        "#;
+
+        parse_css_document(text, &uri, &manager).await.unwrap();
+
+        let occurrences = manager.get_document_literal_colors(&uri).await;
+        let literals: HashSet<String> = occurrences.into_iter().map(|occ| occ.text).collect();
+        assert!(!literals.contains("#fff"));
+        assert!(!literals.contains("red"));
+        assert!(literals.contains("blue"));
     }
 }
 
@@ -779,5 +1131,87 @@ mod edge_case_tests {
 
         let result = parse_css_document(css, &uri, &manager).await;
         assert!(result.is_ok());
+    }
+
+    /// Bug demonstration: Complex pseudo-selectors are not parsed correctly
+    ///
+    /// ISSUE: The extract_last_selector function may have issues with:
+    /// - Complex pseudo-selectors like :nth-child(2n+1)
+    /// - Attribute selectors with complex values
+    /// - Nested parentheses
+    ///
+    /// EXPECTED TO FAIL: This test proves edge cases are not handled.
+    /// After fix: Complex selectors should be extracted correctly.
+    #[test]
+    fn test_extract_last_selector_complex_pseudo() {
+        use crate::specificity::calculate_specificity;
+
+        let test_cases = vec![
+            // (input, expected selector that should be present)
+            (":root", "root"),
+            (":host", "host"),
+            (".class", "class"),
+            ("#id", "id"),
+            ("div.class", "div.class"),
+            ("div::before", "div::before"),
+            // Complex pseudo-selectors that may fail
+            (":nth-child(2n)", "nth-child"),
+            (":nth-child(2n+1)", "nth-child"),
+            (":nth-child(odd)", "nth-child"),
+            (":nth-child(3n-1)", "nth-child"),
+            (":nth-of-type(2n)", "nth-of-type"),
+            (":not(.hidden)", "not"),
+            (":is(div, span)", "is"),
+            (":where(.theme)", "where"),
+            (":has(+ div)", "has"),
+            (":first-letter", "first-letter"),
+            (":first-line", "first-line"),
+            (":placeholder-shown", "placeholder-shown"),
+            (":focus-visible", "focus-visible"),
+            (":focus-within", "focus-within"),
+            // Complex attribute selectors
+            ("[data-value^=\"test\"]", "data-value"),
+            ("[class~=\"token\"]", "class"),
+            ("[lang|=\"en\"]", "lang"),
+        ];
+
+        for (input, expected_contains) in test_cases {
+            // Find selector before a position (simulating cursor at end)
+            let css = format!("{} {{ color: red; }}", input);
+            let position = css.len() - 1; // Position after selector
+
+            let result = find_selector_before(&css, position, false);
+
+            assert!(
+                result.contains(expected_contains),
+                "Selector '{}' should contain '{}' (from input: {})",
+                result,
+                expected_contains,
+                input
+            );
+
+            // Also verify specificity calculation doesn't panic
+            let specificity = calculate_specificity(&result);
+
+            // For complex selectors, specificity should still be calculable
+            let _ = specificity; // verify calculate_specificity doesn't panic
+        }
+
+        // Additional edge case: selector with nested pseudo-classes
+        let nested = ".container:not(:has(.hidden)):nth-child(2n+1)";
+        let result = find_selector_before(
+            &format!("{} {{ color: red; }}", nested),
+            nested.len() + 5,
+            false,
+        );
+
+        // BUG: Currently this assertion may FAIL because nested selectors are not handled
+        // After fix: Should extract the full compound selector
+        assert!(
+            result.contains("container") && result.contains("not") && result.contains("nth-child"),
+            "Nested selector '{}' should contain all parts, got: {}",
+            nested,
+            result
+        );
     }
 }
