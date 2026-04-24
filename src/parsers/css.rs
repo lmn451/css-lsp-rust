@@ -753,8 +753,18 @@ fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
         let start = before[..brace_pos].rfind('}').map(|p| p + 1).unwrap_or(0);
         let selector_block = before[start..brace_pos].trim();
 
+        // If the selector block contains a nested `{` (from an @-rule), the actual
+        // selector lives between the innermost `{` and the outer `{`.
+        // e.g. "@media (min-width: 768px) { .responsive" → ".responsive"
+        let inner_brace = before[start..brace_pos].rfind('{');
+        let effective_block = if let Some(pos) = inner_brace {
+            before[start + pos + 1..brace_pos].trim()
+        } else {
+            selector_block
+        };
+
         // Handle complex selectors that might span multiple lines or have nested braces
-        let selector = extract_last_selector(selector_block);
+        let selector = extract_last_selector(effective_block);
 
         if selector.is_empty() {
             ":root".to_string()
@@ -1131,6 +1141,43 @@ mod edge_case_tests {
 
         let result = parse_css_document(css, &uri, &manager).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_find_selector_in_at_rule_block() {
+        // Bug: @-rule prelude is returned instead of the actual selector
+        let css = "@media (min-width: 768px) { .responsive { color: var(--x); } }";
+        let var_pos = css.find("var").unwrap();
+        let result = find_selector_before(css, var_pos, false);
+        assert_eq!(
+            result, ".responsive",
+            "Expected selector '.responsive' inside @media block, got: '{}'",
+            result
+        );
+    }
+
+    #[test]
+    fn test_find_selector_deeply_nested_at_rule() {
+        let css = "@media (min-width: 768px) { @supports (display: grid) { .grid-item { color: var(--x); } } }";
+        let var_pos = css.find("var").unwrap();
+        let result = find_selector_before(css, var_pos, false);
+        assert_eq!(
+            result, ".grid-item",
+            "Expected selector '.grid-item' inside nested @-rules, got: '{}'",
+            result
+        );
+    }
+
+    #[test]
+    fn test_find_selector_definition_in_at_rule() {
+        let css = "@media (min-width: 768px) { .responsive { --responsive: value; } }";
+        let decl_pos = css.find("--responsive").unwrap();
+        let result = find_selector_before(css, decl_pos, false);
+        assert_eq!(
+            result, ".responsive",
+            "Expected selector '.responsive' for definition inside @media, got: '{}'",
+            result
+        );
     }
 
     /// Bug demonstration: Complex pseudo-selectors are not parsed correctly
