@@ -30,8 +30,6 @@ jobs:
             asset_path: ./css-variable-lsp-linux-aarch64.tar.gz
             asset_ext: tar.gz
             use_cross: true
-            install_strip: true
-            strip_tool: aarch64-linux-gnu-strip
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: css-variable-lsp
@@ -72,10 +70,6 @@ jobs:
         with:
           arch: ${{ matrix.msvc_arch }}
 
-      - name: Install strip tool (Linux ARM64)
-        if: runner.os == 'Linux' && matrix.install_strip == true
-        run: sudo apt-get update && sudo apt-get install -y binutils-aarch64-linux-gnu
-
       - name: Install cross (for cross targets)
         if: matrix.use_cross == true
         run: cargo install cross --locked
@@ -89,8 +83,8 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Strip binary (Unix)
-        if: runner.os != 'Windows'
-        run: ${{ matrix.strip_tool || 'strip' }} target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        if: runner.os != 'Windows' && matrix.use_cross != true
+        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
       - name: Create archive (Unix)
         if: runner.os != 'Windows'
