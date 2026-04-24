@@ -1,7 +1,7 @@
 use globset::{Glob, GlobSetBuilder};
 use ls_types::Uri;
-use std::fs;
 use std::path::PathBuf;
+use tokio::fs;
 use walkdir::WalkDir;
 
 use crate::manager::CssVariableManager;
@@ -84,7 +84,7 @@ pub async fn scan_workspace(
         on_progress(i + 1, total);
 
         // Read file content
-        let content = match fs::read_to_string(file_path) {
+        let content = match fs::read_to_string(file_path).await {
             Ok(c) => c,
             Err(_) => continue,
         };
