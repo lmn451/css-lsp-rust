@@ -1,18 +1,22 @@
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 use crate::dom_tree::DomTree;
 use crate::types::{CssVariable, DOMNodeInfo};
 
 /// Memoized regex patterns for specificity calculation
-static PSEUDO_ELEMENT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"::[a-zA-Z-]+").unwrap());
-static ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"#[a-zA-Z0-9_-]+").unwrap());
-static CLASS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\.[a-zA-Z0-9_-]+").unwrap());
-static ATTR_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"\[[^\]'"']*\]"#).unwrap());
-static NOT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r":not\((?:[^()]|\([^)]*\))+\)").unwrap());
-static IS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r":is\((?:[^()]|\([^)]*\))+\)").unwrap());
-static WHERE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r":where\((?:[^()]|\([^)]*\))+\)").unwrap());
-static PSEUDO_CLASS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r":[a-zA-Z-]+(\([^)]*\))?").unwrap());
+static PSEUDO_ELEMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"::[a-zA-Z-]+").unwrap());
+static ID_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#[a-zA-Z0-9_-]+").unwrap());
+static CLASS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.[a-zA-Z0-9_-]+").unwrap());
+static ATTR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"\[[^\]'"']*\]"#).unwrap());
+static NOT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":not\((?:[^()]|\([^)]*\))+\)").unwrap());
+static IS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":is\((?:[^()]|\([^)]*\))+\)").unwrap());
+static WHERE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":where\((?:[^()]|\([^)]*\))+\)").unwrap());
+static PSEUDO_CLASS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r":[a-zA-Z-]+(\([^)]*\))?").unwrap());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Specificity {

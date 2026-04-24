@@ -59,7 +59,6 @@ dependencies = [
  "futures",
  "globset",
  "ls-types",
- "once_cell",
  "pathdiff",
  "regex",
  "serde",
