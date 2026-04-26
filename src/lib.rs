@@ -1,6 +1,8 @@
 // Library interface for css-variable-lsp
 // This allows integration tests and external usage
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod color;
 pub mod completion_context;
 pub mod document_kind;

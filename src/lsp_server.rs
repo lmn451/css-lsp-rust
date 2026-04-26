@@ -50,6 +50,7 @@ use crate::text_utils::{
     is_word_char, range_contains, range_contains_position,
 };
 use crate::types::{position_to_offset, Config};
+use crate::VERSION;
 
 fn code_actions_for_undefined_variables(
     uri: &Uri,
@@ -478,7 +479,10 @@ impl LanguageServer for CssVariableLsp {
         params: InitializeParams,
     ) -> tower_lsp_server::jsonrpc::Result<InitializeResult> {
         self.client
-            .log_message(MessageType::INFO, "CSS Variable LSP (Rust) initializing...")
+            .log_message(
+                MessageType::INFO,
+                &format!("CSS Variable LSP (Rust) v{} initializing...", VERSION),
+            )
             .await;
 
         let has_workspace_folders = params
@@ -572,7 +576,10 @@ impl LanguageServer for CssVariableLsp {
 
     async fn initialized(&self, _params: ls_types::InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "CSS Variable LSP (Rust) initialized!")
+            .log_message(
+                MessageType::INFO,
+                &format!("CSS Variable LSP (Rust) v{} initialized!", VERSION),
+            )
             .await;
 
         if let Ok(Some(folders)) = self.client.workspace_folders().await {
