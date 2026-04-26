@@ -314,4 +314,63 @@ mod tests {
         let config = build_runtime_config_with_env(&args, &env);
         assert!(!config.suggest_exact_color_variables);
     }
+
+    #[test]
+    fn runtime_config_accepts_singular_lookup_file_flag() {
+        let args = vec![
+            "--lookup-file".to_string(),
+            "a.css".to_string(),
+            "--lookup-file".to_string(),
+            "b.scss".to_string(),
+        ];
+        let env = HashMap::new();
+        let config = build_runtime_config_with_env(&args, &env);
+
+        assert_eq!(
+            config.lookup_files.as_ref().unwrap(),
+            &vec!["a.css".to_string(), "b.scss".to_string()]
+        );
+    }
+
+    #[test]
+    fn runtime_config_accepts_singular_ignore_glob_flag() {
+        let args = vec![
+            "--ignore-glob".to_string(),
+            "dist/**".to_string(),
+            "--ignore-glob".to_string(),
+            "node_modules/**".to_string(),
+        ];
+        let env = HashMap::new();
+        let config = build_runtime_config_with_env(&args, &env);
+
+        assert_eq!(
+            config.ignore_globs.as_ref().unwrap(),
+            &vec!["dist/**".to_string(), "node_modules/**".to_string()]
+        );
+    }
+
+    #[test]
+    fn runtime_config_primary_and_singular_flags_work_together() {
+        let args = vec![
+            "--lookup-files".to_string(),
+            "a.css".to_string(),
+            "--lookup-file".to_string(),
+            "b.scss".to_string(),
+            "--ignore-globs".to_string(),
+            "dist/**".to_string(),
+            "--ignore-glob".to_string(),
+            "out/**".to_string(),
+        ];
+        let env = HashMap::new();
+        let config = build_runtime_config_with_env(&args, &env);
+
+        assert_eq!(
+            config.lookup_files.as_ref().unwrap(),
+            &vec!["a.css".to_string(), "b.scss".to_string()]
+        );
+        assert_eq!(
+            config.ignore_globs.as_ref().unwrap(),
+            &vec!["dist/**".to_string(), "out/**".to_string()]
+        );
+    }
 }

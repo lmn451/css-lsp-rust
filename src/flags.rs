@@ -76,20 +76,32 @@ pub fn flag_opt<T: From<Vec<String>>>(
     env_key: &str,
     default: Option<T>,
 ) -> Option<T> {
+    let singular_names = ["lookup-files", "ignore-globs"];
+    let use_singular = singular_names.contains(&name);
+
+    let mut names: Vec<String> = vec![name.to_string()];
+    if use_singular {
+        if let Some(singular) = name.strip_suffix('s') {
+            names.push(singular.to_string());
+        }
+    }
+
     let mut values = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
-        if arg == &format!("--{name}") {
-            if let Some(next) = args.get(i + 1) {
-                if !next.starts_with('-') {
-                    values.extend(split_list(next));
-                    i += 1;
+        for n in &names {
+            if arg == &format!("--{n}") {
+                if let Some(next) = args.get(i + 1) {
+                    if !next.starts_with('-') {
+                        values.extend(split_list(next));
+                        i += 1;
+                    }
                 }
+            } else if let Some(rest) = arg.strip_prefix(&format!("--{n}=")) {
+                values.extend(split_list(rest));
             }
-        } else if let Some(rest) = arg.strip_prefix(&format!("--{name}=")) {
-            values.extend(split_list(rest));
         }
         i += 1;
     }
