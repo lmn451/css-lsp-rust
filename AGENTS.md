@@ -315,3 +315,43 @@ let suggest_new_feature = flag_bool(
 | Undefined fallback | `--undefined-var-fallback` | `CSS_LSP_UNDEFINED_VAR_FALLBACK` | warning | Fallback diagnostic level |
 | Suggest add fallback | `--no-suggest-add-fallback` | `CSS_LSP_SUGGEST_ADD_FALLBACK=0` | true | Add fallback quickfix |
 | Suggest color vars | `--no-suggest-exact-color-variables` | `CSS_LSP_SUGGEST_EXACT_COLOR_VARIABLES=0` | true | Color replacement suggestions |
+
+## Release & Publishing Process
+
+### Publishing a New Version
+
+When releasing a new version, follow these steps:
+
+1. **Make your changes** and commit them
+2. **Bump the version** in `Cargo.toml`:
+   ```bash
+   # Edit version in Cargo.toml, then:
+   git add Cargo.toml Cargo.lock
+   git commit -m "chore: bump version to X.Y.Z"
+   ```
+3. **Create and push the tag** - this triggers the release workflow:
+   ```bash
+   git tag vX.Y.Z
+   git push && git push origin vX.Y.Z
+   ```
+4. **Wait for workflows** - the Release and Publish workflows run automatically
+5. **Verify the release** at:
+   - Crates.io: https://crates.io/crates/css-variable-lsp
+   - GitHub Releases: https://github.com/lmn451/css-lsp-rust/releases
+
+### Release Workflow
+
+The `release.yml` workflow automatically builds binaries for all platforms:
+- Linux (x86_64, aarch64)
+- macOS (x86_64, aarch64)
+- Windows (x86_64, aarch64)
+
+Binaries are uploaded to GitHub Releases automatically.
+
+### Manual Publish (if needed)
+
+If the automatic publish fails:
+```bash
+cargo login  # Configure crates.io credentials
+cargo publish
+```
