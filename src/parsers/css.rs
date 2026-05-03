@@ -9,6 +9,76 @@ use crate::types::{
 
 const UNKNOWN_SELECTOR: &str = "<unknown>";
 
+/// Maximum input size to prevent memory exhaustion (10MB)
+const MAX_INPUT_SIZE_BYTES: usize = 10 * 1024 * 1024;
+
+/// At-rules that block variable extraction (descriptors, not CSS properties)
+const BLOCK_LIST: &[&str] = &[
+    "@font-face",
+    "@property",
+    "@keyframes",
+    "@counter-style",
+    "@font-feature-values",
+    "@scroll-timeline",
+];
+
+/// Extract at-rule name, returns lowercase for case-insensitive matching.
+/// Handles vendor prefixes and whitespace between @rule and {.
+fn extract_at_rule_name(bytes: &[u8], start: usize) -> Option<String> {
+    let remaining = &bytes[start + 1..]; // Skip '@'
+    let mut end = 0;
+    let mut found_ident = false;
+
+    while end < remaining.len() {
+        let b = remaining[end];
+        if b.is_ascii_whitespace() {
+            if found_ident {
+                break; // Whitespace after ident = end of name
+            }
+            end += 1;
+            continue;
+        }
+        if is_ident_char(b) || b == b'-' {
+            found_ident = true;
+            end += 1;
+            continue;
+        }
+        break; // Non-ident char
+    }
+
+    if end > 0 {
+        let name = std::str::from_utf8(&remaining[..end]).ok()?;
+        Some(format!("@{}", name.to_ascii_lowercase()))
+    } else {
+        None
+    }
+}
+
+/// Check if character is valid in CSS identifiers
+#[inline]
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// Returns true if this at-rule blocks custom property extraction.
+/// Case-insensitive matching.
+fn should_block_variables(at_rule: &str) -> bool {
+    let at_rule_lower = at_rule.to_ascii_lowercase();
+
+    // Check blocklist - handles @font-face, @property, @keyframes, etc.
+    if BLOCK_LIST.iter().any(|name| *name == at_rule_lower) {
+        return true;
+    }
+
+    // FIXED v3: Use contains("keyframes") instead of starts_with("@-")
+    // because standard @keyframes doesn't start with "@-"
+    if at_rule_lower.contains("keyframes") {
+        return true;
+    }
+
+    false
+}
+
 /// Configuration for parsing CSS snippets
 pub struct CssParseContext<'a> {
     pub css_text: &'a str,
@@ -27,6 +97,15 @@ pub async fn parse_css_document(
     uri: &Uri,
     manager: &CssVariableManager,
 ) -> Result<(), String> {
+    // Memory bounds check to prevent exhaustion attacks
+    if text.len() > MAX_INPUT_SIZE_BYTES {
+        return Err(format!(
+            "CSS input too large ({} bytes), maximum allowed is {} bytes",
+            text.len(),
+            MAX_INPUT_SIZE_BYTES
+        ));
+    }
+
     let context = CssParseContext {
         css_text: text,
         full_text: text,
@@ -190,9 +269,10 @@ async fn for_each_declaration<T, F, Fut>(
     let mut in_comment = false;
     let mut in_string: Option<u8> = None;
     let mut brace_depth = 0;
-    let mut in_at_rule = false;
+    let mut current_at_rule: Option<String> = None;
+    let mut blocking_at_rule: Option<String> = None;
     let mut declaration_start = 0usize;
-    let mut selector_stack: Vec<String> = Vec::new();
+    let mut selector_stack: Vec<String> = Vec::with_capacity(16);
     let allow_without_braces = selector_override.is_some();
 
     while i < len {
@@ -230,21 +310,33 @@ async fn for_each_declaration<T, F, Fut>(
             continue;
         }
 
-        if bytes[i] == b'@' {
-            in_at_rule = true;
+        if bytes[i] == b'@' && !in_comment && in_string.is_none() {
+            // Extract at-rule name for case-insensitive matching
+            current_at_rule = extract_at_rule_name(bytes, i);
         }
 
         if bytes[i] == b'{' {
             brace_depth += 1;
-            selector_stack.push(resolve_block_selector(
-                css_text,
-                i,
-                in_at_rule,
-                selector_stack.last(),
-            ));
-            if in_at_rule {
-                in_at_rule = false;
+
+            // Check if this at-rule blocks variable extraction
+            if let Some(ref at_rule) = current_at_rule {
+                if should_block_variables(at_rule) {
+                    blocking_at_rule = Some(at_rule.clone());
+                }
             }
+
+            // Skip selector push for blocking at-rules (@font-face, @keyframes, etc.)
+            if blocking_at_rule.is_none() {
+                selector_stack.push(resolve_block_selector(
+                    css_text,
+                    i,
+                    current_at_rule.is_some(),
+                    selector_stack.last(),
+                ));
+            }
+
+            // Reset at-rule tracking after entering block
+            current_at_rule = None;
             declaration_start = i + 1;
             i += 1;
             continue;
@@ -255,13 +347,24 @@ async fn for_each_declaration<T, F, Fut>(
             if brace_depth < 0 {
                 brace_depth = 0;
             }
-            selector_stack.pop();
+            // SECURE: Guard against empty stack on malformed CSS
+            if !selector_stack.is_empty() {
+                selector_stack.pop();
+            }
+            // Clear blocking state when exiting a blocking at-rule's block
+            if blocking_at_rule.is_some() && brace_depth == 0 {
+                blocking_at_rule = None;
+            }
             declaration_start = i + 1;
             i += 1;
             continue;
         }
 
         if bytes[i] == b';' {
+            if current_at_rule.is_some() {
+                // At-rule ended without braces (e.g., @import "file.css";)
+                current_at_rule = None;
+            }
             declaration_start = i + 1;
             i += 1;
             continue;
@@ -358,7 +461,7 @@ async fn for_each_declaration<T, F, Fut>(
         let selector = selector_override
             .map(|s| s.to_string())
             .or_else(|| selector_stack.last().cloned())
-            .or_else(|| find_selector_before(css_text, name_start, in_at_rule))
+            .or_else(|| find_selector_before(css_text, name_start, current_at_rule.is_some()))
             .unwrap_or_else(|| UNKNOWN_SELECTOR.to_string());
 
         if let Some(item) = build(
@@ -391,8 +494,9 @@ async fn extract_usages(
     let mut in_comment = false;
     let mut in_string: Option<u8> = None;
     let mut brace_depth = 0;
-    let mut in_at_rule = false;
-    let mut selector_stack: Vec<String> = Vec::new();
+    let mut current_at_rule: Option<String> = None;
+    let mut blocking_at_rule: Option<String> = None;
+    let mut selector_stack: Vec<String> = Vec::with_capacity(16);
 
     while i < len {
         if in_comment {
@@ -431,26 +535,44 @@ async fn extract_usages(
 
         // Track braces for scope
         if bytes[i] == b'{' {
-            selector_stack.push(resolve_block_selector(
-                css_text,
-                i,
-                in_at_rule,
-                selector_stack.last(),
-            ));
+            // Check if this at-rule blocks variable extraction
+            if let Some(ref at_rule) = current_at_rule {
+                if should_block_variables(at_rule) {
+                    blocking_at_rule = Some(at_rule.clone());
+                }
+            }
+
+            // Skip selector push for blocking at-rules
+            if blocking_at_rule.is_none() {
+                selector_stack.push(resolve_block_selector(
+                    css_text,
+                    i,
+                    current_at_rule.is_some(),
+                    selector_stack.last(),
+                ));
+            }
+
+            // Reset at-rule tracking after entering block
+            current_at_rule = None;
             brace_depth += 1;
         } else if bytes[i] == b'}' {
             brace_depth -= 1;
             if brace_depth < 0 {
                 brace_depth = 0;
             }
-            selector_stack.pop();
+            // SECURE: Guard against empty stack on malformed CSS
+            if !selector_stack.is_empty() {
+                selector_stack.pop();
+            }
+            // Clear blocking state when exiting a blocking at-rule's block
+            if blocking_at_rule.is_some() && brace_depth == 0 {
+                blocking_at_rule = None;
+            }
         }
 
         // Track @-rules
         if bytes[i] == b'@' && !in_comment && in_string.is_none() {
-            in_at_rule = true;
-        } else if bytes[i] == b'{' && in_at_rule {
-            in_at_rule = false;
+            current_at_rule = extract_at_rule_name(bytes, i);
         }
 
         if is_var_function(bytes, i) {
@@ -534,7 +656,9 @@ async fn extract_usages(
                 let usage_context = usage_context_override
                     .map(|s| s.to_string())
                     .or_else(|| selector_stack.last().cloned())
-                    .or_else(|| find_selector_before(css_text, var_start, in_at_rule))
+                    .or_else(|| {
+                        find_selector_before(css_text, var_start, current_at_rule.is_some())
+                    })
                     .unwrap_or_else(|| UNKNOWN_SELECTOR.to_string());
                 let abs_start = base_offset + var_start;
                 let abs_end = base_offset + var_end;
@@ -580,10 +704,6 @@ fn is_var_function(bytes: &[u8], idx: usize) -> bool {
         return false;
     }
     true
-}
-
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
 fn has_non_whitespace_outside_comments(segment: &str) -> bool {
