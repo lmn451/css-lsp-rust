@@ -158,6 +158,34 @@ fn issue_7_function_is_used() {
 }
 
 // =============================================================================
+// Issue 9: variables after nested @media inside :root are recognised (FIXED)
+// =============================================================================
+
+#[tokio::test]
+async fn issue_9_fixed_nested_media_inside_root_does_not_hide_later_variables() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Uri::from_str("file:///issue-9.css").unwrap();
+
+    let css = r#"
+        :root {
+            --before: #fff;
+
+            @media (prefers-color-scheme: dark) {
+                --during: #000;
+            }
+
+            --after: #ccc;
+        }
+    "#;
+
+    parse_css_document(css, &uri, &manager).await.unwrap();
+
+    assert_eq!(manager.get_variables("--before").await.len(), 1);
+    assert_eq!(manager.get_variables("--during").await.len(), 1);
+    assert_eq!(manager.get_variables("--after").await.len(), 1);
+}
+
+// =============================================================================
 // Summary
 // =============================================================================
 
@@ -170,4 +198,5 @@ async fn all_issues_status() {
     println!("Issue 5: ✅ FIXED - all hex lengths now extracted");
     println!("Issue 6: ✅ VERIFIED - .module.css resolves to CSS");
     println!("Issue 7: ✅ NOT AN ISSUE - function is used");
+    println!("Issue 9: ✅ FIXED - nested @media inside :root preserves later variables");
 }
