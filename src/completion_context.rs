@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::document_kind::{normalize_extension, resolve_document_kind, DocumentKind};
+use crate::document_kind::{resolve_document_kind, DocumentKind};
 use crate::text_utils::{clamp_to_char_boundary, is_word_byte, is_word_char};
 use crate::types::position_to_offset;
 use ls_types::{Position, Uri};
@@ -27,15 +27,14 @@ pub fn completion_value_context_slice<'a>(
     let offset = clamp_to_char_boundary(text, offset);
     let before_cursor = &text[start..offset];
 
-    if is_js_like_document(uri.path().as_str(), language_id) {
-        let slice = find_js_string_segment(before_cursor)?;
-        return Some(CompletionContextSlice {
-            slice,
-            allow_without_braces: true,
-        });
-    }
-
     match resolve_document_kind(uri.path().as_str(), language_id, lookup_extension_map) {
+        Some(DocumentKind::Js) => {
+            let slice = find_js_string_segment(before_cursor)?;
+            Some(CompletionContextSlice {
+                slice,
+                allow_without_braces: true,
+            })
+        }
         Some(DocumentKind::Html) => find_html_style_context_slice(before_cursor),
         Some(DocumentKind::Css) => Some(CompletionContextSlice {
             slice: before_cursor,
@@ -43,41 +42,6 @@ pub fn completion_value_context_slice<'a>(
         }),
         None => None,
     }
-}
-
-pub fn is_js_like_language_id(language_id: &str) -> bool {
-    matches!(
-        language_id.to_lowercase().as_str(),
-        "javascript"
-            | "javascriptreact"
-            | "typescript"
-            | "typescriptreact"
-            | "js"
-            | "jsx"
-            | "ts"
-            | "tsx"
-    )
-}
-
-pub fn is_js_like_extension(ext: &str) -> bool {
-    matches!(
-        ext,
-        ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" | ".mts" | ".cts"
-    )
-}
-
-pub fn is_js_like_document(path: &str, language_id: Option<&str>) -> bool {
-    if let Some(language_id) = language_id {
-        if is_js_like_language_id(language_id) {
-            return true;
-        }
-    }
-
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(normalize_extension);
-    ext.as_deref().map(is_js_like_extension).unwrap_or(false)
 }
 
 pub fn find_html_style_attribute_slice(before_cursor: &str) -> Option<&str> {

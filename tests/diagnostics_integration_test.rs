@@ -809,3 +809,72 @@ async fn test_literal_color_diagnostic_shows_multiple_variable_names() {
     assert!(diagnostic.message.contains("--snow"));
     assert!(diagnostic.message.contains("--ghost"));
 }
+
+#[tokio::test]
+async fn test_literal_color_diagnostic_in_js_styled_components() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let vars_uri = Uri::from_str("file:///theme.css").unwrap();
+    let js_uri = Uri::from_str("file:///Button.tsx").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "css",
+        ":root { --primary: #3b82f6; }",
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+
+    let js_text = "const Button = styled.button`\\n  color: #3b82f6;\\n`;";
+    open_document(&mut service, js_uri.clone(), "typescriptreact", js_text, 1).await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &js_uri).await;
+
+    let has_literal_diag = diagnostics
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("primary"));
+    assert!(
+        has_literal_diag,
+        "Expected 'Consider using --primary' diagnostic in JS file, got {:?}",
+        diagnostics.diagnostics
+    );
+}
+
+#[tokio::test]
+async fn test_literal_color_exact_match_completion_in_js_styled_components() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let vars_uri = Uri::from_str("file:///theme.css").unwrap();
+    let js_uri = Uri::from_str("file:///Button.tsx").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "css",
+        ":root { --primary: #3b82f6; --accent: #3b82f6; --danger: red; }",
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+
+    let js_text = "const Button = styled.button`\\n  color: #3b82f6;\\n`;";
+    open_document(&mut service, js_uri.clone(), "typescriptreact", js_text, 1).await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &js_uri).await;
+
+    let color_pos = position_of(js_text, "#3b82f6");
+    let labels = completion_labels(&mut service, js_uri.clone(), color_pos).await;
+
+    // Exact-match should return --primary and --accent, but NOT --danger (red)
+    assert!(labels.contains(&"--primary".to_string()));
+    assert!(labels.contains(&"--accent".to_string()));
+    assert!(
+        !labels.contains(&"--danger".to_string()),
+        "--danger (red) should NOT appear for literal #3b82f6, got {:?}",
+        labels
+    );
+}

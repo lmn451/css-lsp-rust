@@ -38,7 +38,7 @@ use crate::document_kind::{
     DocumentKind,
 };
 use crate::manager::CssVariableManager;
-use crate::parsers::{parse_css_document, parse_html_document};
+use crate::parsers::{parse_css_document, parse_html_document, parse_js_document};
 use crate::path_display::{format_uri_for_display, to_normalized_fs_path, PathDisplayOptions};
 use crate::runtime_config::{RuntimeConfig, UndefinedVarFallbackMode};
 use crate::specificity::{
@@ -283,6 +283,7 @@ impl CssVariableLsp {
         let result = match kind {
             Some(DocumentKind::Html) => parse_html_document(text, uri, &self.manager).await,
             Some(DocumentKind::Css) => parse_css_document(text, uri, &self.manager).await,
+            Some(DocumentKind::Js) => parse_js_document(text, uri, &self.manager).await,
             None => return,
         };
 

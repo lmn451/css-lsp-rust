@@ -31,16 +31,26 @@ pub fn apply_config_patch(mut base: Config, patch: ClientConfigPatch) -> Config 
 pub enum DocumentKind {
     Css,
     Html,
+    Js,
 }
 
 fn is_html_like_extension(ext: &str) -> bool {
     matches!(ext, ".html" | ".vue" | ".svelte" | ".astro" | ".ripple")
 }
 
+pub fn is_js_like_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" | ".mts" | ".cts"
+    )
+}
+
 pub fn language_id_kind(language_id: &str) -> Option<DocumentKind> {
     match language_id.to_lowercase().as_str() {
         "html" | "vue" | "svelte" | "astro" | "ripple" => Some(DocumentKind::Html),
         "css" | "scss" | "sass" | "less" => Some(DocumentKind::Css),
+        "javascript" | "javascriptreact" | "typescript" | "typescriptreact" | "js" | "jsx"
+        | "ts" | "tsx" => Some(DocumentKind::Js),
         _ => None,
     }
 }
@@ -74,6 +84,8 @@ pub fn build_lookup_extension_map(lookup_files: &[String]) -> HashMap<String, Do
         for ext in extract_extensions(pattern) {
             let kind = if is_html_like_extension(&ext) {
                 DocumentKind::Html
+            } else if is_js_like_extension(&ext) {
+                DocumentKind::Js
             } else {
                 DocumentKind::Css
             };
@@ -99,5 +111,14 @@ pub fn resolve_document_kind(
         .and_then(|ext| ext.to_str())
         .and_then(normalize_extension)?;
 
-    lookup_extension_map.get(&ext).copied()
+    if let Some(kind) = lookup_extension_map.get(&ext).copied() {
+        return Some(kind);
+    }
+
+    // Fallback: recognize well-known JS extensions even without lookup_files config
+    if is_js_like_extension(&ext) {
+        return Some(DocumentKind::Js);
+    }
+
+    None
 }
