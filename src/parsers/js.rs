@@ -18,6 +18,7 @@ pub async fn parse_js_document(
     manager: &CssVariableManager,
 ) -> Result<(), String> {
     let snippets = extract_js_css_snippets(text);
+    let mut parse_errors = 0;
     for snippet in snippets {
         let context = CssParseContext {
             css_text: &snippet.content,
@@ -29,14 +30,53 @@ pub async fn parse_js_document(
             usage_context_override: Some("js-template"),
             dom_node: None,
         };
-        let _ = parse_css_snippet(context).await;
+        if let Err(e) = parse_css_snippet(context).await {
+            tracing::debug!("JS parse error at offset {}: {}", snippet.content_start, e);
+            parse_errors += 1;
+        }
+    }
+    if parse_errors > 0 {
+        tracing::warn!(
+            "Encountered {} parse errors in JS document {:?}",
+            parse_errors,
+            uri
+        );
     }
     Ok(())
 }
 
 /// Heuristic: does this string contain CSS-like content?
+/// Avoids false positives like "user:pass", "https://", etc.
 fn has_css_like_content(s: &str) -> bool {
-    // Look for colon (property separator) or `--` (custom property) or `var(`
+    // Must have colon with proper context (not URL protocol) OR contain CSS patterns
+    // CSS properties have colons with property names (letter sequence before colon)
+    // vs URLs have protocol prefix (://)
+
+    // Contains var() or --custom-property syntax (definite CSS)
+    if s.contains("var(") || s.contains("--") {
+        return true;
+    }
+
+    // Contains colon - need to check it's not a protocol or credential
+    if let Some(pos) = s.find(':') {
+        // Check what follows the colon
+        let after = &s[pos + 1..].trim_start();
+        // URL protocol pattern: "://" or just "//" at start
+        if s.starts_with("http") || s.starts_with("//") {
+            return false;
+        }
+        // Check it's not a credential pattern (word:word without space after colon)
+        // CSS property: "prop: value" has space after colon
+        // Credential: "user:pass" no space
+        if !after.starts_with(' ') && !after.starts_with(';') && !after.is_empty() {
+            // No space after colon - could be credential, check for common URL patterns
+            if s.contains("://") || s.starts_with('/') {
+                return false;
+            }
+        }
+    }
+
+    // Fallback to original logic for backward compatibility
     s.contains(':') || s.contains("--") || s.contains("var(")
 }
 
@@ -156,8 +196,13 @@ pub(crate) fn extract_js_css_snippets(text: &str) -> Vec<JsCssSnippet> {
                         i += 2;
                         continue;
                     }
-                    content.push(bytes[i] as char);
-                    i += 1;
+                    // Safely handle multi-byte UTF-8 characters
+                    if let Some(c) = text[i..].chars().next() {
+                        content.push(c);
+                        i += c.len_utf8();
+                    } else {
+                        i += 1;
+                    }
                 }
             }
             b'/' => {
