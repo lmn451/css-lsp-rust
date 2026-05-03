@@ -2,32 +2,37 @@
 
 Reference: LSP 3.17 specification.
 
+## Implemented (since initial audit)
+
+1. ~~Document sync: `willSave`, `willSaveWaitUntil`, `didSave`.~~ — stubbed in v0.2.1.
+2. ~~Code action (and resolve).~~ — `code_action()` handler with quickfixes for undefined variables and literal color replacements.
+3. ~~Prepare rename.~~ — `prepare_rename()` handler validates rename targets.
+4. ~~File operations (`will/didCreate`, `will/didRename`, `will/didDelete`).~~ — `did_create_files`, `did_rename_files`, `did_delete_files` handlers.
+5. ~~Workspace configuration (`workspace/configuration`, `didChangeConfiguration`).~~ — `did_change_configuration()` handler for runtime config updates.
+
 ## Missing Features (Not Implemented)
-1. Document sync: `willSave`, `willSaveWaitUntil`, `didSave`.
-2. Declaration.
-3. Type definition.
-4. Implementation.
-5. Call hierarchy (prepare/incoming/outgoing).
-6. Type hierarchy (prepare/supertypes/subtypes).
-7. Document highlight.
-8. Document link (and resolve).
-9. Code lens (and refresh).
-10. Folding range.
-11. Selection range.
-12. Semantic tokens.
-13. Inline value (and refresh).
-14. Inlay hint (resolve/refresh).
-15. Moniker.
-16. Pull diagnostics provider (new diagnostic flow).
-17. Signature help.
-18. Code action (and resolve).
-19. Formatting (document, range, on-type).
-20. Prepare rename.
-21. Linked editing range.
-22. Workspace symbol resolve.
-23. Workspace configuration (`workspace/configuration`, `didChangeConfiguration`).
-24. File operations (`will/didCreate`, `will/didRename`, `will/didDelete`).
-25. Execute command.
+
+1. Declaration.
+2. Type definition.
+3. Implementation.
+4. Call hierarchy (prepare/incoming/outgoing).
+5. Type hierarchy (prepare/supertypes/subtypes).
+6. Document highlight.
+7. Document link (and resolve).
+8. Code lens (and refresh).
+9. Folding range.
+10. Selection range.
+11. Semantic tokens.
+12. Inline value (and refresh).
+13. Inlay hint (resolve/refresh).
+14. Moniker.
+15. Pull diagnostics provider (new diagnostic flow).
+16. Signature help.
+17. Formatting (document, range, on-type).
+18. Linked editing range.
+19. Workspace symbol resolve.
+20. Execute command.
 
 ## Capability / Behavior Gaps
-1. Workspace folder change notifications are not advertised (`change_notifications` is `None`), so clients may not send `workspace/didChangeWorkspaceFolders` even though a handler exists.
+
+1. ~~Workspace folder change notifications are not advertised~~ — Fixed: `change_notifications` is now set, and `did_change_workspace_folders` handler is active.

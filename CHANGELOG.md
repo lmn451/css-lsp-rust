@@ -5,42 +5,95 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-04-26
+
+### Added
+
+- `VERSION` constant in `lib.rs`, included in startup log messages for easier debugging.
+- Release publishing instructions in `AGENTS.md`.
+
+## [0.2.4] - 2026-04-24
+
+### Added
+
+- Singular CLI flag forms: `--lookup-file` and `--ignore-glob` (in addition to existing plural forms).
+
+### Fixed
+
+- Parser now returns the actual selector instead of the `@`-rule prelude for declarations inside nested `@`-rule blocks.
+
+### Changed
+
+- Replaced `once_cell::Lazy` with `std::sync::LazyLock` (standard library).
+- Replaced blocking `fs::read_to_string` with async `tokio::fs` in workspace scanning.
+
+## [0.2.3] - 2026-04-24
+
+### Added
+
+- Exact color variable suggestions: code actions to replace literal color values with matching CSS variable references (PR #7).
+- Literal color diagnostic shows variable name(s) that resolve to the same color.
+- Cross-document diagnostic revalidation when variable definitions change.
+- Diagnostics integration test suite (`tests/diagnostics_integration_test.rs`).
+
+### Changed
+
+- Extracted `completion_context.rs`, `document_kind.rs`, and `text_utils.rs` from `lsp_server.rs` for better modularity.
+- Performance: memoized regex compilation, selective revalidation, line-based color bucketing.
+
+### Fixed
+
+- Unbounded memory growth from accumulating stale document data.
+- HTML entity decoding in DOM tree parser.
+- Specificity double-counting for `:is()` / `:where()` pseudo-classes.
+- Duplicate `offset_encoding` field in `InitializeResult`.
+- CI: correct strip command for cross-compiled aarch64 binaries.
+- Document-limit errors now logged instead of silently ignored.
+
 ## [0.2.2] - 2026-03-19
 
 ### Added
+
 - Feature flags for controlling code action suggestions:
   - `--no-suggest-add-fallback` / `CSS_LSP_SUGGEST_ADD_FALLBACK=0`: Disable "Add fallback" quickfix for undefined variables
   - `--no-suggest-exact-color-variables` / `CSS_LSP_SUGGEST_EXACT_COLOR_VARIABLES=0`: Disable color variable replacement suggestions
 
 ### Changed
+
 - Refactored flag parsing into reusable helpers (`src/flags.rs`) to reduce boilerplate
 
 ## [0.2.1] - 2026-02-19
 
 ### Fixed
+
 - Made tracing logs opt-in and routed output to stderr to avoid corrupting LSP stdio transport.
 - Implemented save notification hooks (`willSave`, `willSaveWaitUntil`, `didSave`) to prevent unimplemented save warnings.
 
 ## [0.1.9] - 2026-01-24
 
 ### Added
+
 - Separate crates.io publish workflow (`publish.yml`) for trusted publishing.
 
 ### Changed
+
 - Release workflow now only builds and uploads GitHub Release binaries.
 
 ### Fixed
+
 - Corrected the Cargo registry configuration for sparse index URLs.
 
 ## [0.1.8] - 2026-01-24
 
 ### Added
+
 - Configurable undefined `var()` fallback diagnostics via `--undefined-var-fallback` /
   `CSS_LSP_UNDEFINED_VAR_FALLBACK` (warning, info, or off).
 
 ## [0.1.7] - 2026-01-21
 
 ### Added
+
 - Cross-document variable usage tracking.
 - Targeted diagnostic revalidation with integration tests.
 - Support `classname` attribute alias in DOM parsing.
@@ -49,14 +102,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release documentation, smoke-test script, and asset name validation tooling.
 
 ### Changed
+
 - Pre-push hook auto-formats and pushes with `--force-with-lease`.
 - Simplified color parsing by removing redundant custom parsers.
 
 ### Fixed
+
 - Lock handling in `revalidate_affected_documents` and stale diagnostics in `did_close`.
 - Clippy warning `field-reassign-with-default` in `perf.rs`.
 
 ### Added
+
 - Comprehensive integration test suite covering full LSP workflows
 - CI/CD pipeline with GitHub Actions for automated testing and releases
 - Code coverage reporting with tarpaulin and Codecov
@@ -65,11 +121,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CssParseContext` struct to reduce function parameter count
 
 ### Changed
+
 - Refactored `parse_css_snippet` to use configuration struct (reduced from 8 to 1 parameter)
 - Made all modules public for external usage via library interface
 - Updated `main.rs` to use library interface for cleaner separation
 
 ### Fixed
+
 - Compilation error in `src/color.rs:245` (changed `a >= 255` to `a == 255`)
 - All clippy warnings resolved:
   - Implicit saturating subtraction in `dom_tree.rs`
@@ -78,12 +136,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed backup files (`lsp_server_broken.rs`, `lsp_server.rs.bak`)
 
 ### Documentation
+
 - Added CHANGELOG.md for version tracking
 - Updated repository guidelines and best practices
 
 ## [0.1.6] - 2026-01-13
 
 ### Fixed
+
 - Prefer `csscolorparser` for named colors to match standard CSS named color definitions.
 - Honor language IDs and `var()` fallbacks in LSP behavior.
 
@@ -92,12 +152,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Initial Release
 
 #### Core Features
+
 - **LSP Protocol Implementation**
   - Full Language Server Protocol support via `tower-lsp`
   - Async runtime powered by `tokio`
   - Thread-safe state management with `Arc<RwLock<>>`
 
 #### Parsing & Analysis
+
 - **CSS Parsing**
   - Regex-based extraction of CSS variable definitions
   - Support for `:root`, class, ID, and element selectors
@@ -118,13 +180,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Skips nested fallback var() calls to avoid duplicates
 
 #### CSS Cascade & Specificity
+
 - **Specificity Calculation**
   - Full CSS specificity rules: `(inline, id, class, element)`
   - Inline style specificity (1,0,0,0)
   - ID selector specificity (0,1,0,0)
   - Class/attribute/pseudo-class specificity (0,0,1,0)
   - Element/pseudo-element specificity (0,0,0,1)
-  - Universal selector (*) has zero specificity
+  - Universal selector (\*) has zero specificity
 
 - **Cascade Sorting**
   - Priority order: `!important` > specificity > source order
@@ -134,12 +197,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### LSP Features
 
 ##### Completion
+
 - Suggests all unique CSS variables in workspace
 - Triggers on `-` and `(` characters
 - Shows variable value and selector in completion details
 - Cross-file variable suggestions
 
 ##### Hover
+
 - Displays variable value with source information
 - Multi-definition support with cascade explanation
 - Winner indication: "✓ Wins" for highest-priority definition
@@ -148,16 +213,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Supports both definitions and usages
 
 ##### Go to Definition
+
 - Jumps to variable declaration
 - Works across files
 - Handles multiple definitions (navigates to first)
 
 ##### Find References
+
 - Lists all definitions and usages
 - Cross-file reference tracking
 - Separate sections for definitions vs. usages
 
 ##### Rename
+
 - Renames variables across entire workspace
 - Preserves `!important` flags
 - Preserves fallback arguments in `var()` calls
@@ -165,23 +233,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uses regex replacement for precision
 
 ##### Diagnostics
+
 - Real-time validation on document changes
 - Warns on undefined variable usage: `var(--undefined)`
 - LSP `publishDiagnostics` API integration
 - Warning-level diagnostics (not errors)
 
 ##### Document Symbols
+
 - Lists all CSS variables in current document
 - Shows variable name and value
 - Categorizes as "Variable" symbol kind
 - Provides accurate location ranges
 
 ##### Workspace Symbols
+
 - Searches CSS variables across entire workspace
 - Query-based filtering (substring match)
 - Cross-file symbol navigation
 
 #### Workspace Management
+
 - **Workspace Scanning**
   - Async scanning with progress reporting
   - Glob-based file lookup patterns
@@ -194,6 +266,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - HTML: `.html`, `.vue`, `.svelte`, `.astro`, `.ripple`
 
 #### Color Provider
+
 - **Color Detection**
   - Hex colors: `#rgb`, `#rrggbb`, `#rrggbbaa`
   - RGB/RGBA: `rgb(r, g, b)`, `rgba(r, g, b, a)`
@@ -212,6 +285,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `CSS_LSP_COLOR_ONLY_VARIABLES=1`: Only show colors on variables, not inline values
 
 #### Runtime Configuration
+
 - **CLI Flags**
   - `--lookup-files=<patterns>`: Comma-separated glob patterns
   - `--ignore-globs=<patterns>`: Comma-separated ignore patterns
@@ -232,6 +306,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `abbreviated[:N]`: Abbreviate directory names (default N=1)
 
 #### Performance
+
 - **Binary Size**: 6.3 MB (vs 50-100 MB Node runtime)
 - **Startup Time**: ~10ms (vs ~500ms Node)
 - **Memory Usage**: 10-20 MB baseline (vs 50-100 MB Node)
@@ -241,6 +316,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zero Node.js dependency**
 
 #### Testing
+
 - **Unit Tests**: 17 tests covering:
   - CSS parsing (definitions and usages)
   - HTML parsing (style blocks and inline styles)
@@ -253,6 +329,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Test Coverage**: Core parsing, specificity, and configuration logic
 
 #### Dependencies
+
 - `tower-lsp 0.20`: LSP server framework
 - `tokio 1.35`: Async runtime
 - `serde 1.0` / `serde_json 1.0`: Serialization
@@ -263,6 +340,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tracing 0.1` / `tracing-subscriber 0.3`: Logging
 
 #### Architecture
+
 - **Entry Point**: `main.rs` - Sets up async runtime and LSP server
 - **LSP Handlers**: `lsp_server.rs` - Implements `tower_lsp::LanguageServer`
 - **Variable Storage**: `manager.rs` - Thread-safe CSS variable manager
@@ -276,6 +354,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Color Support**: `color.rs` - Color parsing and presentations
 
 #### Known Limitations
+
 - Regex-based parsing (not full AST) - sufficient for 95% of use cases
 - Basic SCSS/SASS support - no full preprocessor
 - Nested fallback `var()` calls in fallbacks are not tracked separately
@@ -283,16 +362,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Comparison: TypeScript vs Rust
 
-| Feature | TypeScript | Rust |
-|---------|------------|------|
-| **Binary Size** | Node runtime + packages (~50-100 MB) | 6.3 MB |
-| **Startup Time** | ~500ms (Node init) | ~10ms |
-| **Memory Usage** | 50-100 MB baseline | 10-20 MB baseline |
-| **Parse Speed** | Fast (css-tree) | Very fast (regex) |
-| **Dependencies** | npm packages (Node.js required) | Native binary (no runtime) |
-| **Cross-platform** | Requires Node.js installation | Single binary per platform |
+| Feature            | TypeScript                           | Rust                       |
+| ------------------ | ------------------------------------ | -------------------------- |
+| **Binary Size**    | Node runtime + packages (~50-100 MB) | 6.3 MB                     |
+| **Startup Time**   | ~500ms (Node init)                   | ~10ms                      |
+| **Memory Usage**   | 50-100 MB baseline                   | 10-20 MB baseline          |
+| **Parse Speed**    | Fast (css-tree)                      | Very fast (regex)          |
+| **Dependencies**   | npm packages (Node.js required)      | Native binary (no runtime) |
+| **Cross-platform** | Requires Node.js installation        | Single binary per platform |
 
 #### Issues Fixed
+
 1. ✅ **Destructive rename**: Now preserves `!important` and fallbacks
 2. ✅ **Inline style definitions**: Fully tracked and indexed
 3. ✅ **Node version incompatibility**: Eliminated (no Node.js!)
@@ -304,6 +384,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Future Roadmap
 
 ### Planned Features
+
 - Full lightningcss AST integration for more accurate parsing
 - Complete SCSS/SASS preprocessor support
 - CSS-in-JS support (styled-components, emotion, etc.)
@@ -314,6 +395,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Neovim/Vim plugin examples
 
 ### Integration
+
 - Binary distribution for all platforms
 - CI/CD for automated releases
 - Cargo/npm package publication
@@ -321,6 +403,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-**License**: GPL-3.0  
-**Author**: lmn45  
+**License**: GPL-3.0
+**Author**: lmn45
 **Repository**: [github.com/yourorg/css-variable-lsp](https://github.com/yourorg/css-variable-lsp)
