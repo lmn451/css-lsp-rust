@@ -212,6 +212,47 @@ async fn test_diagnostics_revalidate_on_definition_add() {
 }
 
 #[tokio::test]
+async fn test_diagnostics_accept_variables_after_nested_media_inside_root() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let index_uri = Uri::from_str("file:///index.scss").unwrap();
+    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
+
+    open_document(
+        &mut service,
+        vars_uri.clone(),
+        "scss",
+        r#"
+        :root {
+            --before: #fff;
+
+            @media (prefers-color-scheme: dark) {
+                --during: #000;
+            }
+
+            --after: #ccc;
+        }
+        "#,
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &vars_uri).await;
+
+    open_document(
+        &mut service,
+        index_uri.clone(),
+        "scss",
+        ".card { color: var(--after); }",
+        1,
+    )
+    .await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 0);
+}
+
+#[tokio::test]
 async fn test_diagnostics_revalidate_on_definition_remove() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;

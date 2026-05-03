@@ -7,6 +7,8 @@ use crate::types::{
     offset_to_position, CssVariable, CssVariableUsage, DOMNodeInfo, LiteralColorOccurrence,
 };
 
+const UNKNOWN_SELECTOR: &str = "<unknown>";
+
 /// Configuration for parsing CSS snippets
 pub struct CssParseContext<'a> {
     pub css_text: &'a str,
@@ -190,6 +192,7 @@ async fn for_each_declaration<T, F, Fut>(
     let mut brace_depth = 0;
     let mut in_at_rule = false;
     let mut declaration_start = 0usize;
+    let mut selector_stack: Vec<String> = Vec::new();
     let allow_without_braces = selector_override.is_some();
 
     while i < len {
@@ -233,6 +236,12 @@ async fn for_each_declaration<T, F, Fut>(
 
         if bytes[i] == b'{' {
             brace_depth += 1;
+            selector_stack.push(resolve_block_selector(
+                css_text,
+                i,
+                in_at_rule,
+                selector_stack.last(),
+            ));
             if in_at_rule {
                 in_at_rule = false;
             }
@@ -246,6 +255,7 @@ async fn for_each_declaration<T, F, Fut>(
             if brace_depth < 0 {
                 brace_depth = 0;
             }
+            selector_stack.pop();
             declaration_start = i + 1;
             i += 1;
             continue;
@@ -273,6 +283,11 @@ async fn for_each_declaration<T, F, Fut>(
         }
 
         if name_end <= name_start {
+            i += 1;
+            continue;
+        }
+
+        if has_non_whitespace_outside_comments(&css_text[declaration_start..name_start]) {
             i += 1;
             continue;
         }
@@ -342,7 +357,9 @@ async fn for_each_declaration<T, F, Fut>(
 
         let selector = selector_override
             .map(|s| s.to_string())
-            .unwrap_or_else(|| find_selector_before(css_text, name_start, in_at_rule));
+            .or_else(|| selector_stack.last().cloned())
+            .or_else(|| find_selector_before(css_text, name_start, in_at_rule))
+            .unwrap_or_else(|| UNKNOWN_SELECTOR.to_string());
 
         if let Some(item) = build(
             property_name,
@@ -375,6 +392,7 @@ async fn extract_usages(
     let mut in_string: Option<u8> = None;
     let mut brace_depth = 0;
     let mut in_at_rule = false;
+    let mut selector_stack: Vec<String> = Vec::new();
 
     while i < len {
         if in_comment {
@@ -413,12 +431,19 @@ async fn extract_usages(
 
         // Track braces for scope
         if bytes[i] == b'{' {
+            selector_stack.push(resolve_block_selector(
+                css_text,
+                i,
+                in_at_rule,
+                selector_stack.last(),
+            ));
             brace_depth += 1;
         } else if bytes[i] == b'}' {
             brace_depth -= 1;
             if brace_depth < 0 {
                 brace_depth = 0;
             }
+            selector_stack.pop();
         }
 
         // Track @-rules
@@ -508,7 +533,9 @@ async fn extract_usages(
                 let name = css_text[ns..ne].to_string();
                 let usage_context = usage_context_override
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| find_selector_before(css_text, var_start, in_at_rule));
+                    .or_else(|| selector_stack.last().cloned())
+                    .or_else(|| find_selector_before(css_text, var_start, in_at_rule))
+                    .unwrap_or_else(|| UNKNOWN_SELECTOR.to_string());
                 let abs_start = base_offset + var_start;
                 let abs_end = base_offset + var_end;
                 let abs_name_start = base_offset + ns;
@@ -557,6 +584,57 @@ fn is_var_function(bytes: &[u8], idx: usize) -> bool {
 
 fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+fn has_non_whitespace_outside_comments(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    let mut i = 0usize;
+    let mut in_comment = false;
+    let mut in_string: Option<u8> = None;
+
+    while i < bytes.len() {
+        if in_comment {
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                in_comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if let Some(quote) = in_string {
+            if bytes[i] == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if bytes[i] == quote {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            in_string = Some(bytes[i]);
+            i += 1;
+            continue;
+        }
+
+        if !bytes[i].is_ascii_whitespace() {
+            return true;
+        }
+
+        i += 1;
+    }
+
+    false
 }
 
 fn extract_literal_colors_from_value(
@@ -733,7 +811,28 @@ fn find_balanced_call_end(value: &str, open_paren_idx: usize) -> Option<usize> {
     None
 }
 
-fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
+fn resolve_block_selector(
+    text: &str,
+    brace_pos: usize,
+    in_at_rule: bool,
+    parent_selector: Option<&String>,
+) -> String {
+    if in_at_rule {
+        return parent_selector
+            .cloned()
+            .or_else(|| find_selector_before(text, brace_pos, true))
+            .unwrap_or_else(|| UNKNOWN_SELECTOR.to_string());
+    }
+
+    let before = &text[..brace_pos];
+    let start = before
+        .rfind(['{', '}', ';'])
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    extract_last_selector(before[start..].trim()).unwrap_or_else(|| UNKNOWN_SELECTOR.to_string())
+}
+
+fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> Option<String> {
     let before = &text[..offset];
 
     if in_at_rule {
@@ -744,9 +843,9 @@ fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
                 .map(|pos| pos + at_pos)
                 .unwrap_or(before.len());
             let at_rule = before[at_pos..at_rule_end].trim();
-            return format!("@{}", at_rule);
+            return Some(format!("@{}", at_rule));
         }
-        return "@unknown".to_string();
+        return None;
     }
 
     if let Some(brace_pos) = before.rfind('{') {
@@ -764,20 +863,14 @@ fn find_selector_before(text: &str, offset: usize, in_at_rule: bool) -> String {
         };
 
         // Handle complex selectors that might span multiple lines or have nested braces
-        let selector = extract_last_selector(effective_block);
-
-        if selector.is_empty() {
-            ":root".to_string()
-        } else {
-            selector
-        }
+        extract_last_selector(effective_block)
     } else {
-        ":root".to_string()
+        None
     }
 }
 
 /// Extract the last selector from a selector block, handling complex cases
-fn extract_last_selector(selector_block: &str) -> String {
+fn extract_last_selector(selector_block: &str) -> Option<String> {
     // Find the last complete selector by tracking balanced parentheses and commas
     let bytes = selector_block.as_bytes();
     let len = bytes.len();
@@ -825,9 +918,9 @@ fn extract_last_selector(selector_block: &str) -> String {
     };
 
     if selector.is_empty() {
-        ":root".to_string()
+        None
     } else {
-        selector
+        Some(selector)
     }
 }
 
@@ -1129,6 +1222,37 @@ mod edge_case_tests {
     }
 
     #[tokio::test]
+    async fn test_parse_css_variables_after_nested_media_inside_root() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///test.css").unwrap();
+
+        let css = r#"
+            :root {
+                --before: blue;
+
+                @media (prefers-color-scheme: dark) {
+                    --during: red;
+                }
+
+                --after: green;
+            }
+        "#;
+
+        parse_css_document(css, &uri, &manager).await.unwrap();
+
+        let before = manager.get_variables("--before").await;
+        let during = manager.get_variables("--during").await;
+        let after = manager.get_variables("--after").await;
+
+        assert_eq!(before.len(), 1);
+        assert_eq!(during.len(), 1);
+        assert_eq!(after.len(), 1);
+        assert_eq!(before[0].selector, ":root");
+        assert_eq!(during[0].selector, ":root");
+        assert_eq!(after[0].selector, ":root");
+    }
+
+    #[tokio::test]
     async fn test_parse_css_malformed_but_parseable() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Uri::from_str("file:///test.css").unwrap();
@@ -1150,9 +1274,10 @@ mod edge_case_tests {
         let var_pos = css.find("var").unwrap();
         let result = find_selector_before(css, var_pos, false);
         assert_eq!(
-            result, ".responsive",
+            result,
+            Some(".responsive".to_string()),
             "Expected selector '.responsive' inside @media block, got: '{}'",
-            result
+            result.as_deref().unwrap_or("<none>")
         );
     }
 
@@ -1162,9 +1287,10 @@ mod edge_case_tests {
         let var_pos = css.find("var").unwrap();
         let result = find_selector_before(css, var_pos, false);
         assert_eq!(
-            result, ".grid-item",
+            result,
+            Some(".grid-item".to_string()),
             "Expected selector '.grid-item' inside nested @-rules, got: '{}'",
-            result
+            result.as_deref().unwrap_or("<none>")
         );
     }
 
@@ -1174,9 +1300,10 @@ mod edge_case_tests {
         let decl_pos = css.find("--responsive").unwrap();
         let result = find_selector_before(css, decl_pos, false);
         assert_eq!(
-            result, ".responsive",
+            result,
+            Some(".responsive".to_string()),
             "Expected selector '.responsive' for definition inside @media, got: '{}'",
-            result
+            result.as_deref().unwrap_or("<none>")
         );
     }
 
@@ -1228,6 +1355,7 @@ mod edge_case_tests {
             let position = css.len() - 1; // Position after selector
 
             let result = find_selector_before(&css, position, false);
+            let result = result.expect("selector should be present");
 
             assert!(
                 result.contains(expected_contains),
@@ -1250,7 +1378,8 @@ mod edge_case_tests {
             &format!("{} {{ color: red; }}", nested),
             nested.len() + 5,
             false,
-        );
+        )
+        .expect("selector should be present");
 
         // BUG: Currently this assertion may FAIL because nested selectors are not handled
         // After fix: Should extract the full compound selector
@@ -1260,5 +1389,10 @@ mod edge_case_tests {
             nested,
             result
         );
+    }
+
+    #[test]
+    fn test_find_selector_before_returns_none_without_selector_context() {
+        assert_eq!(find_selector_before("--x: red;", 4, false), None);
     }
 }
