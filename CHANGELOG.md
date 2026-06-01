@@ -5,6 +5,24 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-05-03
+
+### Added
+- Parser security guards, memory bounds, and at-rule blocking (PR #11).
+
+### Fixed
+- `:root` variables are no longer dropped when followed by a nested `@media`/`@supports` block (PR #10).
+
+## [0.2.6] - 2026-05-03
+
+### Added
+- Workspace folder change notifications: server re-scans when the worktree root changes.
+- CSS-in-JS parser support.
+- Release publishing instructions in `AGENTS.md`.
+
+### Fixed
+- `parsers/css.rs`: handle Unicode, tightened greedy heuristic, and replaced silent parser errors with logged errors.
+
 ## [0.2.5] - 2026-04-26
 
 ### Added
