@@ -43,6 +43,20 @@ The **Zed extension** (`zed-css-variables`) expects assets with these **exact na
 
 ### Create Release
 
+**Recommended (automated):**
+
+```bash
+./scripts/release.sh vX.Y.Z
+# or dry-run:
+./scripts/release.sh --dry-run vX.Y.Z
+```
+
+This validates the asset naming contract, creates the tag, and pushes it to
+trigger the GitHub Actions release workflow that builds and uploads binaries
+for all platforms.
+
+**Manual (if you prefer):**
+
 1. **Commit and push changes**
 
    ```bash
