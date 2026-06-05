@@ -570,7 +570,7 @@ impl LanguageServer for CssVariableLsp {
             offset_encoding: Some("utf-16".to_string()),
             server_info: Some(ls_types::ServerInfo {
                 name: "css-variable-lsp-rust".to_string(),
-                version: Some("0.1.0".to_string()),
+                version: Some(VERSION.to_string()),
             }),
         })
     }
