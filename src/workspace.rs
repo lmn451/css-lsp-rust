@@ -7,7 +7,12 @@ use walkdir::WalkDir;
 use crate::manager::CssVariableManager;
 use crate::parsers::{parse_css_document, parse_html_document};
 
-/// Scan workspace folders for CSS and HTML files
+/// Scan workspace folders for CSS and HTML files.
+///
+/// Uses the configured `lookup_files` glob patterns to discover files and the
+/// `ignore_globs` patterns to exclude them. Document kind is resolved via
+/// `document_kind::resolve_document_kind` so that workspace scanning stays in
+/// sync with completion / hover / goto-definition behavior.
 pub async fn scan_workspace(
     folders: Vec<Uri>,
     manager: &CssVariableManager,
@@ -78,6 +83,10 @@ pub async fn scan_workspace(
 
     let total = all_files.len();
 
+    // Build the extension->kind map once for the whole scan so we agree with the
+    // editor on what counts as CSS vs HTML vs JS without re-deriving it per file.
+    let lookup_map = crate::document_kind::build_lookup_extension_map(&config.lookup_files);
+
     // Parse each file
     for (i, file_path) in all_files.iter().enumerate() {
         // Report progress
@@ -95,28 +104,30 @@ pub async fn scan_workspace(
             None => continue,
         };
 
-        // Determine file type and parse
+        // Determine file type and parse using the extension->kind map built once above.
         let path_str = file_path.to_string_lossy();
-        let result = if path_str.ends_with(".html")
-            || path_str.ends_with(".vue")
-            || path_str.ends_with(".svelte")
-            || path_str.ends_with(".astro")
-            || path_str.ends_with(".ripple")
-        {
-            parse_html_document(&content, &file_uri, manager).await
-        } else if path_str.ends_with(".css")
-            || path_str.ends_with(".scss")
-            || path_str.ends_with(".sass")
-            || path_str.ends_with(".less")
-        {
-            parse_css_document(&content, &file_uri, manager).await
-        } else {
-            continue;
+        let kind = match crate::document_kind::resolve_document_kind(&path_str, None, &lookup_map) {
+            Some(kind) => kind,
+            None => continue,
+        };
+        let result = match kind {
+            crate::document_kind::DocumentKind::Html => {
+                parse_html_document(&content, &file_uri, manager).await
+            }
+            crate::document_kind::DocumentKind::Css => {
+                parse_css_document(&content, &file_uri, manager).await
+            }
+            // JS/CSS-in-JS files are not scanned eagerly from disk: their CSS lives
+            // inside string/template literals that we only parse when the editor is
+            // actually showing us the file (did_open/did_change).
+            crate::document_kind::DocumentKind::Js => continue,
         };
 
-        // Log errors but continue
-        if let Err(_e) = result {
-            // Silent error - could log if needed
+        // Log errors but continue so a single malformed file does not abort the
+        // whole workspace scan. Only logged when the user has opted into tracing
+        // via CSS_LSP_ENABLE_LOGS=1 so we keep LSP stdio clean by default.
+        if let Err(e) = result {
+            tracing::debug!(file = %file_path.display(), error = %e, "workspace scan: parse error");
         }
     }
 
