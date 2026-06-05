@@ -4,10 +4,11 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-## [Unreleased]
+## [0.3.0] - 2026-06-05
 
 ### Added
-- `--version` and `--help` (`-h`) flags on the `css-variable-lsp` binary.
+- `--version` and `--help` (`-h`) flags on the `css-variable-lsp` binary (PR #11).
+- `scripts/lsp-handshake-test.sh`: end-to-end check that drives the binary through the canonical LSP lifecycle and asserts the response shape, `serverInfo.version`, and the main capabilities.
 - README now documents feature flags, performance, editor integration, and a full architecture diagram.
 - Unit tests for the new CLI meta-flag parser.
 
@@ -17,8 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `server_info.version` reported during `initialize` is now sourced from the `VERSION` constant instead of being hard-coded to `0.1.0`.
-- `scripts/smoke-test-release.sh` no longer relies on a missing `--help` flag.
-
+- `scripts/smoke-test-release.sh` no longer relies on a missing `--help` flag; it now asserts a strict semver regex on `--version` output.
 ## [0.2.7] - 2026-05-03
 
 ### Added
