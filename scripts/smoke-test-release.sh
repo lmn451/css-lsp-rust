@@ -126,12 +126,19 @@ test_asset() {
 
   if [[ "${platform}" == "${current_platform}" ]]; then
     chmod +x "${binary_path}"
-    if "${binary_path}" --help >/dev/null 2>&1; then
-      echo -e "${GREEN}✓ Binary runs successfully${NC}"
-    else
-      echo -e "${RED}✗ Binary failed to run${NC}"
+    # Verify the binary responds to --version. This is part of the release
+    # contract and confirms that stdio is wired up correctly.
+    local version_output
+    version_output="$("${binary_path}" --version 2>&1 || true)"
+    if [[ ! "${version_output}" =~ ^css-variable-lsp\ v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+      echo -e "${RED}✗ Binary --version output is unexpected: ${version_output}${NC}"
       return 1
     fi
+    if ! "${binary_path}" --help >/dev/null 2>&1; then
+      echo -e "${RED}✗ --help failed${NC}"
+      return 1
+    fi
+    echo -e "${GREEN}✓ Binary runs successfully (--version + --help OK)${NC}"
   else
     echo -e "${YELLOW}  (skipped run test - not current platform)${NC}"
   fi
