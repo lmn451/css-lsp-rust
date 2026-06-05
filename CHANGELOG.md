@@ -4,6 +4,20 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [Unreleased]
+
+### Added
+- `--version` and `--help` (`-h`) flags on the `css-variable-lsp` binary.
+- README now documents feature flags, performance, editor integration, and a full architecture diagram.
+- Unit tests for the new CLI meta-flag parser.
+
+### Changed
+- `src/workspace.rs` now resolves document kind via `document_kind::resolve_document_kind` instead of duplicating the extension list; the extension->kind map is built once per scan instead of per file.
+- Workspace scan parse errors are now logged via `tracing::debug!` (opt-in via `CSS_LSP_ENABLE_LOGS=1`) instead of being silently dropped.
+
+### Fixed
+- `server_info.version` reported during `initialize` is now sourced from the `VERSION` constant instead of being hard-coded to `0.1.0`.
+- `scripts/smoke-test-release.sh` no longer relies on a missing `--help` flag.
 
 ## [0.2.7] - 2026-05-03
 
@@ -12,7 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `:root` variables are no longer dropped when followed by a nested `@media`/`@supports` block (PR #10).
-
 ## [0.2.6] - 2026-05-03
 
 ### Added
