@@ -186,6 +186,40 @@ async fn issue_9_fixed_nested_media_inside_root_does_not_hide_later_variables() 
 }
 
 // =============================================================================
+// Issue 16: long CSS rules lose var(-- completion context (FIXED)
+// =============================================================================
+
+#[test]
+fn issue_16_fixed_long_rule_completion_context() {
+    use css_variable_lsp::completion_context::{
+        completion_value_context_slice, get_value_context_info,
+    };
+    use css_variable_lsp::types::offset_to_position;
+
+    let decl = "  margin-top: 1px;\n";
+    let mut text = String::from(".card {\n");
+    for _ in 0..30 {
+        text.push_str(decl);
+    }
+    text.push_str("  font: 400 16px/1.5 system-ui, sans-serif;\n");
+    text.push_str("  color: var(--");
+
+    let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+    let uri = Uri::from_str("file:///styles.css").unwrap();
+    let position = offset_to_position(&text, text.len());
+
+    let context = completion_value_context_slice(&text, position, None, &uri, &lookup_map)
+        .expect("css document should yield a completion slice");
+    let value_context = get_value_context_info(context.slice, context.allow_without_braces);
+
+    assert!(
+        value_context.is_value_context,
+        "FIXED: long rule blocks detect value context at bottom"
+    );
+    assert_eq!(value_context.property_name.as_deref(), Some("color"));
+}
+
+// =============================================================================
 // Summary
 // =============================================================================
 
@@ -199,4 +233,5 @@ async fn all_issues_status() {
     println!("Issue 6: ✅ VERIFIED - .module.css resolves to CSS");
     println!("Issue 7: ✅ NOT AN ISSUE - function is used");
     println!("Issue 9: ✅ FIXED - nested @media inside :root preserves later variables");
+    println!("Issue 16: ✅ FIXED - long CSS rules detect var(-- completion context");
 }

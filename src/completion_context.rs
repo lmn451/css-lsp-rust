@@ -23,25 +23,73 @@ pub fn completion_value_context_slice<'a>(
     lookup_extension_map: &HashMap<String, DocumentKind>,
 ) -> Option<CompletionContextSlice<'a>> {
     let offset = position_to_offset(text, position)?;
-    let start = clamp_to_char_boundary(text, offset.saturating_sub(400));
     let offset = clamp_to_char_boundary(text, offset);
+    let document_kind =
+        resolve_document_kind(uri.path().as_str(), language_id, lookup_extension_map)?;
+    let start = completion_lookback_start(text, offset, document_kind);
     let before_cursor = &text[start..offset];
 
-    match resolve_document_kind(uri.path().as_str(), language_id, lookup_extension_map) {
-        Some(DocumentKind::Js) => {
+    match document_kind {
+        DocumentKind::Js => {
             let slice = find_js_string_segment(before_cursor)?;
             Some(CompletionContextSlice {
                 slice,
                 allow_without_braces: true,
             })
         }
-        Some(DocumentKind::Html) => find_html_style_context_slice(before_cursor),
-        Some(DocumentKind::Css) => Some(CompletionContextSlice {
+        DocumentKind::Html => find_html_style_context_slice(before_cursor),
+        DocumentKind::Css => Some(CompletionContextSlice {
             slice: before_cursor,
             allow_without_braces: false,
         }),
-        None => None,
     }
+}
+
+fn completion_lookback_start(text: &str, offset: usize, document_kind: DocumentKind) -> usize {
+    match document_kind {
+        DocumentKind::Css => find_containing_block_start(text, offset),
+        DocumentKind::Html => find_html_completion_lookback_start(text, offset),
+        DocumentKind::Js => clamp_to_char_boundary(text, offset.saturating_sub(400)),
+    }
+}
+
+/// Scan backward to the opening `{` of the block containing the cursor.
+fn find_containing_block_start(text: &str, offset: usize) -> usize {
+    let offset = clamp_to_char_boundary(text, offset.min(text.len()));
+    let mut brace_depth = 0i32;
+
+    for (idx, ch) in text[..offset].char_indices().rev() {
+        match ch {
+            '}' => brace_depth += 1,
+            '{' => {
+                if brace_depth == 0 {
+                    return idx;
+                }
+                brace_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    clamp_to_char_boundary(text, offset.saturating_sub(400))
+}
+
+/// For HTML, include the enclosing `<style>` tag when present so block parsing works.
+fn find_html_completion_lookback_start(text: &str, offset: usize) -> usize {
+    let offset = clamp_to_char_boundary(text, offset.min(text.len()));
+    let lower = text[..offset].to_ascii_lowercase();
+
+    if let Some(style_tag_idx) = lower.rfind("<style") {
+        let inside_open_tag = lower
+            .rfind("</style")
+            .map(|close_idx| close_idx < style_tag_idx)
+            .unwrap_or(true);
+        if inside_open_tag {
+            return style_tag_idx;
+        }
+    }
+
+    find_containing_block_start(text, offset)
 }
 
 pub fn find_html_style_attribute_slice(before_cursor: &str) -> Option<&str> {
@@ -439,4 +487,72 @@ pub fn score_variable_relevance(var_name: &str, property_name: Option<&str>) -> 
     }
 
     -1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document_kind::build_lookup_extension_map;
+    use crate::types::{offset_to_position, Config};
+    use ls_types::Uri;
+    use std::str::FromStr;
+
+    fn build_long_css_rule() -> String {
+        let decl = "  margin-top: 1px;\n";
+        let mut rule = String::from(".card {\n");
+        for _ in 0..30 {
+            rule.push_str(decl);
+        }
+        rule.push_str("  font: 400 16px/1.5 system-ui, sans-serif;\n");
+        rule.push_str("  color: var(--");
+        rule
+    }
+
+    #[test]
+    fn long_css_rule_detects_value_context_at_bottom() {
+        let text = build_long_css_rule();
+        assert!(text.len() > 500);
+
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let uri = Uri::from_str("file:///styles.css").unwrap();
+        let position = offset_to_position(&text, text.len());
+
+        let context = completion_value_context_slice(&text, position, None, &uri, &lookup_map)
+            .expect("css document should yield a completion slice");
+        let value_context = get_value_context_info(context.slice, context.allow_without_braces);
+
+        assert!(
+            value_context.is_value_context,
+            "long rule blocks must still detect property value context"
+        );
+        assert_eq!(value_context.property_name.as_deref(), Some("color"));
+    }
+
+    #[test]
+    fn nested_css_rule_detects_inner_property() {
+        let text = ".outer { .inner { color: var(--";
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let uri = Uri::from_str("file:///styles.css").unwrap();
+        let position = offset_to_position(text, text.len());
+
+        let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+            .expect("expected css slice");
+        let value_context = get_value_context_info(context.slice, context.allow_without_braces);
+
+        assert!(value_context.is_value_context);
+        assert_eq!(value_context.property_name.as_deref(), Some("color"));
+    }
+
+    #[test]
+    fn html_style_block_lookback_includes_style_tag() {
+        let text = "<style>body { color: var(";
+        let lookup_map = build_lookup_extension_map(&Config::default().lookup_files);
+        let uri = Uri::from_str("file:///index.html").unwrap();
+        let position = offset_to_position(text, text.len());
+
+        let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
+            .expect("expected html style block slice");
+        assert_eq!(context.slice, "body { color: var(");
+        assert!(!context.allow_without_braces);
+    }
 }
