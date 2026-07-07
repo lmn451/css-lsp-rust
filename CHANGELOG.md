@@ -4,6 +4,12 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.3.1] - 2026-07-07
+
+### Fixed
+- CSS variable completion now scans back to the enclosing declaration block instead of relying on a fixed 400-character lookback window.
+- Long CSS rules and HTML `<style>` blocks now keep `var(--` completion context at the bottom of the block.
+
 ## [0.3.0] - 2026-06-05
 
 ### Added
