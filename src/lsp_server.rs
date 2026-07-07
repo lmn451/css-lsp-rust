@@ -1921,8 +1921,11 @@ mod tests {
         let uri = Uri::from_str("file:///styles.css").unwrap();
         let context = completion_value_context_slice(text, position, None, &uri, &lookup_map)
             .expect("expected css slice");
-        assert_eq!(context.slice, text);
+        assert!(context.slice.ends_with("color: var("));
         assert!(!context.allow_without_braces);
+        let value_context = get_value_context_info(context.slice, context.allow_without_braces);
+        assert!(value_context.is_value_context);
+        assert_eq!(value_context.property_name.as_deref(), Some("color"));
     }
 
     #[test]
