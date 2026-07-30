@@ -1,11 +1,11 @@
 use css_variable_lsp::lsp_server::CssVariableLsp;
 use css_variable_lsp::runtime_config::{build_runtime_config_with_env, RuntimeConfig};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use ls_types::{
     ClientCapabilities, DiagnosticSeverity, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, InitializeParams,
     PublishDiagnosticsParams, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, Uri, VersionedTextDocumentIdentifier,
+    TextDocumentItem, Uri, VersionedTextDocumentIdentifier, WorkspaceFolder,
 };
 use ls_types::{
     CodeActionContext, CodeActionParams, CodeActionResponse, DeleteFilesParams,
@@ -17,7 +17,7 @@ use std::str::FromStr;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::time::{timeout, Duration};
 use tower::{Service, ServiceExt};
-use tower_lsp_server::jsonrpc::Request;
+use tower_lsp_server::jsonrpc::{Request, Response};
 use tower_lsp_server::LspService;
 
 async fn setup_service_with_config(
@@ -918,4 +918,155 @@ async fn test_literal_color_exact_match_completion_in_js_styled_components() {
         "--danger (red) should NOT appear for literal #3b82f6, got {:?}",
         labels
     );
+}
+
+async fn setup_scan_service(
+    workspace_folders: Option<Vec<WorkspaceFolder>>,
+    request_observer: Option<mpsc::UnboundedSender<()>>,
+) -> LspService<CssVariableLsp> {
+    let runtime_config = build_runtime_config_with_env(&Vec::new(), &HashMap::new());
+    let (service, socket) =
+        LspService::new(|client| CssVariableLsp::new(client, runtime_config.clone()));
+    let (mut requests, mut responses) = socket.split();
+    tokio::spawn(async move {
+        while let Some(request) = requests.next().await {
+            if request.method() != "workspace/workspaceFolders" {
+                continue;
+            }
+            if let Some(observer) = request_observer.as_ref() {
+                let _ = observer.send(());
+            }
+            if let Some(id) = request.id() {
+                let result = serde_json::to_value(&workspace_folders).unwrap();
+                responses
+                    .send(Response::from_ok(id.clone(), result))
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    service
+}
+
+async fn initialize_with_root(
+    service: &mut LspService<CssVariableLsp>,
+    root_uri: Option<&Uri>,
+    root_path: Option<&str>,
+    workspace_folders: Option<Vec<WorkspaceFolder>>,
+    supports_workspace_folders: bool,
+) {
+    let params = serde_json::json!({
+        "capabilities": {
+            "workspace": { "workspaceFolders": supports_workspace_folders }
+        },
+        "rootUri": root_uri.map(|uri| uri.as_str().to_string()),
+        "rootPath": root_path,
+        "workspaceFolders": workspace_folders,
+    });
+    let request = Request::build("initialize").id(1).params(params).finish();
+    send_request_for_result(service, request)
+        .await
+        .expect("initialize should return result");
+    send_notification(service, "initialized", ls_types::InitializedParams {}).await;
+}
+
+fn workspace_fixture(name: &str, variable: &str) -> (std::path::PathBuf, Uri) {
+    let root = std::env::temp_dir().join(format!("css-variable-lsp-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let css_path = root.join("variables.css");
+    std::fs::write(&css_path, format!(":root {{ {variable}: #123456; }}")).unwrap();
+    let uri = Uri::from_file_path(&root).unwrap();
+    (root, uri)
+}
+
+#[tokio::test]
+async fn test_initialize_scans_root_uri_without_workspace_folders() {
+    let (root, root_uri) = workspace_fixture("root-uri", "--root-color");
+    let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+    let mut service = setup_scan_service(None, Some(request_tx)).await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+    assert!(
+        timeout(Duration::from_millis(50), request_rx.recv())
+            .await
+            .is_err(),
+        "unsupported clients must not receive workspaceFolders requests"
+    );
+
+    let symbol_request = Request::build("workspace/symbol")
+        .id(2)
+        .params(serde_json::json!({ "query": "--root-color" }))
+        .finish();
+    let symbols = send_request_for_result(&mut service, symbol_request)
+        .await
+        .expect("workspace/symbol should return result");
+    let symbols: Vec<ls_types::SymbolInformation> = serde_json::from_value(symbols).unwrap();
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].name, "--root-color");
+
+    let consumer_uri = Uri::from_str("file:///root-uri-consumer.css").unwrap();
+    let consumer_text = ".card { color: var(--";
+    open_document(&mut service, consumer_uri.clone(), "css", consumer_text, 1).await;
+    let labels = completion_labels(
+        &mut service,
+        consumer_uri,
+        ls_types::Position::new(0, consumer_text.len() as u32),
+    )
+    .await;
+    assert!(labels.contains(&"--root-color".to_string()));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn test_initialize_scans_legacy_root_path() {
+    let (root, _root_uri) = workspace_fixture("root-path", "--legacy-color");
+    let mut service = setup_scan_service(None, None).await;
+    initialize_with_root(
+        &mut service,
+        None,
+        Some(root.to_str().unwrap()),
+        None,
+        false,
+    )
+    .await;
+
+    let symbol_request = Request::build("workspace/symbol")
+        .id(2)
+        .params(serde_json::json!({ "query": "--legacy-color" }))
+        .finish();
+    let symbols = send_request_for_result(&mut service, symbol_request)
+        .await
+        .expect("workspace/symbol should return result");
+    let symbols: Vec<ls_types::SymbolInformation> = serde_json::from_value(symbols).unwrap();
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].name, "--legacy-color");
+    assert_eq!(
+        symbols[0].location.uri,
+        Uri::from_file_path(root.join("variables.css")).unwrap()
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn test_initialize_multiroot_does_not_rescan_root_uri() {
+    let (root, root_uri) = workspace_fixture("multi-root", "--shared-color");
+    let folders = vec![WorkspaceFolder {
+        uri: root_uri.clone(),
+        name: "root".to_string(),
+    }];
+    let mut service = setup_scan_service(Some(folders.clone()), None).await;
+    initialize_with_root(&mut service, Some(&root_uri), None, Some(folders), true).await;
+
+    let symbol_request = Request::build("workspace/symbol")
+        .id(2)
+        .params(serde_json::json!({ "query": "--shared-color" }))
+        .finish();
+    let symbols = send_request_for_result(&mut service, symbol_request)
+        .await
+        .expect("workspace/symbol should return result");
+    let symbols: Vec<ls_types::SymbolInformation> = serde_json::from_value(symbols).unwrap();
+    assert_eq!(symbols.len(), 1, "root must not be scanned twice");
+
+    std::fs::remove_dir_all(root).unwrap();
 }

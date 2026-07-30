@@ -222,6 +222,7 @@ pub struct CssVariableLsp {
     runtime_config: RuntimeConfig,
     workspace_folder_paths: Arc<RwLock<Vec<PathBuf>>>,
     root_folder_path: Arc<RwLock<Option<PathBuf>>>,
+    root_folder_uri: Arc<RwLock<Option<Uri>>>,
     has_workspace_folder_capability: Arc<RwLock<bool>>,
     has_diagnostic_related_information: Arc<RwLock<bool>>,
     usage_regex: Regex,
@@ -247,6 +248,7 @@ impl CssVariableLsp {
             runtime_config,
             workspace_folder_paths: Arc::new(RwLock::new(Vec::new())),
             root_folder_path: Arc::new(RwLock::new(None)),
+            root_folder_uri: Arc::new(RwLock::new(None)),
             has_workspace_folder_capability: Arc::new(RwLock::new(false)),
             has_diagnostic_related_information: Arc::new(RwLock::new(false)),
             usage_regex: Regex::new(r"var\((--[\w-]+)(?:\s*,\s*([^)]+))?\)").unwrap(),
@@ -272,6 +274,24 @@ impl CssVariableLsp {
         paths.sort_by_key(|b| std::cmp::Reverse(b.to_string_lossy().len()));
         let mut stored = self.workspace_folder_paths.write().await;
         *stored = paths;
+    }
+
+    async fn workspace_folders_for_scan(&self) -> Option<Vec<WorkspaceFolder>> {
+        let supports_workspace_folders = *self.has_workspace_folder_capability.read().await;
+        let client_folders = if supports_workspace_folders {
+            self.client.workspace_folders().await.ok().flatten()
+        } else {
+            None
+        };
+        if let Some(folders) = client_folders.filter(|folders| !folders.is_empty()) {
+            return Some(folders);
+        }
+        self.root_folder_uri.read().await.clone().map(|uri| {
+            vec![WorkspaceFolder {
+                uri,
+                name: "root".to_string(),
+            }]
+        })
     }
 
     async fn parse_document_text(&self, uri: &Uri, text: &str, language_id: Option<&str>) {
@@ -509,17 +529,27 @@ impl LanguageServer for CssVariableLsp {
             *rel = has_related_info;
         }
 
-        #[allow(deprecated)]
-        if let Some(root_uri) = params.root_uri.as_ref() {
-            let root_path = to_normalized_fs_path(root_uri);
-            let mut root = self.root_folder_path.write().await;
-            *root = root_path;
-        } else {
+        let root_uri_for_scan = {
             #[allow(deprecated)]
-            if let Some(root_path) = params.root_path.as_ref() {
-                let mut root = self.root_folder_path.write().await;
-                *root = Some(PathBuf::from(root_path));
+            if let Some(root_uri) = params.root_uri.clone() {
+                Some(root_uri)
+            } else {
+                #[allow(deprecated)]
+                params.root_path.as_ref().and_then(Uri::from_file_path)
             }
+        };
+        #[allow(deprecated)]
+        let legacy_root_path = params.root_path.as_ref().map(PathBuf::from);
+        {
+            let mut root_uri = self.root_folder_uri.write().await;
+            *root_uri = root_uri_for_scan.clone();
+        }
+        {
+            let mut root = self.root_folder_path.write().await;
+            *root = root_uri_for_scan
+                .as_ref()
+                .and_then(to_normalized_fs_path)
+                .or(legacy_root_path);
         }
 
         self.update_workspace_folder_paths(params.workspace_folders.clone())
@@ -583,7 +613,7 @@ impl LanguageServer for CssVariableLsp {
             )
             .await;
 
-        if let Ok(Some(folders)) = self.client.workspace_folders().await {
+        if let Some(folders) = self.workspace_folders_for_scan().await {
             self.update_workspace_folder_paths(Some(folders.clone()))
                 .await;
             self.scan_workspace_folders(folders).await;
@@ -644,7 +674,7 @@ impl LanguageServer for CssVariableLsp {
             *stored = new_map;
 
             // Patterns changed => rescan workspace folders.
-            if let Ok(Some(folders)) = self.client.workspace_folders().await {
+            if let Some(folders) = self.workspace_folders_for_scan().await {
                 self.scan_workspace_folders(folders).await;
             }
         }
