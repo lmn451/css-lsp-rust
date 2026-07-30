@@ -203,13 +203,13 @@ impl CssVariableManager {
         tracked.remove(uri);
 
         // Remove variables from this document
-        for (_, var_list) in vars.iter_mut() {
+        for var_list in vars.values_mut() {
             var_list.retain(|v| &v.uri != uri);
         }
         vars.retain(|_, var_list| !var_list.is_empty());
 
         // Remove usages from this document
-        for (_, usage_list) in usages.iter_mut() {
+        for usage_list in usages.values_mut() {
             usage_list.retain(|u| &u.uri != uri);
         }
         usages.retain(|_, usage_list| !usage_list.is_empty());
