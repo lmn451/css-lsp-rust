@@ -1,6 +1,5 @@
 use globset::{Glob, GlobSetBuilder};
 use ls_types::Uri;
-use std::path::PathBuf;
 use tokio::fs;
 use walkdir::WalkDir;
 
@@ -46,7 +45,10 @@ pub async fn scan_workspace(
     let mut all_files = Vec::new();
 
     for folder_uri in folders {
-        let folder_path = PathBuf::from(folder_uri.path().as_str());
+        let folder_path = match crate::path_display::to_normalized_fs_path(&folder_uri) {
+            Some(path) => path,
+            None => continue,
+        };
 
         for entry in WalkDir::new(&folder_path)
             .follow_links(false)
