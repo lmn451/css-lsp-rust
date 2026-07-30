@@ -80,6 +80,10 @@ fn has_css_like_content(s: &str) -> bool {
     s.contains(':') || s.contains("--") || s.contains("var(")
 }
 
+fn append_blank_bytes(content: &mut String, byte_count: usize) {
+    content.extend(std::iter::repeat_n(' ', byte_count));
+}
+
 /// Extract all CSS-like string/template literal snippets from a JS source.
 pub(crate) fn extract_js_css_snippets(text: &str) -> Vec<JsCssSnippet> {
     let bytes = text.as_bytes();
@@ -125,47 +129,42 @@ pub(crate) fn extract_js_css_snippets(text: &str) -> Vec<JsCssSnippet> {
 
                 while i < bytes.len() {
                     if expr_depth > 0 {
-                        // Inside a template expression
+                        // Blank every consumed source byte so later offsets remain stable.
                         if let Some(q) = expr_quote {
-                            // Inside a nested string within the expression
                             if bytes[i] == b'\\' {
-                                i += 2;
+                                let consumed = (bytes.len() - i).min(2);
+                                append_blank_bytes(&mut content, consumed);
+                                i += consumed;
                                 continue;
                             }
+                            append_blank_bytes(&mut content, 1);
                             if bytes[i] == q {
                                 expr_quote = None;
                             }
                             i += 1;
                             continue;
                         }
-
                         match bytes[i] {
                             b'\'' | b'"' | b'`' => {
                                 expr_quote = Some(bytes[i]);
+                                append_blank_bytes(&mut content, 1);
                                 i += 1;
                                 continue;
                             }
                             b'{' => {
                                 expr_depth += 1;
+                                append_blank_bytes(&mut content, 1);
                                 i += 1;
                                 continue;
                             }
                             b'}' => {
                                 expr_depth -= 1;
-                                if expr_depth == 0 {
-                                    // Expression closed; push a space to preserve
-                                    // offsets for the literal content that follows
-                                    content.push(' ');
-                                    i += 1;
-                                    continue;
-                                }
+                                append_blank_bytes(&mut content, 1);
                                 i += 1;
                                 continue;
                             }
                             _ => {
-                                // Replace expression characters with spaces
-                                // to keep position tracking accurate
-                                content.push(' ');
+                                append_blank_bytes(&mut content, 1);
                                 i += 1;
                                 continue;
                             }
@@ -242,6 +241,10 @@ pub(crate) fn extract_js_css_snippets(text: &str) -> Vec<JsCssSnippet> {
 mod tests {
     use super::*;
 
+    use crate::manager::CssVariableManager;
+    use crate::types::{offset_to_position, Config};
+    use std::str::FromStr;
+
     #[test]
     fn test_extract_simple_template_literal() {
         let text = "const css = `color: red;`";
@@ -261,6 +264,38 @@ mod tests {
         assert!(c.contains("color:"));
         // Expression region should be blanked
         assert!(!c.contains("props"));
+    }
+
+    async fn assert_variable_name_position(text: &str, name: &str) {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///test.ts").unwrap();
+        parse_js_document(text, &uri, &manager).await.unwrap();
+        let variables = manager.get_variables(name).await;
+        assert_eq!(variables.len(), 1);
+        let expected_offset = text.find(name).unwrap();
+        assert_eq!(variables[0].source_position, expected_offset);
+        assert_eq!(
+            variables[0].name_range.unwrap().start,
+            offset_to_position(text, expected_offset),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_template_expression_preserves_following_range() {
+        let text = r#"const css = `color: ${"red"}; --after: blue;`;"#;
+        assert_variable_name_position(text, "--after").await;
+    }
+
+    #[tokio::test]
+    async fn test_escaped_template_expression_preserves_following_range() {
+        let text = r#"const css = `color: ${"re\"d"}; --after: blue;`;"#;
+        assert_variable_name_position(text, "--after").await;
+    }
+
+    #[tokio::test]
+    async fn test_multibyte_template_expression_preserves_following_range() {
+        let text = r#"const css = `color: ${"赤色"}; --after: blue;`;"#;
+        assert_variable_name_position(text, "--after").await;
     }
 
     #[test]
