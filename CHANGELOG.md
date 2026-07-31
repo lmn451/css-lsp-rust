@@ -4,6 +4,15 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.3.3] - 2026-07-31
+
+### Fixed
+- CSS-in-JS template expression offsets are preserved when blanking quoted template segments.
+- Workspace folder file URIs are normalized consistently before scanning.
+
+### Maintenance
+- Updated manager iteration to satisfy newer Clippy linting.
+
 ## [0.3.2] - 2026-07-31
 
 ### Fixed

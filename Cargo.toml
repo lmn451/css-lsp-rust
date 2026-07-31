@@ -1,6 +1,6 @@
 [package]
 name = "css-variable-lsp"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["lmn451"]
 description = "A fast, Rust-based Language Server Protocol implementation for CSS Variables"
@@ -19,7 +19,9 @@ exclude = [
     "TEST_ADDITIONS_SUMMARY.md",
     "CHANGELOG.md",
     "AGENTS.md",
-    "TEST_EXAMPLE.*"
+    "TEST_EXAMPLE.*",
+    ".pi/**",
+    "logs/**"
 ]
 
 [lib]
