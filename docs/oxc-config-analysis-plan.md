@@ -5,7 +5,7 @@
 Phases 0 through 2 are implemented for Astro font variables. The first Phase 3
 slice is implemented for static CSS custom properties in Vite's
 `css.preprocessorOptions.scss.additionalData`. The first Phase 4 slice adds a
-shared, bounded resolver for immutable module-level `const` strings used by
+shared, bounded resolver for immutable, unexported module-level `const` strings used by
 both extractors. Other static operations and framework extractors remain
 future, use-case-driven work.
 
@@ -438,7 +438,7 @@ Only add a static-value engine after at least two extractors need it.
 ### Implemented first slice: module-level `const` strings
 
 Astro `fonts[].cssVariable` and Vite SCSS `additionalData` may reference a
-direct module-level `const` string or a chain of such aliases:
+direct, unexported module-level `const` string or a chain of such aliases:
 
 ```ts
 const FONT_VARIABLE = "--font-body";

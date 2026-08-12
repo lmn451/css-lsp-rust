@@ -5,12 +5,14 @@ use ls_types::{Range, Uri};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, ArrayExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
-    ExportDefaultDeclaration, Expression, ImportDeclaration, ImportDeclarationSpecifier,
-    ObjectExpression, ObjectPropertyKind, Program, PropertyKey, SimpleAssignmentTarget, Statement,
-    UpdateExpression, VariableDeclarator,
+    BlockStatement, CatchClause, ExportDefaultDeclaration, Expression, ForInStatement,
+    ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, ImportDeclaration,
+    ImportDeclarationSpecifier, MemberExpression, ObjectExpression, ObjectPropertyKind, Program,
+    PropertyKey, SimpleAssignmentTarget, Statement, UpdateExpression, VariableDeclaration,
+    VariableDeclarator,
 };
 use oxc_ast_visit::{
-    walk::{walk_assignment_expression, walk_update_expression},
+    walk::{walk_assignment_expression, walk_block_statement, walk_update_expression},
     Visit,
 };
 use oxc_parser::Parser;
@@ -231,27 +233,232 @@ struct ResolvedStaticString {
 }
 
 #[derive(Default)]
-struct AssignedBindingCollector {
+struct AssignmentTargetNameCollector {
     names: HashSet<String>,
+}
+
+impl<'a> Visit<'a> for AssignmentTargetNameCollector {
+    fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
+        self.names.insert(identifier.name.as_str().to_string());
+    }
+
+    fn visit_member_expression(&mut self, _expression: &MemberExpression<'a>) {}
+
+    fn visit_assignment_target_with_default(
+        &mut self,
+        target: &oxc_ast::ast::AssignmentTargetWithDefault<'a>,
+    ) {
+        self.visit_assignment_target(&target.binding);
+    }
+
+    fn visit_assignment_target_property_identifier(
+        &mut self,
+        property: &oxc_ast::ast::AssignmentTargetPropertyIdentifier<'a>,
+    ) {
+        self.visit_identifier_reference(&property.binding);
+    }
+
+    fn visit_assignment_target_property_property(
+        &mut self,
+        property: &oxc_ast::ast::AssignmentTargetPropertyProperty<'a>,
+    ) {
+        self.visit_assignment_target_maybe_default(&property.binding);
+    }
+}
+
+#[derive(Default)]
+struct BindingNameCollector {
+    names: HashSet<String>,
+}
+
+impl<'a> Visit<'a> for BindingNameCollector {
+    fn visit_binding_identifier(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'a>) {
+        self.names.insert(identifier.name.as_str().to_string());
+    }
+
+    fn visit_expression(&mut self, _expression: &Expression<'a>) {}
+}
+
+struct AssignedBindingCollector {
+    tracked_names: HashSet<String>,
+    names: HashSet<String>,
+    shadowed_scopes: Vec<HashSet<String>>,
+}
+
+impl AssignedBindingCollector {
+    fn new(tracked_names: HashSet<String>) -> Self {
+        Self {
+            tracked_names,
+            names: HashSet::new(),
+            shadowed_scopes: Vec::new(),
+        }
+    }
+
+    fn record_names(&mut self, names: HashSet<String>) {
+        for name in names {
+            let shadowed = self
+                .shadowed_scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.contains(&name));
+            if self.tracked_names.contains(&name) && !shadowed {
+                self.names.insert(name);
+            }
+        }
+    }
+
+    fn record_assignment_target<'a>(&mut self, target: &AssignmentTarget<'a>) {
+        let mut collector = AssignmentTargetNameCollector::default();
+        collector.visit_assignment_target(target);
+        self.record_names(collector.names);
+    }
+
+    fn record_simple_assignment_target<'a>(&mut self, target: &SimpleAssignmentTarget<'a>) {
+        let mut collector = AssignmentTargetNameCollector::default();
+        collector.visit_simple_assignment_target(target);
+        self.record_names(collector.names);
+    }
+
+    fn record_for_statement_left<'a>(&mut self, left: &ForStatementLeft<'a>) {
+        let mut collector = AssignmentTargetNameCollector::default();
+        collector.visit_for_statement_left(left);
+        self.record_names(collector.names);
+    }
+
+    fn declaration_names(declaration: &VariableDeclaration<'_>) -> HashSet<String> {
+        let mut collector = BindingNameCollector::default();
+        for declarator in &declaration.declarations {
+            collector.visit_binding_pattern(&declarator.id);
+        }
+        collector.names
+    }
+
+    fn lexical_declaration_names(declaration: &VariableDeclaration<'_>) -> HashSet<String> {
+        if declaration.kind.is_var() {
+            HashSet::new()
+        } else {
+            Self::declaration_names(declaration)
+        }
+    }
+
+    fn block_shadow_names(block: &BlockStatement<'_>) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for statement in &block.body {
+            match statement {
+                Statement::VariableDeclaration(declaration) => {
+                    names.extend(Self::lexical_declaration_names(declaration));
+                }
+                Statement::FunctionDeclaration(function) => {
+                    if let Some(identifier) = &function.id {
+                        names.insert(identifier.name.as_str().to_string());
+                    }
+                }
+                Statement::ClassDeclaration(class) => {
+                    if let Some(identifier) = &class.id {
+                        names.insert(identifier.name.as_str().to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        names
+    }
+
+    fn with_shadowed_scope(&mut self, names: HashSet<String>, visit: impl FnOnce(&mut Self)) {
+        self.shadowed_scopes.push(names);
+        visit(self);
+        self.shadowed_scopes.pop();
+    }
 }
 
 impl<'a> Visit<'a> for AssignedBindingCollector {
     fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
-        if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.left {
-            self.names.insert(identifier.name.as_str().to_string());
-        }
+        self.record_assignment_target(&expression.left);
         walk_assignment_expression(self, expression);
     }
 
     fn visit_update_expression(&mut self, expression: &UpdateExpression<'a>) {
-        if let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.argument
-        {
-            self.names.insert(identifier.name.as_str().to_string());
-        }
+        self.record_simple_assignment_target(&expression.argument);
         walk_update_expression(self, expression);
     }
 
     fn visit_function_body(&mut self, _body: &oxc_ast::ast::FunctionBody<'a>) {}
+
+    fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
+        let names = Self::block_shadow_names(block);
+        self.with_shadowed_scope(names, |collector| walk_block_statement(collector, block));
+    }
+
+    fn visit_catch_clause(&mut self, clause: &CatchClause<'a>) {
+        let mut names = BindingNameCollector::default();
+        if let Some(parameter) = &clause.param {
+            names.visit_binding_pattern(&parameter.pattern);
+        }
+        self.with_shadowed_scope(names.names, |collector| {
+            collector.visit_block_statement(&clause.body);
+        });
+    }
+
+    fn visit_for_statement(&mut self, statement: &ForStatement<'a>) {
+        let shadowed = statement
+            .init
+            .as_ref()
+            .and_then(|init| match init {
+                ForStatementInit::VariableDeclaration(declaration) => {
+                    Some(Self::lexical_declaration_names(declaration))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.with_shadowed_scope(shadowed, |collector| {
+            if let Some(init) = &statement.init {
+                collector.visit_for_statement_init(init);
+            }
+            if let Some(test) = &statement.test {
+                collector.visit_expression(test);
+            }
+            if let Some(update) = &statement.update {
+                collector.visit_expression(update);
+            }
+            collector.visit_statement(&statement.body);
+        });
+    }
+
+    fn visit_for_in_statement(&mut self, statement: &ForInStatement<'a>) {
+        let shadowed = match &statement.left {
+            ForStatementLeft::VariableDeclaration(declaration) => {
+                Self::lexical_declaration_names(declaration)
+            }
+            _ => HashSet::new(),
+        };
+        self.with_shadowed_scope(shadowed, |collector| {
+            if matches!(&statement.left, ForStatementLeft::VariableDeclaration(_)) {
+                collector.visit_for_statement_left(&statement.left);
+            } else {
+                collector.record_for_statement_left(&statement.left);
+            }
+            collector.visit_expression(&statement.right);
+            collector.visit_statement(&statement.body);
+        });
+    }
+
+    fn visit_for_of_statement(&mut self, statement: &ForOfStatement<'a>) {
+        let shadowed = match &statement.left {
+            ForStatementLeft::VariableDeclaration(declaration) => {
+                Self::lexical_declaration_names(declaration)
+            }
+            _ => HashSet::new(),
+        };
+        self.with_shadowed_scope(shadowed, |collector| {
+            if matches!(&statement.left, ForStatementLeft::VariableDeclaration(_)) {
+                collector.visit_for_statement_left(&statement.left);
+            } else {
+                collector.record_for_statement_left(&statement.left);
+            }
+            collector.visit_expression(&statement.right);
+            collector.visit_statement(&statement.body);
+        });
+    }
 }
 
 struct StaticStringResolver<'a, 's> {
@@ -291,7 +498,7 @@ impl<'a, 's> StaticStringResolver<'a, 's> {
             bindings.remove(&name);
         }
 
-        let mut assignments = AssignedBindingCollector::default();
+        let mut assignments = AssignedBindingCollector::new(bindings.keys().cloned().collect());
         assignments.visit_program(program);
 
         Self {
@@ -1046,6 +1253,17 @@ mod tests {
                 REASSIGNED = "--font-after-reassignment";
                 const UPDATED = "--font-before-update";
                 UPDATED++;
+                const DESTRUCTURED = "--font-before-destructure";
+                ({ value: DESTRUCTURED } = source);
+                const FOR_OF_TARGET = "--font-before-for-of";
+                for (FOR_OF_TARGET of values) {}
+                const TS_WRAPPED = "--font-before-ts-assignment";
+                (TS_WRAPPED as string) = source;
+                const SHADOWED = "--font-shadowed";
+                {
+                    let SHADOWED = 0;
+                    SHADOWED++;
+                }
                 const CYCLE_A = CYCLE_B;
                 const CYCLE_B = CYCLE_A;
                 const VALUE_20 = "--font-depth";
@@ -1062,6 +1280,10 @@ mod tests {
 
         assert!(!values.contains_key("REASSIGNED"));
         assert!(!values.contains_key("UPDATED"));
+        assert!(!values.contains_key("DESTRUCTURED"));
+        assert!(!values.contains_key("FOR_OF_TARGET"));
+        assert!(!values.contains_key("TS_WRAPPED"));
+        assert!(values.contains_key("SHADOWED"));
         assert!(!values.contains_key("CYCLE_A"));
         assert!(!values.contains_key("CYCLE_B"));
         assert!(!values.contains_key("VALUE_0"));
@@ -1070,6 +1292,29 @@ mod tests {
             text.get(depth_span.start as usize..depth_span.end as usize),
             Some("--font-depth")
         );
+    }
+
+    #[tokio::test]
+    async fn exported_const_strings_remain_out_of_scope() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                export const FONT_NAME = "--font-exported-const";
+                export default {
+                    fonts: [{ cssVariable: FONT_NAME }],
+                };
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--font-exported-const")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
