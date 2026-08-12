@@ -2215,6 +2215,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mutated_define_config_helpers_are_not_trusted() {
+        let cjs_uri = test_uri("astro.config.cjs");
+        for (name, source) in [
+            (
+                "--font-mutated-direct-helper",
+                r#"
+                    let defineConfig = require("astro/config").defineConfig;
+                    defineConfig = runtimeHelper;
+                    module.exports = defineConfig({
+                        fonts: [{ cssVariable: "--font-mutated-direct-helper" }],
+                    });
+                "#,
+            ),
+            (
+                "--font-mutated-namespace-helper",
+                r#"
+                    const astro = require("astro/config");
+                    astro.defineConfig = runtimeHelper;
+                    module.exports = astro.defineConfig({
+                        fonts: [{ cssVariable: "--font-mutated-namespace-helper" }],
+                    });
+                "#,
+            ),
+        ] {
+            let manager = CssVariableManager::new(Config::default());
+            parse_config_document(source, &cjs_uri, &manager)
+                .await
+                .unwrap();
+            assert!(manager.get_variables(name).await.is_empty(), "{name}");
+        }
+
+        let esm_manager = CssVariableManager::new(Config::default());
+        let esm_uri = test_uri("astro.config.mjs");
+        parse_config_document(
+            r#"
+                import * as astro from "astro/config";
+                astro.defineConfig = runtimeHelper;
+                export default astro.defineConfig({
+                    fonts: [{ cssVariable: "--font-mutated-esm-namespace-helper" }],
+                });
+            "#,
+            &esm_uri,
+            &esm_manager,
+        )
+        .await
+        .unwrap();
+        assert!(esm_manager
+            .get_variables("--font-mutated-esm-namespace-helper")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn module_exports_is_ignored_in_explicit_esm_configs() {
         for name in ["astro.config.mjs", "astro.config.mts"] {
             let manager = CssVariableManager::new(Config::default());
