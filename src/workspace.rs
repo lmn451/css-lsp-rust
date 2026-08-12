@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use tokio::fs;
 use walkdir::WalkDir;
 
+use crate::config_analysis::{is_supported_config_path, parse_config_document};
 use crate::manager::CssVariableManager;
 use crate::parsers::{parse_css_document, parse_html_document};
 
@@ -77,8 +78,9 @@ pub async fn scan_workspace(
                 continue;
             }
 
-            // Include if matches lookup pattern
-            if lookup_set.is_match(&*path_str) {
+            // Framework configuration sources are discovered by exact basename instead of
+            // requiring users to eagerly scan every JavaScript or TypeScript file.
+            if lookup_set.is_match(&*path_str) || is_supported_config_path(relative) {
                 all_files.insert(path.to_path_buf());
             }
         }
@@ -113,6 +115,17 @@ pub async fn scan_workspace(
             Some(u) => u,
             None => continue,
         };
+
+        if is_supported_config_path(file_path) {
+            if let Err(e) = parse_config_document(&content, &file_uri, manager).await {
+                tracing::debug!(
+                    file = %file_path.display(),
+                    error = %e,
+                    "workspace scan: configuration analysis error"
+                );
+            }
+            continue;
+        }
 
         // Determine file type and parse using the extension->kind map built once above.
         let path_str = file_path.to_string_lossy();

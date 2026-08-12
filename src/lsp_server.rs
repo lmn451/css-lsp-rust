@@ -33,6 +33,7 @@ use crate::completion_context::{
 use crate::completion_context::{
     find_html_style_attribute_slice, find_html_style_block_slice, find_js_string_segment,
 };
+use crate::config_analysis::{is_supported_config_path, parse_config_document};
 use crate::document_kind::{
     apply_config_patch, build_lookup_extension_map, resolve_document_kind, ClientConfigPatch,
     DocumentKind,
@@ -299,6 +300,19 @@ impl CssVariableLsp {
         self.manager.remove_document(uri).await;
 
         let path = uri.path().as_str();
+        if is_supported_config_path(std::path::Path::new(path)) {
+            if let Err(e) = parse_config_document(text, uri, &self.manager).await {
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Configuration parse error: {}", e),
+                    )
+                    .await;
+            }
+            self.manager.rebuild_color_index().await;
+            return;
+        }
+
         let lookup_map = self.lookup_extension_map.read().await.clone();
         let kind = resolve_document_kind(path, language_id, &lookup_map);
         let result = match kind {

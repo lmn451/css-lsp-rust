@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed architecture. This document plans the work but does not add Oxc or change runtime behavior.
+Phases 0 through 2 are implemented on this branch for Astro font variables. Vite and other framework extractors remain future, use-case-driven work.
+
+The initial macOS aarch64 release build measured 8,039,360 bytes with Oxc versus 7,176,352 bytes on `master`, an increase of 863,008 bytes, or approximately 12%. This result is acceptable for the initial implementation but should continue to be tracked in release review.
 
 ## Motivation
 

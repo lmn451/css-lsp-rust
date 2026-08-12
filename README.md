@@ -62,6 +62,10 @@ editor extensions and CI sandboxes.
 - **JS / TS / JSX / TSX** support via CSS-in-JS extraction from
   string literals and tagged template literals (`styled-components`,
   `emotion`, etc.), correctly handling template expressions.
+- **Astro font variables** are statically indexed from
+  `astro.config.{js,mjs,cjs,ts,mts,cts}` using Oxc. Configuration code is
+  parsed but never executed, and only literal `fonts[].cssVariable` values are
+  registered.
 - **Cascade sorting** and **CSS specificity calculation** including
   `:is()`, `:not()`, `:where()`, attribute selectors, pseudo-classes, and
   pseudo-elements.
@@ -99,6 +103,9 @@ editor extensions and CI sandboxes.
 | JS-ish   | `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, `.cts` |
 
 All of these are configurable via the `--lookup-files` flag.
+
+Recognized `astro.config.*` files are discovered independently of
+`--lookup-files` so users do not need to scan every JavaScript file eagerly.
 
 ---
 

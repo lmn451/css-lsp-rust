@@ -51,23 +51,37 @@ impl CssVariableManager {
 
     /// Add a variable definition
     pub async fn add_variable(&self, variable: CssVariable) -> Result<(), String> {
+        self.add_variables(vec![variable]).await
+    }
+
+    /// Add variable definitions atomically under one variables lock.
+    pub async fn add_variables(&self, variables: Vec<CssVariable>) -> Result<(), String> {
+        if variables.is_empty() {
+            return Ok(());
+        }
+
         let max_documents = self.config.read().await.max_documents;
         let mut tracked = self.tracked_documents.write().await;
 
-        // Check document limit
-        if max_documents > 0 && !tracked.contains(&variable.uri) && tracked.len() >= max_documents {
+        let new_documents: HashSet<_> = variables
+            .iter()
+            .map(|variable| variable.uri.clone())
+            .filter(|uri| !tracked.contains(uri))
+            .collect();
+        if max_documents > 0 && tracked.len() + new_documents.len() > max_documents {
             return Err(format!(
-                "Maximum document limit ({}) reached. Cannot add more documents.",
-                max_documents
+                "Maximum document limit ({max_documents}) reached. Cannot add more documents."
             ));
         }
-        tracked.insert(variable.uri.clone());
+        tracked.extend(new_documents);
 
         // Keep the tracked-documents -> variables lock order consistent with removals.
         let mut vars = self.variables.write().await;
-        vars.entry(variable.name.clone())
-            .or_insert_with(Vec::new)
-            .push(variable);
+        for variable in variables {
+            vars.entry(variable.name.clone())
+                .or_default()
+                .push(variable);
+        }
 
         Ok(())
     }
