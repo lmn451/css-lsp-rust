@@ -173,11 +173,17 @@ fn extract_config_variables(
         .body
         .iter()
         .any(|statement| matches!(statement, Statement::ExportDefaultDeclaration(_)));
+    let DefineConfigImportCollector {
+        define_config_bindings,
+        define_config_namespaces,
+        ..
+    } = imports;
     let extracted = match kind {
         ConfigKind::Astro => {
             let mut extractor = AstroFontExtractor {
                 source: text,
-                define_config_bindings: imports.define_config_bindings,
+                define_config_bindings,
+                define_config_namespaces,
                 expression_resolver,
                 variables: Vec::new(),
             };
@@ -193,7 +199,8 @@ fn extract_config_variables(
         ConfigKind::Vite => {
             let mut extractor = ViteAdditionalDataExtractor {
                 source: text,
-                define_config_bindings: imports.define_config_bindings,
+                define_config_bindings,
+                define_config_namespaces,
                 expression_resolver,
                 css_snippets: Vec::new(),
             };
@@ -241,7 +248,10 @@ struct StaticExpressionResolver<'a> {
 }
 
 enum ResolvedProperty<'a> {
-    Known(&'a Expression<'a>),
+    Known {
+        value: &'a Expression<'a>,
+        declaration_span: Span,
+    },
     Unknown,
 }
 
@@ -314,10 +324,12 @@ impl<'a> StaticExpressionResolver<'a> {
                         property_key_matches(&property.key, name)
                     };
                     if matches {
-                        return (!unknown_after_match)
-                            .then_some(ResolvedProperty::Known(&property.value));
+                        return (!unknown_after_match).then_some(ResolvedProperty::Known {
+                            value: &property.value,
+                            declaration_span: property.span,
+                        });
                     }
-                    if property.computed && property.key.name().is_none() {
+                    if property.computed && !matches!(property.key, PropertyKey::StringLiteral(_)) {
                         unknown_after_match = true;
                     }
                 }
@@ -327,8 +339,8 @@ impl<'a> StaticExpressionResolver<'a> {
                         continue;
                     };
                     match self.property(spread_object, name) {
-                        Some(ResolvedProperty::Known(value)) if !unknown_after_match => {
-                            return Some(ResolvedProperty::Known(value));
+                        Some(known @ ResolvedProperty::Known { .. }) if !unknown_after_match => {
+                            return Some(known);
                         }
                         Some(_) => return Some(ResolvedProperty::Unknown),
                         None => {}
@@ -349,7 +361,7 @@ impl<'a> StaticExpressionResolver<'a> {
         name: &str,
     ) -> Option<&'a Expression<'a>> {
         match self.property(object, name)? {
-            ResolvedProperty::Known(value) => Some(value),
+            ResolvedProperty::Known { value, .. } => Some(value),
             ResolvedProperty::Unknown => None,
         }
     }
@@ -738,6 +750,7 @@ fn collect_static_resolver<'a, 's>(
 struct DefineConfigImportCollector<'s> {
     module_source: &'s str,
     define_config_bindings: HashSet<String>,
+    define_config_namespaces: HashSet<String>,
 }
 
 impl<'s> DefineConfigImportCollector<'s> {
@@ -745,6 +758,7 @@ impl<'s> DefineConfigImportCollector<'s> {
         Self {
             module_source,
             define_config_bindings: HashSet::new(),
+            define_config_namespaces: HashSet::new(),
         }
     }
 
@@ -760,32 +774,43 @@ impl<'s> DefineConfigImportCollector<'s> {
     }
 
     fn collect_commonjs_declarator(&mut self, declarator: &VariableDeclarator<'_>) {
-        let Some(Expression::CallExpression(call)) =
-            declarator.init.as_ref().map(unwrap_expression)
-        else {
+        let Some(init) = declarator.init.as_ref().map(unwrap_expression) else {
             return;
         };
-        if !call.is_require_call()
-            || !matches!(
-                call.arguments.first(),
-                Some(Argument::StringLiteral(source))
-                    if source.value.as_str() == self.module_source
-            )
-        {
+
+        if let Some(member) = init.as_member_expression() {
+            if member.static_property_name() == Some("defineConfig")
+                && is_require_expression(member.object(), self.module_source)
+            {
+                if let BindingPattern::BindingIdentifier(local) = &declarator.id {
+                    self.define_config_bindings
+                        .insert(local.name.as_str().to_string());
+                }
+            }
             return;
         }
 
-        let BindingPattern::ObjectPattern(pattern) = &declarator.id else {
+        if !is_require_expression(init, self.module_source) {
             return;
-        };
-        for property in &pattern.properties {
-            if property.computed || !property_key_matches(&property.key, "defineConfig") {
-                continue;
-            }
-            if let BindingPattern::BindingIdentifier(local) = &property.value {
-                self.define_config_bindings
+        }
+
+        match &declarator.id {
+            BindingPattern::BindingIdentifier(local) => {
+                self.define_config_namespaces
                     .insert(local.name.as_str().to_string());
             }
+            BindingPattern::ObjectPattern(pattern) => {
+                for property in &pattern.properties {
+                    if property.computed || !property_key_matches(&property.key, "defineConfig") {
+                        continue;
+                    }
+                    if let BindingPattern::BindingIdentifier(local) = &property.value {
+                        self.define_config_bindings
+                            .insert(local.name.as_str().to_string());
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -802,14 +827,19 @@ impl<'a> Visit<'a> for DefineConfigImportCollector<'_> {
         };
 
         for specifier in specifiers {
-            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-                continue;
-            };
-            if specifier.import_kind.is_value()
-                && specifier.imported.name().as_str() == "defineConfig"
-            {
-                self.define_config_bindings
-                    .insert(specifier.local.name.as_str().to_string());
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                    if specifier.import_kind.is_value()
+                        && specifier.imported.name().as_str() == "defineConfig" =>
+                {
+                    self.define_config_bindings
+                        .insert(specifier.local.name.as_str().to_string());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    self.define_config_namespaces
+                        .insert(specifier.local.name.as_str().to_string());
+                }
+                _ => {}
             }
         }
     }
@@ -818,6 +848,7 @@ impl<'a> Visit<'a> for DefineConfigImportCollector<'_> {
 struct AstroFontExtractor<'a, 's> {
     source: &'s str,
     define_config_bindings: HashSet<String>,
+    define_config_namespaces: HashSet<String>,
     expression_resolver: StaticExpressionResolver<'a>,
     variables: Vec<ExtractedVariable>,
 }
@@ -837,6 +868,7 @@ impl<'a, 's> AstroFontExtractor<'a, 's> {
         if let Some(config) = config_object_from_expression(
             expression,
             &self.define_config_bindings,
+            &self.define_config_namespaces,
             &self.expression_resolver,
         ) {
             self.extract_astro_config(config);
@@ -848,6 +880,7 @@ impl<'a, 's> AstroFontExtractor<'a, 's> {
             program,
             self.source,
             &self.define_config_bindings,
+            &self.define_config_namespaces,
             &self.expression_resolver,
         ) {
             self.extract_astro_config(config);
@@ -889,7 +922,11 @@ impl<'a, 's> AstroFontExtractor<'a, 's> {
             let Some(font) = self.array_element_object(element) else {
                 continue;
             };
-            let Some(value) = self.expression_resolver.property_value(font, "cssVariable") else {
+            let Some(ResolvedProperty::Known {
+                value,
+                declaration_span,
+            }) = self.expression_resolver.property(font, "cssVariable")
+            else {
                 continue;
             };
             let Some((name, name_span)) =
@@ -910,7 +947,11 @@ impl<'a, 's> AstroFontExtractor<'a, 's> {
 
             self.variables.push(ExtractedVariable {
                 name,
-                declaration_span: name_span,
+                declaration_span: if matches!(unwrap_expression(value), Expression::Identifier(_)) {
+                    name_span
+                } else {
+                    declaration_span
+                },
                 name_span,
             });
         }
@@ -928,6 +969,7 @@ impl<'a, 's> AstroFontExtractor<'a, 's> {
 struct ViteAdditionalDataExtractor<'a, 's> {
     source: &'s str,
     define_config_bindings: HashSet<String>,
+    define_config_namespaces: HashSet<String>,
     expression_resolver: StaticExpressionResolver<'a>,
     css_snippets: Vec<ExtractedCssSnippet>,
 }
@@ -947,6 +989,7 @@ impl<'a, 's> ViteAdditionalDataExtractor<'a, 's> {
         if let Some(config) = config_object_from_expression(
             expression,
             &self.define_config_bindings,
+            &self.define_config_namespaces,
             &self.expression_resolver,
         ) {
             self.extract_vite_config(config);
@@ -958,6 +1001,7 @@ impl<'a, 's> ViteAdditionalDataExtractor<'a, 's> {
             program,
             self.source,
             &self.define_config_bindings,
+            &self.define_config_namespaces,
             &self.expression_resolver,
         ) {
             self.extract_vite_config(config);
@@ -1009,6 +1053,7 @@ impl<'a, 's> ViteAdditionalDataExtractor<'a, 's> {
 fn config_object_from_expression<'a>(
     expression: &'a Expression<'a>,
     define_config_bindings: &HashSet<String>,
+    define_config_namespaces: &HashSet<String>,
     resolver: &StaticExpressionResolver<'a>,
 ) -> Option<&'a ObjectExpression<'a>> {
     match unwrap_expression(expression) {
@@ -1022,17 +1067,22 @@ fn config_object_from_expression<'a>(
             .as_deref()
             .and_then(|body| config_object_from_function_body(body, resolver)),
         Expression::CallExpression(call)
-            if matches!(
+            if is_define_config_callee(
                 &call.callee,
-                Expression::Identifier(identifier)
-                    if define_config_bindings.contains(identifier.name.as_str())
+                define_config_bindings,
+                define_config_namespaces,
             ) =>
         {
             call.arguments
                 .first()
                 .and_then(|argument| argument.as_expression())
                 .and_then(|expression| {
-                    config_object_from_expression(expression, define_config_bindings, resolver)
+                    config_object_from_expression(
+                        expression,
+                        define_config_bindings,
+                        define_config_namespaces,
+                        resolver,
+                    )
                 })
         }
         _ => None,
@@ -1069,6 +1119,7 @@ fn commonjs_config_object<'a>(
     program: &'a Program<'a>,
     source: &str,
     define_config_bindings: &HashSet<String>,
+    define_config_namespaces: &HashSet<String>,
     resolver: &StaticExpressionResolver<'a>,
 ) -> Option<&'a ObjectExpression<'a>> {
     for statement in program.body.iter().rev() {
@@ -1083,11 +1134,50 @@ fn commonjs_config_object<'a>(
             return config_object_from_expression(
                 &assignment.right,
                 define_config_bindings,
+                define_config_namespaces,
                 resolver,
             );
         }
     }
     None
+}
+
+fn is_require_expression(expression: &Expression<'_>, module_source: &str) -> bool {
+    let Expression::CallExpression(call) = unwrap_expression(expression) else {
+        return false;
+    };
+    call.is_require_call()
+        && matches!(
+            call.arguments.first(),
+            Some(Argument::StringLiteral(source)) if source.value.as_str() == module_source
+        )
+}
+
+fn is_define_config_callee(
+    callee: &Expression<'_>,
+    define_config_bindings: &HashSet<String>,
+    define_config_namespaces: &HashSet<String>,
+) -> bool {
+    let callee = unwrap_expression(callee);
+    if matches!(
+        callee,
+        Expression::Identifier(identifier)
+            if define_config_bindings.contains(identifier.name.as_str())
+    ) {
+        return true;
+    }
+
+    let Some(member) = callee.as_member_expression() else {
+        return false;
+    };
+    if member.static_property_name() != Some("defineConfig") {
+        return false;
+    }
+    matches!(
+        unwrap_expression(member.object()),
+        Expression::Identifier(identifier)
+            if define_config_namespaces.contains(identifier.name.as_str())
+    )
 }
 
 fn is_module_exports_assignment(assignment: &AssignmentExpression<'_>, source: &str) -> bool {
@@ -1975,6 +2065,49 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn extracts_from_proven_namespace_define_config_imports_only() {
+        let uri = test_uri("astro.config.mjs");
+        let manager = CssVariableManager::new(Config::default());
+        parse_config_document(
+            r#"
+                import * as astro from "astro/config";
+                export default astro.defineConfig({
+                    fonts: [{ cssVariable: "--font-esm-namespace-helper" }],
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            manager
+                .get_variables("--font-esm-namespace-helper")
+                .await
+                .len(),
+            1
+        );
+
+        let unproven_manager = CssVariableManager::new(Config::default());
+        parse_config_document(
+            r#"
+                import * as astro from "unrelated-package";
+                export default astro.defineConfig({
+                    fonts: [{ cssVariable: "--font-unproven-namespace-helper" }],
+                });
+            "#,
+            &uri,
+            &unproven_manager,
+        )
+        .await
+        .unwrap();
+        assert!(unproven_manager
+            .get_variables("--font-unproven-namespace-helper")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]

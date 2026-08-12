@@ -1502,15 +1502,14 @@ async fn test_initialize_indexes_static_config_structures_and_vite_function_conf
 
     let astro_symbols = workspace_symbols(&mut service, "--font-from-structure").await;
     assert_eq!(astro_symbols.len(), 1);
-    let astro_start = astro_text.find("--font-from-structure").unwrap();
+    let astro_start = astro_text.find("cssVariable").unwrap();
+    let astro_end =
+        astro_text.find("\"--font-from-structure\"").unwrap() + "\"--font-from-structure\"".len();
     assert_eq!(
         astro_symbols[0].location.range,
         Range::new(
             css_variable_lsp::types::offset_to_position(astro_text, astro_start),
-            css_variable_lsp::types::offset_to_position(
-                astro_text,
-                astro_start + "--font-from-structure".len(),
-            ),
+            css_variable_lsp::types::offset_to_position(astro_text, astro_end),
         )
     );
 
