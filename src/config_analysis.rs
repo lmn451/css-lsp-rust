@@ -1908,6 +1908,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn static_structure_resolution_rejects_direct_member_mutation() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                const CONFIG = {
+                    fonts: [{ cssVariable: "--font-before-member-write" }],
+                };
+                CONFIG.fonts = [{ cssVariable: "--font-after-member-write" }];
+                export default CONFIG;
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--font-before-member-write")
+            .await
+            .is_empty());
+        assert!(manager
+            .get_variables("--font-after-member-write")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn cyclic_object_spreads_are_rejected_without_unbounded_recursion() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("astro.config.ts");
@@ -2503,6 +2531,63 @@ mod tests {
 
         assert!(manager.get_variables("--font-nested").await.is_empty());
         assert!(manager.get_variables("--font-conditional").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn commonjs_exports_reject_later_conditional_overrides() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.cjs");
+
+        parse_config_document(
+            r#"
+                module.exports = {
+                    fonts: [{ cssVariable: "--font-before-conditional-override" }],
+                };
+                if (process.env.USE_OTHER_CONFIG) {
+                    module.exports = { fonts: [] };
+                }
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--font-before-conditional-override")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn define_config_helpers_mutated_inside_functions_are_rejected() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.cjs");
+
+        parse_config_document(
+            r#"
+                const vite = require("vite");
+                (() => { vite.defineConfig = (value) => value; })();
+                module.exports = vite.defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-mutated-in-iife: red; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--vite-mutated-in-iife")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]

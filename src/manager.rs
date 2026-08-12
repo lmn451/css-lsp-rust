@@ -676,6 +676,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usage_only_analysis_is_tracked_and_respects_document_limits() {
+        let manager = CssVariableManager::new(Config {
+            max_documents: 1,
+            ..Config::default()
+        });
+        let usage_uri = Uri::from_str("file:///vite.config.ts").unwrap();
+        let blocked_uri = Uri::from_str("file:///blocked.css").unwrap();
+
+        manager
+            .replace_document_analysis(
+                &usage_uri,
+                Vec::new(),
+                vec![create_test_usage(
+                    "--dependency",
+                    ":root",
+                    usage_uri.as_str(),
+                )],
+            )
+            .await
+            .unwrap();
+
+        assert!(manager.get_document_uris().await.contains(&usage_uri));
+        let error = manager
+            .replace_document_analysis(
+                &blocked_uri,
+                vec![create_test_variable(
+                    "--blocked",
+                    "red",
+                    ":root",
+                    blocked_uri.as_str(),
+                )],
+                Vec::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("Maximum document limit"));
+        assert_eq!(manager.get_usages("--dependency").await.len(), 1);
+        assert!(manager.get_variables("--blocked").await.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_manager_add_and_get_usages() {
         let manager = CssVariableManager::new(Config::default());
         let usage = create_test_usage("--primary", ".button", "file:///test.css");

@@ -50,6 +50,19 @@ fi
 
 echo -e "${GREEN}✓ All expected asset names found in release workflow${NC}"
 
+for required_notice in "LICENSE" "THIRD_PARTY_NOTICES.md"; do
+  if [[ ! -f "${ROOT_DIR}/${required_notice}" ]]; then
+    echo -e "${RED}Missing release notice file: ${required_notice}${NC}"
+    exit 1
+  fi
+  if ! grep -q "${required_notice}" "${WORKFLOW_FILE}"; then
+    echo -e "${RED}Release workflow does not package ${required_notice}${NC}"
+    exit 1
+  fi
+done
+
+echo -e "${GREEN}✓ Release archives include project and third-party notices${NC}"
+
 # Also validate build script
 BUILD_SCRIPT="${ROOT_DIR}/scripts/build-release-assets.sh"
 if [[ -f "${BUILD_SCRIPT}" ]]; then
