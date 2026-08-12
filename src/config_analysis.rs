@@ -432,6 +432,106 @@ mod tests {
         assert!(!is_supported_config_path(Path::new("src/config.ts")));
     }
 
+    #[test]
+    fn recognizes_supported_vite_config_names() {
+        for name in [
+            "vite.config.js",
+            "vite.config.mjs",
+            "vite.config.cjs",
+            "vite.config.ts",
+            "vite.config.mts",
+            "vite.config.cts",
+        ] {
+            assert!(is_supported_config_path(Path::new(name)), "{name}");
+        }
+        assert!(!is_supported_config_path(Path::new("vite.config.json")));
+        assert!(!is_supported_config_path(Path::new("src/vite.ts")));
+    }
+
+    #[tokio::test]
+    async fn extracts_vite_preprocessor_additional_data_variables() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        let text = r#"
+            import { defineConfig as configure } from "vite";
+
+            export default configure({
+                css: {
+                    preprocessorOptions: {
+                        scss: {
+                            additionalData: `:root {
+                                --vite-brand: #123456;
+                            }`,
+                        },
+                        less: {
+                            additionalData: ".theme { --vite-accent: rebeccapurple; }",
+                        },
+                    },
+                },
+            });
+        "#;
+
+        parse_config_document(text, &uri, &manager).await.unwrap();
+
+        let brand = manager.get_variables("--vite-brand").await;
+        assert_eq!(brand.len(), 1);
+        assert_eq!(brand[0].value, "#123456");
+        assert_eq!(brand[0].selector, ":root");
+        let brand_range = brand[0].name_range.expect("name range");
+        assert_eq!(
+            &text[text
+                .lines()
+                .take(brand_range.start.line as usize)
+                .map(|line| line.len() + 1)
+                .sum::<usize>()
+                + brand_range.start.character as usize
+                ..text
+                    .lines()
+                    .take(brand_range.end.line as usize)
+                    .map(|line| line.len() + 1)
+                    .sum::<usize>()
+                    + brand_range.end.character as usize],
+            "--vite-brand"
+        );
+
+        let accent = manager.get_variables("--vite-accent").await;
+        assert_eq!(accent.len(), 1);
+        assert_eq!(accent[0].value, "rebeccapurple");
+        assert_eq!(accent[0].selector, ".theme");
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_accepts_commonjs_and_rejects_dynamic_or_unrelated_values() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.cjs");
+        parse_config_document(
+            r#"
+                const { defineConfig: configure } = require("vite");
+                module.exports = configure({
+                    additionalData: ":root { --wrong-level: red; }",
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: () => ":root { --dynamic: red; }",
+                            },
+                            less: {
+                                additionalData: ":root { --vite-cjs: blue; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--vite-cjs").await.len(), 1);
+        assert!(manager.get_variables("--wrong-level").await.is_empty());
+        assert!(manager.get_variables("--dynamic").await.is_empty());
+    }
+
     #[tokio::test]
     async fn extracts_static_font_variables_from_current_and_legacy_locations() {
         let manager = CssVariableManager::new(Config::default());

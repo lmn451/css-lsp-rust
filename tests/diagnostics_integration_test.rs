@@ -1255,6 +1255,102 @@ async fn test_initialize_indexes_astro_font_css_variables() {
 }
 
 #[tokio::test]
+async fn test_initialize_indexes_vite_preprocessor_additional_data() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-vite-additional-data-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("vite.config.mjs"),
+        r#"
+            import { defineConfig } from "vite";
+
+            export default defineConfig({
+                css: {
+                    preprocessorOptions: {
+                        scss: {
+                            additionalData: `:root {
+                                --vite-brand: #123456;
+                            }`,
+                        },
+                    },
+                },
+            });
+        "#,
+    )
+    .unwrap();
+
+    let root_uri = Uri::from_file_path(&root).unwrap();
+    let config_uri = Uri::from_file_path(root.join("vite.config.mjs")).unwrap();
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+
+    let symbols = workspace_symbols(&mut service, "--vite-brand").await;
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].location.uri, config_uri);
+
+    let diagnostic_uri = Uri::from_file_path(root.join("diagnostic.css")).unwrap();
+    open_document(
+        &mut service,
+        diagnostic_uri.clone(),
+        "css",
+        ".card { color: var(--vite-brand); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &diagnostic_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
+
+    let completion_uri = Uri::from_file_path(root.join("completion.css")).unwrap();
+    let completion_text = ".card { color: var(--";
+    open_document(
+        &mut service,
+        completion_uri.clone(),
+        "css",
+        completion_text,
+        1,
+    )
+    .await;
+    let labels = completion_labels(
+        &mut service,
+        completion_uri,
+        ls_types::Position::new(0, completion_text.len() as u32),
+    )
+    .await;
+    assert!(labels.contains(&"--vite-brand".to_string()));
+
+    let definition_uri = Uri::from_file_path(root.join("definition.css")).unwrap();
+    let definition_text = ".card { color: var(--vite-brand); }";
+    open_document(
+        &mut service,
+        definition_uri.clone(),
+        "css",
+        definition_text,
+        1,
+    )
+    .await;
+    let definition_request = Request::build("textDocument/definition")
+        .id(45)
+        .params(serde_json::json!({
+            "textDocument": { "uri": definition_uri },
+            "position": position_of(definition_text, "--vite-brand")
+        }))
+        .finish();
+    let definition = send_request_for_result(&mut service, definition_request)
+        .await
+        .expect("definition should resolve");
+    let definition: ls_types::GotoDefinitionResponse = serde_json::from_value(definition).unwrap();
+    let ls_types::GotoDefinitionResponse::Scalar(location) = definition else {
+        panic!("expected a scalar definition location");
+    };
+    assert_eq!(location.uri, config_uri);
+    assert_eq!(location.range, symbols[0].location.range);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn test_initialize_scans_legacy_root_path() {
     let (root, _root_uri) = workspace_fixture("root-path", "--legacy-color");
     let mut service = setup_scan_service(None, None).await;
