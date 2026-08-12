@@ -4,8 +4,8 @@ use std::path::Path;
 use ls_types::{Range, Uri};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
-    BlockStatement, CatchClause, ExportDefaultDeclaration, Expression, ForInStatement,
+    Argument, ArrayExpression, ArrayExpressionElement, ArrowFunctionBody, AssignmentExpression,
+    AssignmentTarget, BindingPattern, BlockStatement, CatchClause, Expression, ForInStatement,
     ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, ImportDeclaration,
     ImportDeclarationSpecifier, MemberExpression, ObjectExpression, ObjectPropertyKind, Program,
     PropertyKey, SimpleAssignmentTarget, Statement, SwitchStatement, UpdateExpression,
@@ -165,7 +165,8 @@ fn extract_config_variables(
     if supports_commonjs(path) {
         imports.collect_commonjs_program(&parsed.program);
     }
-    let static_strings = collect_static_string_values(&parsed.program, text);
+    let static_resolver = collect_static_resolver(&parsed.program, text);
+    let expression_resolver = StaticExpressionResolver::new(&static_resolver);
 
     let has_esm_default = parsed
         .program
@@ -177,10 +178,10 @@ fn extract_config_variables(
             let mut extractor = AstroFontExtractor {
                 source: text,
                 define_config_bindings: imports.define_config_bindings,
-                static_strings,
+                expression_resolver,
                 variables: Vec::new(),
             };
-            extractor.visit_program(&parsed.program);
+            extractor.extract_esm_program(&parsed.program);
             if supports_commonjs(path) && !has_esm_default {
                 extractor.extract_commonjs_program(&parsed.program);
             }
@@ -193,10 +194,10 @@ fn extract_config_variables(
             let mut extractor = ViteAdditionalDataExtractor {
                 source: text,
                 define_config_bindings: imports.define_config_bindings,
-                static_strings,
+                expression_resolver,
                 css_snippets: Vec::new(),
             };
-            extractor.visit_program(&parsed.program);
+            extractor.extract_esm_program(&parsed.program);
             if supports_commonjs(path) && !has_esm_default {
                 extractor.extract_commonjs_program(&parsed.program);
             }
@@ -230,6 +231,128 @@ struct ExtractedCssSnippet {
 struct ResolvedStaticString {
     content_span: Span,
     available_after: u32,
+}
+
+#[derive(Clone, Copy)]
+struct StaticExpressionResolver<'a> {
+    strings: &'a HashMap<String, ResolvedStaticString>,
+    bindings: &'a HashMap<String, &'a Expression<'a>>,
+    assigned_names: &'a HashSet<String>,
+}
+
+enum ResolvedProperty<'a> {
+    Known(&'a Expression<'a>),
+    Unknown,
+}
+
+impl<'a> StaticExpressionResolver<'a> {
+    fn new(static_strings: &'a StaticStringResolver<'a, '_>) -> Self {
+        Self {
+            strings: &static_strings.resolved_strings,
+            bindings: &static_strings.bindings,
+            assigned_names: &static_strings.assigned_names,
+        }
+    }
+
+    fn resolve_expression(
+        &self,
+        expression: &'a Expression<'a>,
+        depth: usize,
+        visits: &mut usize,
+        resolving: &mut HashSet<String>,
+    ) -> Option<&'a Expression<'a>> {
+        if depth >= MAX_STATIC_STRING_DEPTH || *visits >= MAX_STATIC_STRING_VISITS {
+            return None;
+        }
+        *visits += 1;
+        let expression = unwrap_expression(expression);
+        let Expression::Identifier(identifier) = expression else {
+            return Some(expression);
+        };
+        let name = identifier.name.as_str();
+        if self.assigned_names.contains(name) || !resolving.insert(name.to_string()) {
+            return None;
+        }
+        let init = self.bindings.get(name)?;
+        if init.span().end > identifier.span.end {
+            resolving.remove(name);
+            return None;
+        }
+        let result = self.resolve_expression(init, depth + 1, visits, resolving);
+        resolving.remove(name);
+        result
+    }
+
+    fn as_object(&self, expression: &'a Expression<'a>) -> Option<&'a ObjectExpression<'a>> {
+        let mut visits = 0;
+        let mut resolving = HashSet::new();
+        self.resolve_expression(expression, 0, &mut visits, &mut resolving)
+            .and_then(as_object_expression)
+    }
+
+    fn as_array(&self, expression: &'a Expression<'a>) -> Option<&'a ArrayExpression<'a>> {
+        let mut visits = 0;
+        let mut resolving = HashSet::new();
+        match self.resolve_expression(expression, 0, &mut visits, &mut resolving)? {
+            Expression::ArrayExpression(array) => Some(array.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn property(
+        &self,
+        object: &'a ObjectExpression<'a>,
+        name: &str,
+    ) -> Option<ResolvedProperty<'a>> {
+        let mut unknown_after_match = false;
+        for property in object.properties.iter().rev() {
+            match property {
+                ObjectPropertyKind::ObjectProperty(property) => {
+                    let matches = if property.computed {
+                        property.key.is_specific_string_literal(name)
+                    } else {
+                        property_key_matches(&property.key, name)
+                    };
+                    if matches {
+                        return (!unknown_after_match)
+                            .then_some(ResolvedProperty::Known(&property.value));
+                    }
+                    if property.computed && property.key.name().is_none() {
+                        unknown_after_match = true;
+                    }
+                }
+                ObjectPropertyKind::SpreadProperty(spread) => {
+                    let Some(spread_object) = self.as_object(&spread.argument) else {
+                        unknown_after_match = true;
+                        continue;
+                    };
+                    match self.property(spread_object, name) {
+                        Some(ResolvedProperty::Known(value)) if !unknown_after_match => {
+                            return Some(ResolvedProperty::Known(value));
+                        }
+                        Some(_) => return Some(ResolvedProperty::Unknown),
+                        None => {}
+                    }
+                }
+            }
+        }
+        if unknown_after_match {
+            Some(ResolvedProperty::Unknown)
+        } else {
+            None
+        }
+    }
+
+    fn property_value(
+        &self,
+        object: &'a ObjectExpression<'a>,
+        name: &str,
+    ) -> Option<&'a Expression<'a>> {
+        match self.property(object, name)? {
+            ResolvedProperty::Known(value) => Some(value),
+            ResolvedProperty::Unknown => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -497,6 +620,7 @@ impl<'a> Visit<'a> for AssignedBindingCollector {
 struct StaticStringResolver<'a, 's> {
     source: &'s str,
     bindings: HashMap<String, &'a Expression<'a>>,
+    resolved_strings: HashMap<String, ResolvedStaticString>,
     assigned_names: HashSet<String>,
 }
 
@@ -537,12 +661,14 @@ impl<'a, 's> StaticStringResolver<'a, 's> {
         Self {
             source,
             bindings,
+            resolved_strings: HashMap::new(),
             assigned_names: assignments.names,
         }
     }
 
-    fn resolve_all(&self) -> HashMap<String, ResolvedStaticString> {
-        self.bindings
+    fn resolve_all(&mut self) {
+        self.resolved_strings = self
+            .bindings
             .iter()
             .filter_map(|(name, init)| {
                 if self.assigned_names.contains(name) {
@@ -560,7 +686,7 @@ impl<'a, 's> StaticStringResolver<'a, 's> {
                     },
                 ))
             })
-            .collect()
+            .collect();
     }
 
     fn resolve_expression(
@@ -600,11 +726,13 @@ impl<'a, 's> StaticStringResolver<'a, 's> {
     }
 }
 
-fn collect_static_string_values(
-    program: &Program<'_>,
-    source: &str,
-) -> HashMap<String, ResolvedStaticString> {
-    StaticStringResolver::from_program(program, source).resolve_all()
+fn collect_static_resolver<'a, 's>(
+    program: &'a Program<'a>,
+    source: &'s str,
+) -> StaticStringResolver<'a, 's> {
+    let mut resolver = StaticStringResolver::from_program(program, source);
+    resolver.resolve_all();
+    resolver
 }
 
 struct DefineConfigImportCollector<'s> {
@@ -687,60 +815,85 @@ impl<'a> Visit<'a> for DefineConfigImportCollector<'_> {
     }
 }
 
-struct AstroFontExtractor<'s> {
+struct AstroFontExtractor<'a, 's> {
     source: &'s str,
     define_config_bindings: HashSet<String>,
-    static_strings: HashMap<String, ResolvedStaticString>,
+    expression_resolver: StaticExpressionResolver<'a>,
     variables: Vec<ExtractedVariable>,
 }
 
-impl AstroFontExtractor<'_> {
-    fn extract_default_expression<'a>(&mut self, expression: &'a Expression<'a>) {
-        if let Some(config) =
-            config_object_from_expression(expression, &self.define_config_bindings)
-        {
+impl<'a, 's> AstroFontExtractor<'a, 's> {
+    fn extract_esm_program(&mut self, program: &'a Program<'a>) {
+        for statement in &program.body {
+            if let Statement::ExportDefaultDeclaration(declaration) = statement {
+                if let Some(expression) = declaration.declaration.as_expression() {
+                    self.extract_default_expression(expression);
+                }
+            }
+        }
+    }
+
+    fn extract_default_expression(&mut self, expression: &'a Expression<'a>) {
+        if let Some(config) = config_object_from_expression(
+            expression,
+            &self.define_config_bindings,
+            &self.expression_resolver,
+        ) {
             self.extract_astro_config(config);
         }
     }
 
-    fn extract_commonjs_program<'a>(&mut self, program: &'a Program<'a>) {
-        if let Some(config) =
-            commonjs_config_object(program, self.source, &self.define_config_bindings)
-        {
+    fn extract_commonjs_program(&mut self, program: &'a Program<'a>) {
+        if let Some(config) = commonjs_config_object(
+            program,
+            self.source,
+            &self.define_config_bindings,
+            &self.expression_resolver,
+        ) {
             self.extract_astro_config(config);
         }
     }
 
-    fn extract_astro_config<'a>(&mut self, config: &'a ObjectExpression<'a>) {
-        if let Some(fonts) = object_property(config, "fonts").and_then(expression_as_array) {
+    fn extract_astro_config(&mut self, config: &'a ObjectExpression<'a>) {
+        if let Some(fonts) = self
+            .expression_resolver
+            .property_value(config, "fonts")
+            .and_then(|value| self.expression_resolver.as_array(value))
+        {
             self.extract_fonts(fonts);
         }
 
-        if let Some(experimental) = object_property(config, "experimental")
-            .map(unwrap_expression)
-            .and_then(as_object_expression)
+        if let Some(experimental) = self
+            .expression_resolver
+            .property_value(config, "experimental")
+            .and_then(|value| self.expression_resolver.as_object(value))
         {
-            if let Some(fonts) =
-                object_property(experimental, "fonts").and_then(expression_as_array)
+            if let Some(fonts) = self
+                .expression_resolver
+                .property_value(experimental, "fonts")
+                .and_then(|value| self.expression_resolver.as_array(value))
             {
                 self.extract_fonts(fonts);
             }
         }
     }
 
-    fn extract_fonts<'a>(&mut self, fonts: &'a ArrayExpression<'a>) {
+    fn extract_fonts(&mut self, fonts: &'a ArrayExpression<'a>) {
         for element in &fonts.elements {
-            let Some(expression) = element.as_expression() else {
+            if let ArrayExpressionElement::SpreadElement(spread) = element {
+                if let Some(array) = self.expression_resolver.as_array(&spread.argument) {
+                    self.extract_fonts(array);
+                }
+                continue;
+            }
+            let Some(font) = self.array_element_object(element) else {
                 continue;
             };
-            let Some(font) = as_object_expression(unwrap_expression(expression)) else {
-                continue;
-            };
-            let Some(property) = object_property_node(font, "cssVariable") else {
+            let Some(value) = self.expression_resolver.property_value(font, "cssVariable") else {
                 continue;
             };
             let Some((name, name_span)) =
-                static_string_value(&property.value, self.source, &self.static_strings)
+                static_string_value(value, self.source, self.expression_resolver.strings)
             else {
                 continue;
             };
@@ -757,75 +910,92 @@ impl AstroFontExtractor<'_> {
 
             self.variables.push(ExtractedVariable {
                 name,
-                declaration_span: if matches!(
-                    unwrap_expression(&property.value),
-                    Expression::Identifier(_)
-                ) {
-                    name_span
-                } else {
-                    property.span
-                },
+                declaration_span: name_span,
                 name_span,
             });
         }
     }
-}
 
-impl<'a> Visit<'a> for AstroFontExtractor<'_> {
-    fn visit_export_default_declaration(&mut self, declaration: &ExportDefaultDeclaration<'a>) {
-        if let Some(expression) = declaration.declaration.as_expression() {
-            self.extract_default_expression(expression);
-        }
+    fn array_element_object(
+        &self,
+        element: &'a ArrayExpressionElement<'a>,
+    ) -> Option<&'a ObjectExpression<'a>> {
+        let expression = element.as_expression()?;
+        self.expression_resolver.as_object(expression)
     }
 }
 
-struct ViteAdditionalDataExtractor<'s> {
+struct ViteAdditionalDataExtractor<'a, 's> {
     source: &'s str,
     define_config_bindings: HashSet<String>,
-    static_strings: HashMap<String, ResolvedStaticString>,
+    expression_resolver: StaticExpressionResolver<'a>,
     css_snippets: Vec<ExtractedCssSnippet>,
 }
 
-impl ViteAdditionalDataExtractor<'_> {
-    fn extract_default_expression<'a>(&mut self, expression: &'a Expression<'a>) {
-        if let Some(config) =
-            config_object_from_expression(expression, &self.define_config_bindings)
-        {
+impl<'a, 's> ViteAdditionalDataExtractor<'a, 's> {
+    fn extract_esm_program(&mut self, program: &'a Program<'a>) {
+        for statement in &program.body {
+            if let Statement::ExportDefaultDeclaration(declaration) = statement {
+                if let Some(expression) = declaration.declaration.as_expression() {
+                    self.extract_default_expression(expression);
+                }
+            }
+        }
+    }
+
+    fn extract_default_expression(&mut self, expression: &'a Expression<'a>) {
+        if let Some(config) = config_object_from_expression(
+            expression,
+            &self.define_config_bindings,
+            &self.expression_resolver,
+        ) {
             self.extract_vite_config(config);
         }
     }
 
-    fn extract_commonjs_program<'a>(&mut self, program: &'a Program<'a>) {
-        if let Some(config) =
-            commonjs_config_object(program, self.source, &self.define_config_bindings)
-        {
+    fn extract_commonjs_program(&mut self, program: &'a Program<'a>) {
+        if let Some(config) = commonjs_config_object(
+            program,
+            self.source,
+            &self.define_config_bindings,
+            &self.expression_resolver,
+        ) {
             self.extract_vite_config(config);
         }
     }
 
-    fn extract_vite_config<'a>(&mut self, config: &'a ObjectExpression<'a>) {
-        let Some(preprocessor_options) = object_property(config, "css")
-            .map(unwrap_expression)
-            .and_then(as_object_expression)
-            .and_then(|css| object_property(css, "preprocessorOptions"))
-            .map(unwrap_expression)
-            .and_then(as_object_expression)
+    fn extract_vite_config(&mut self, config: &'a ObjectExpression<'a>) {
+        let Some(preprocessor_options) = self
+            .expression_resolver
+            .property_value(config, "css")
+            .and_then(|value| self.expression_resolver.as_object(value))
+            .and_then(|css| {
+                self.expression_resolver
+                    .property_value(css, "preprocessorOptions")
+            })
+            .and_then(|value| self.expression_resolver.as_object(value))
         else {
             return;
         };
 
-        let Some(options) = object_property(preprocessor_options, VITE_PREPROCESSOR)
-            .map(unwrap_expression)
-            .and_then(as_object_expression)
+        let Some(options) = self
+            .expression_resolver
+            .property_value(preprocessor_options, VITE_PREPROCESSOR)
+            .and_then(|value| self.expression_resolver.as_object(value))
         else {
             return;
         };
-        let Some(additional_data) = object_property(options, "additionalData") else {
+        let Some(additional_data) = self
+            .expression_resolver
+            .property_value(options, "additionalData")
+        else {
             return;
         };
-        let Some((text, content_span)) =
-            static_string_value(additional_data, self.source, &self.static_strings)
-        else {
+        let Some((text, content_span)) = static_string_value(
+            additional_data,
+            self.source,
+            self.expression_resolver.strings,
+        ) else {
             return;
         };
         if contains_unsupported_scss_control_flow(&text) {
@@ -836,20 +1006,21 @@ impl ViteAdditionalDataExtractor<'_> {
     }
 }
 
-impl<'a> Visit<'a> for ViteAdditionalDataExtractor<'_> {
-    fn visit_export_default_declaration(&mut self, declaration: &ExportDefaultDeclaration<'a>) {
-        if let Some(expression) = declaration.declaration.as_expression() {
-            self.extract_default_expression(expression);
-        }
-    }
-}
-
 fn config_object_from_expression<'a>(
     expression: &'a Expression<'a>,
     define_config_bindings: &HashSet<String>,
+    resolver: &StaticExpressionResolver<'a>,
 ) -> Option<&'a ObjectExpression<'a>> {
     match unwrap_expression(expression) {
         Expression::ObjectExpression(object) => Some(object.as_ref()),
+        Expression::Identifier(_) => resolver.as_object(expression),
+        Expression::ArrowFunctionExpression(function) => {
+            config_object_from_arrow_body(&function.body, resolver)
+        }
+        Expression::FunctionExpression(function) => function
+            .body
+            .as_deref()
+            .and_then(|body| config_object_from_function_body(body, resolver)),
         Expression::CallExpression(call)
             if matches!(
                 &call.callee,
@@ -860,17 +1031,45 @@ fn config_object_from_expression<'a>(
             call.arguments
                 .first()
                 .and_then(|argument| argument.as_expression())
-                .map(unwrap_expression)
-                .and_then(as_object_expression)
+                .and_then(|expression| {
+                    config_object_from_expression(expression, define_config_bindings, resolver)
+                })
         }
         _ => None,
     }
+}
+
+fn config_object_from_arrow_body<'a>(
+    body: &'a ArrowFunctionBody<'a>,
+    resolver: &StaticExpressionResolver<'a>,
+) -> Option<&'a ObjectExpression<'a>> {
+    if let Some(expression) = body.as_expression() {
+        resolver.as_object(expression)
+    } else if let ArrowFunctionBody::FunctionBody(body) = body {
+        config_object_from_function_body(body, resolver)
+    } else {
+        None
+    }
+}
+
+fn config_object_from_function_body<'a>(
+    body: &'a oxc_ast::ast::FunctionBody<'a>,
+    resolver: &StaticExpressionResolver<'a>,
+) -> Option<&'a ObjectExpression<'a>> {
+    let [Statement::ReturnStatement(statement)] = body.statements.as_slice() else {
+        return None;
+    };
+    statement
+        .argument
+        .as_ref()
+        .and_then(|expression| resolver.as_object(expression))
 }
 
 fn commonjs_config_object<'a>(
     program: &'a Program<'a>,
     source: &str,
     define_config_bindings: &HashSet<String>,
+    resolver: &StaticExpressionResolver<'a>,
 ) -> Option<&'a ObjectExpression<'a>> {
     for statement in program.body.iter().rev() {
         let Statement::ExpressionStatement(statement) = statement else {
@@ -881,7 +1080,11 @@ fn commonjs_config_object<'a>(
             continue;
         };
         if is_module_exports_assignment(assignment, source) {
-            return config_object_from_expression(&assignment.right, define_config_bindings);
+            return config_object_from_expression(
+                &assignment.right,
+                define_config_bindings,
+                resolver,
+            );
         }
     }
     None
@@ -908,36 +1111,6 @@ fn unwrap_expression<'a>(mut expression: &'a Expression<'a>) -> &'a Expression<'
     }
 }
 
-fn object_property_node<'a>(
-    object: &'a ObjectExpression<'a>,
-    name: &str,
-) -> Option<&'a oxc_ast::ast::ObjectProperty<'a>> {
-    for property in object.properties.iter().rev() {
-        let ObjectPropertyKind::ObjectProperty(property) = property else {
-            return None;
-        };
-
-        let matches = if property.computed {
-            property.key.is_specific_string_literal(name)
-        } else {
-            property_key_matches(&property.key, name)
-        };
-        if matches {
-            return Some(property.as_ref());
-        }
-
-        if property.computed && property.key.name().is_none() {
-            return None;
-        }
-    }
-
-    None
-}
-
-fn object_property<'a>(object: &'a ObjectExpression<'a>, name: &str) -> Option<&'a Expression<'a>> {
-    object_property_node(object, name).map(|property| &property.value)
-}
-
 fn property_key_matches(key: &PropertyKey<'_>, name: &str) -> bool {
     key.is_specific_id(name) || key.is_specific_string_literal(name)
 }
@@ -955,13 +1128,6 @@ fn is_supported_custom_property_name(name: &str) -> bool {
 fn as_object_expression<'a>(expression: &'a Expression<'a>) -> Option<&'a ObjectExpression<'a>> {
     match expression {
         Expression::ObjectExpression(object) => Some(object.as_ref()),
-        _ => None,
-    }
-}
-
-fn expression_as_array<'a>(expression: &'a Expression<'a>) -> Option<&'a ArrayExpression<'a>> {
-    match unwrap_expression(expression) {
-        Expression::ArrayExpression(array) => Some(array.as_ref()),
         _ => None,
     }
 }
@@ -1316,7 +1482,7 @@ mod tests {
         let allocator = Allocator::default();
         let source_type = SourceType::from_path(Path::new("astro.config.ts")).unwrap();
         let parsed = Parser::new(&allocator, &text, source_type).parse();
-        let values = collect_static_string_values(&parsed.program, &text);
+        let values = collect_static_resolver(&parsed.program, &text).resolved_strings;
 
         assert!(!values.contains_key("REASSIGNED"));
         assert!(!values.contains_key("UPDATED"));
@@ -1417,10 +1583,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            vite_manager
-                .get_variables("--vite-structured")
-                .await
-                .len(),
+            vite_manager.get_variables("--vite-structured").await.len(),
             1
         );
     }
