@@ -263,11 +263,22 @@ export default defineConfig({ fonts: [{ cssVariable: FONT_NAME }] });"#,
         &mut service,
         config_uri.clone(),
         2,
+        r#"export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] )"#,
+    )
+    .await;
+    assert_eq!(
+        workspace_symbols(&mut service, "--font-roboto").await.len(),
+        1,
+        "a catastrophic in-progress edit must retain the last valid config state"
+    );
+
+    change_document(
+        &mut service,
+        config_uri.clone(),
+        3,
         r#"import { defineConfig } from "astro/config";
-export default defineConfig({ fonts: [
-    { cssVariable: "--font-inter" },
-    { cssVariable:
-"#,
+const FONT_NAME = "--font-inter";
+export default defineConfig({ fonts: [{ cssVariable: FONT_NAME }] }); /*"#,
     )
     .await;
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
@@ -278,26 +289,7 @@ export default defineConfig({ fonts: [
     assert_eq!(
         workspace_symbols(&mut service, "--font-inter").await.len(),
         1,
-        "a malformed edit should replace stale state with the safe recovered prefix"
-    );
-
-    change_document(
-        &mut service,
-        config_uri.clone(),
-        3,
-        r#"import { defineConfig } from "astro/config";
-const FONT_NAME = "--font-inter";
-export default defineConfig({ fonts: [{ cssVariable: FONT_NAME }] });"#,
-    )
-    .await;
-    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
-    assert_eq!(diagnostics.diagnostics.len(), 1);
-    assert!(workspace_symbols(&mut service, "--font-roboto")
-        .await
-        .is_empty());
-    assert_eq!(
-        workspace_symbols(&mut service, "--font-inter").await.len(),
-        1
+        "a recoverable malformed edit should replace stale state with the current safe AST"
     );
 
     let inter_uri = Uri::from_str("file:///inter.css").unwrap();

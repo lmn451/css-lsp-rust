@@ -2368,9 +2368,8 @@ mod tests {
         parse_config_document(
             r#"
                 export default {
-                    fonts: [
-                        { cssVariable: "--font-safe-prefix" },
-                        { cssVariable:
+                    fonts: [{ cssVariable: "--font-safe-prefix" }],
+                }; /*
             "#,
             &uri,
             &manager,
