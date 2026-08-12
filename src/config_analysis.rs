@@ -166,6 +166,7 @@ fn extract_config_variables(
     if supports_commonjs(path) {
         imports.collect_commonjs_program(&parsed.program);
     }
+    imports.reject_mutated_helpers(&parsed.program);
     let static_resolver = collect_static_resolver(&parsed.program, text);
     let expression_resolver = StaticExpressionResolver::new(&static_resolver);
 
@@ -435,6 +436,7 @@ struct AssignedBindingCollector {
     tracked_names: HashSet<String>,
     names: HashSet<String>,
     shadowed_scopes: Vec<HashSet<String>>,
+    tracked_member_property: Option<&'static str>,
 }
 
 impl AssignedBindingCollector {
@@ -443,7 +445,13 @@ impl AssignedBindingCollector {
             tracked_names,
             names: HashSet::new(),
             shadowed_scopes: Vec::new(),
+            tracked_member_property: None,
         }
+    }
+
+    fn with_member_property(mut self, property: &'static str) -> Self {
+        self.tracked_member_property = Some(property);
+        self
     }
 
     fn record_names(&mut self, names: HashSet<String>) {
@@ -463,6 +471,19 @@ impl AssignedBindingCollector {
         let mut collector = AssignmentTargetNameCollector::default();
         collector.visit_assignment_target(target);
         self.record_names(collector.names);
+
+        let Some(property) = self.tracked_member_property else {
+            return;
+        };
+        let Some(member) = target.as_member_expression() else {
+            return;
+        };
+        if member.static_property_name() != Some(property) {
+            return;
+        }
+        if let Expression::Identifier(identifier) = unwrap_expression(member.object()) {
+            self.record_names(HashSet::from([identifier.name.as_str().to_string()]));
+        }
     }
 
     fn record_simple_assignment_target<'a>(&mut self, target: &SimpleAssignmentTarget<'a>) {
@@ -784,10 +805,29 @@ impl<'s> DefineConfigImportCollector<'s> {
             let Statement::VariableDeclaration(declaration) = statement else {
                 continue;
             };
+            if !declaration.kind.is_const() {
+                continue;
+            }
             for declarator in &declaration.declarations {
                 self.collect_commonjs_declarator(declarator);
             }
         }
+    }
+
+    fn reject_mutated_helpers(&mut self, program: &Program<'_>) {
+        let tracked_names = self
+            .define_config_bindings
+            .iter()
+            .chain(&self.define_config_namespaces)
+            .cloned()
+            .collect();
+        let mut assignments =
+            AssignedBindingCollector::new(tracked_names).with_member_property("defineConfig");
+        assignments.visit_program(program);
+        self.define_config_bindings
+            .retain(|name| !assignments.names.contains(name));
+        self.define_config_namespaces
+            .retain(|name| !assignments.names.contains(name));
     }
 
     fn collect_commonjs_declarator(&mut self, declarator: &VariableDeclarator<'_>) {
