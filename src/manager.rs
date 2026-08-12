@@ -185,6 +185,15 @@ impl CssVariableManager {
 
     /// Add a variable usage
     pub async fn add_usage(&self, usage: CssVariableUsage) {
+        let max_documents = self.config.read().await.max_documents;
+        let mut tracked = self.tracked_documents.write().await;
+        if !tracked.contains(&usage.uri) {
+            if max_documents > 0 && tracked.len() >= max_documents {
+                return;
+            }
+            tracked.insert(usage.uri.clone());
+        }
+
         let mut usages = self.usages.write().await;
         usages
             .entry(usage.name.clone())

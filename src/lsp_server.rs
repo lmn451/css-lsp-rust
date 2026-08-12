@@ -682,20 +682,12 @@ impl LanguageServer for CssVariableLsp {
         // We accept either:
         // - a flat object matching Config fields
         // - or a namespaced object { "cssVariableLsp": { ... } }
-        let patch =
-            serde_json::from_value::<ClientConfigPatch>(params.settings.clone()).or_else(|_| {
-                params
-                    .settings
-                    .get("cssVariableLsp")
-                    .cloned()
-                    .ok_or_else(|| {
-                        serde_json::Error::io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "missing cssVariableLsp key",
-                        ))
-                    })
-                    .and_then(serde_json::from_value::<ClientConfigPatch>)
-            });
+        let settings = params
+            .settings
+            .get("cssVariableLsp")
+            .cloned()
+            .unwrap_or(params.settings);
+        let patch = serde_json::from_value::<ClientConfigPatch>(settings);
 
         let patch = match patch {
             Ok(patch) => patch,

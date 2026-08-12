@@ -6,15 +6,18 @@ use std::time::Instant;
 use ls_types::{Range, Uri};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpression, ArrayExpressionElement, ArrowFunctionBody, AssignmentExpression,
-    AssignmentTarget, BindingPattern, BlockStatement, CatchClause, Expression, ForInStatement,
-    ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, ImportDeclaration,
-    ImportDeclarationSpecifier, MemberExpression, ObjectExpression, ObjectPropertyKind, Program,
-    PropertyKey, SimpleAssignmentTarget, Statement, SwitchStatement, UpdateExpression,
-    VariableDeclaration, VariableDeclarator,
+    Argument, ArrayExpression, ArrayExpressionElement, ArrowFunctionBody, ArrowFunctionExpression,
+    AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CatchClause,
+    Expression, ForInStatement, ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft,
+    FormalParameters, ImportDeclaration, ImportDeclarationSpecifier, MemberExpression,
+    ObjectExpression, ObjectPropertyKind, Program, PropertyKey, SimpleAssignmentTarget, Statement,
+    SwitchStatement, UpdateExpression, VariableDeclaration, VariableDeclarator,
 };
 use oxc_ast_visit::{
-    walk::{walk_assignment_expression, walk_block_statement, walk_update_expression},
+    walk::{
+        walk_assignment_expression, walk_block_statement, walk_formal_parameters,
+        walk_update_expression,
+    },
     Visit,
 };
 use oxc_parser::Parser;
@@ -489,6 +492,7 @@ struct AssignedBindingCollector {
     tracked_names: HashSet<String>,
     names: HashSet<String>,
     shadowed_scopes: Vec<HashSet<String>>,
+    pending_function_scopes: Vec<HashSet<String>>,
     tracked_member_property: Option<&'static str>,
 }
 
@@ -498,6 +502,7 @@ impl AssignedBindingCollector {
             tracked_names,
             names: HashSet::new(),
             shadowed_scopes: Vec::new(),
+            pending_function_scopes: Vec::new(),
             tracked_member_property: None,
         }
     }
@@ -588,11 +593,23 @@ impl AssignedBindingCollector {
     }
 
     fn block_shadow_names(block: &BlockStatement<'_>) -> HashSet<String> {
+        Self::statement_shadow_names(&block.body, true)
+    }
+
+    fn function_body_shadow_names(body: &oxc_ast::ast::FunctionBody<'_>) -> HashSet<String> {
+        Self::statement_shadow_names(&body.statements, false)
+    }
+
+    fn statement_shadow_names(statements: &[Statement<'_>], lexical_only: bool) -> HashSet<String> {
         let mut names = HashSet::new();
-        for statement in &block.body {
+        for statement in statements {
             match statement {
                 Statement::VariableDeclaration(declaration) => {
-                    names.extend(Self::lexical_declaration_names(declaration));
+                    if lexical_only {
+                        names.extend(Self::lexical_declaration_names(declaration));
+                    } else {
+                        names.extend(Self::declaration_names(declaration));
+                    }
                 }
                 Statement::FunctionDeclaration(function) => {
                     if let Some(identifier) = &function.id {
@@ -653,8 +670,30 @@ impl<'a> Visit<'a> for AssignedBindingCollector {
         walk_update_expression(self, expression);
     }
 
+    fn visit_formal_parameters(&mut self, parameters: &FormalParameters<'a>) {
+        let mut names = BindingNameCollector::default();
+        names.visit_formal_parameters(parameters);
+        self.pending_function_scopes.push(names.names.clone());
+        self.with_shadowed_scope(names.names, |collector| {
+            walk_formal_parameters(collector, parameters);
+        });
+    }
+
     fn visit_function_body(&mut self, body: &oxc_ast::ast::FunctionBody<'a>) {
-        oxc_ast_visit::walk::walk_function_body(self, body);
+        let mut names = self.pending_function_scopes.pop().unwrap_or_default();
+        names.extend(Self::function_body_shadow_names(body));
+        self.with_shadowed_scope(names, |collector| {
+            oxc_ast_visit::walk::walk_function_body(collector, body);
+        });
+    }
+
+    fn visit_arrow_function_expression(&mut self, expression: &ArrowFunctionExpression<'a>) {
+        let mut names = BindingNameCollector::default();
+        names.visit_formal_parameters(&expression.params);
+        self.with_shadowed_scope(names.names, |collector| {
+            walk_formal_parameters(collector, &expression.params);
+            collector.visit_arrow_function_body(&expression.body);
+        });
     }
 
     fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
@@ -2656,6 +2695,7 @@ mod tests {
             r#"
                 const vite = require("vite");
                 ((vite) => { vite.defineConfig = (value) => value; })({});
+                (function (vite) { vite.defineConfig = (value) => value; })({});
                 module.exports = vite.defineConfig({
                     css: {
                         preprocessorOptions: {
