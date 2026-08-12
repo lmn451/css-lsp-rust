@@ -731,6 +731,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn incremental_usage_insertion_respects_document_limits() {
+        let manager = CssVariableManager::new(Config {
+            max_documents: 1,
+            ..Config::default()
+        });
+        let first_uri = Uri::from_str("file:///first.css").unwrap();
+        let blocked_uri = Uri::from_str("file:///blocked.css").unwrap();
+
+        manager
+            .add_usage(create_test_usage(
+                "--first-dependency",
+                ".first",
+                first_uri.as_str(),
+            ))
+            .await;
+        manager
+            .add_usage(create_test_usage(
+                "--blocked-dependency",
+                ".blocked",
+                blocked_uri.as_str(),
+            ))
+            .await;
+
+        assert!(manager.get_document_uris().await.contains(&first_uri));
+        assert_eq!(manager.get_usages("--first-dependency").await.len(), 1);
+        assert!(manager.get_usages("--blocked-dependency").await.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_manager_get_references() {
         let manager = CssVariableManager::new(Config::default());
 

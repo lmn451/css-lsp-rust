@@ -2648,6 +2648,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn function_parameter_shadowing_does_not_mutate_define_config_helpers() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.cjs");
+
+        parse_config_document(
+            r#"
+                const vite = require("vite");
+                ((vite) => { vite.defineConfig = (value) => value; })({});
+                module.exports = vite.defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-outer-helper: red; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--vite-outer-helper").await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn the_last_top_level_commonjs_export_wins() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("astro.config.cts");

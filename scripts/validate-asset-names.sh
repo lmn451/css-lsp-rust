@@ -92,6 +92,12 @@ if [[ -f "${BUILD_SCRIPT}" ]]; then
     fi
   done
   echo -e "${GREEN}✓ Local release archives include project and third-party notices${NC}"
+
+  if grep -q "powershell.exe" "${BUILD_SCRIPT}" && ! grep -q "cygpath -w" "${BUILD_SCRIPT}"; then
+    echo -e "${RED}PowerShell fallback must convert POSIX archive paths with cygpath${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}✓ Windows PowerShell fallback converts archive paths${NC}"
 fi
 
 echo -e "\n${GREEN}Asset naming validation passed!${NC}"

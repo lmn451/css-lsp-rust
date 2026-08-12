@@ -1411,7 +1411,9 @@ async fn test_ignore_glob_configuration_changes_remove_generated_variables() {
         &mut service,
         "workspace/didChangeConfiguration",
         DidChangeConfigurationParams {
-            settings: serde_json::json!({"ignoreGlobs": ["astro.config.mjs"]}),
+            settings: serde_json::json!({
+                "cssVariableLsp": {"ignoreGlobs": ["astro.config.mjs"]}
+            }),
         },
     )
     .await;
