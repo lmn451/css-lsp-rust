@@ -1754,6 +1754,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cyclic_object_spreads_are_rejected_without_unbounded_recursion() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                const CONFIG = {
+                    fonts: [{ cssVariable: "--font-object-cycle" }],
+                    ...CONFIG,
+                };
+                export default CONFIG;
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--font-object-cycle")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn cyclic_and_unknown_array_spreads_reject_the_entire_fonts_value() {
+        for (name, spread) in [
+            ("--font-array-cycle", "...FONTS"),
+            ("--font-array-unknown", "...runtimeFonts"),
+        ] {
+            let manager = CssVariableManager::new(Config::default());
+            let uri = test_uri("astro.config.ts");
+            let text = format!(
+                r#"
+                    const FONTS = [{{ cssVariable: "{name}" }}, {spread}];
+                    export default {{ fonts: FONTS }};
+                "#
+            );
+            parse_config_document(&text, &uri, &manager).await.unwrap();
+            assert!(manager.get_variables(name).await.is_empty(), "{spread}");
+        }
+    }
+
+    #[tokio::test]
     async fn vite_extraction_accepts_commonjs_and_rejects_dynamic_or_unrelated_values() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("vite.config.cjs");
