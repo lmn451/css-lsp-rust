@@ -226,7 +226,6 @@ struct ExtractedCssSnippet {
 
 #[derive(Clone)]
 struct ResolvedStaticString {
-    value: String,
     content_span: Span,
     available_after: u32,
 }
@@ -312,12 +311,10 @@ impl<'a, 's> StaticStringResolver<'a, 's> {
 
                 let mut resolving = HashSet::from([name.clone()]);
                 let mut visits = 0;
-                let (value, content_span) =
-                    self.resolve_expression(init, 0, &mut visits, &mut resolving)?;
+                let content_span = self.resolve_expression(init, 0, &mut visits, &mut resolving)?;
                 Some((
                     name.clone(),
                     ResolvedStaticString {
-                        value,
                         content_span,
                         available_after: init.span().end,
                     },
@@ -332,15 +329,15 @@ impl<'a, 's> StaticStringResolver<'a, 's> {
         depth: usize,
         visits: &mut usize,
         resolving: &mut HashSet<String>,
-    ) -> Option<(String, Span)> {
+    ) -> Option<Span> {
         if depth >= MAX_STATIC_STRING_DEPTH || *visits >= MAX_STATIC_STRING_VISITS {
             return None;
         }
         *visits += 1;
 
         let expression = unwrap_expression(expression);
-        if let Some(value) = literal_static_string_value(expression, self.source) {
-            return Some(value);
+        if let Some(span) = literal_static_string_span(expression, self.source) {
+            return Some(span);
         }
 
         let Expression::Identifier(identifier) = expression else {
@@ -737,22 +734,19 @@ fn literal_content_span(span: Span) -> Span {
     }
 }
 
-fn literal_static_string_value(
-    expression: &Expression<'_>,
-    source: &str,
-) -> Option<(String, Span)> {
+fn literal_static_string_span(expression: &Expression<'_>, source: &str) -> Option<Span> {
     match expression {
         Expression::StringLiteral(literal) => {
             let span = literal_content_span(literal.span);
             let raw = source.get(span.start as usize..span.end as usize)?;
-            (raw == literal.value.as_str()).then_some((raw.to_string(), span))
+            (raw == literal.value.as_str()).then_some(span)
         }
         Expression::TemplateLiteral(template)
             if template.expressions.is_empty() && template.quasis.len() == 1 =>
         {
             let span = literal_content_span(template.span);
             let raw = source.get(span.start as usize..span.end as usize)?;
-            (!raw.contains('\\')).then_some((raw.to_string(), span))
+            (!raw.contains('\\')).then_some(span)
         }
         _ => None,
     }
@@ -764,16 +758,20 @@ fn static_string_value(
     static_strings: &HashMap<String, ResolvedStaticString>,
 ) -> Option<(String, Span)> {
     let expression = unwrap_expression(expression);
-    if let Some(value) = literal_static_string_value(expression, source) {
-        return Some(value);
-    }
-
-    let Expression::Identifier(identifier) = expression else {
-        return None;
+    let content_span = if let Some(span) = literal_static_string_span(expression, source) {
+        span
+    } else {
+        let Expression::Identifier(identifier) = expression else {
+            return None;
+        };
+        let value = static_strings.get(identifier.name.as_str())?;
+        if value.available_after > identifier.span.start {
+            return None;
+        }
+        value.content_span
     };
-    let value = static_strings.get(identifier.name.as_str())?;
-    (value.available_after <= identifier.span.start)
-        .then_some((value.value.clone(), value.content_span))
+    let value = source.get(content_span.start as usize..content_span.end as usize)?;
+    Some((value.to_string(), content_span))
 }
 
 fn contains_unsupported_scss_control_flow(source: &str) -> bool {
@@ -1067,7 +1065,11 @@ mod tests {
         assert!(!values.contains_key("CYCLE_A"));
         assert!(!values.contains_key("CYCLE_B"));
         assert!(!values.contains_key("VALUE_0"));
-        assert_eq!(values.get("VALUE_5").unwrap().value, "--font-depth");
+        let depth_span = values.get("VALUE_5").unwrap().content_span;
+        assert_eq!(
+            text.get(depth_span.start as usize..depth_span.end as usize),
+            Some("--font-depth")
+        );
     }
 
     #[tokio::test]
