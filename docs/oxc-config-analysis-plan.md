@@ -2,7 +2,10 @@
 
 ## Status
 
-Phases 0 through 2 are implemented on this branch for Astro font variables. Vite and other framework extractors remain future, use-case-driven work.
+Phases 0 through 2 are implemented for Astro font variables. The first Phase 3
+slice is implemented as a stacked change for static CSS custom properties in
+Vite's `css.preprocessorOptions.*.additionalData`. Other Vite and framework
+extractors remain future, use-case-driven work.
 
 The initial macOS aarch64 release build measured 8,039,360 bytes with Oxc versus 7,176,352 bytes on `master`, an increase of 863,008 bytes, or approximately 12%. This result is acceptable for the initial implementation but should continue to be tracked in release review.
 
@@ -78,7 +81,7 @@ Initial Astro set:
 - `astro.config.mts`
 - `astro.config.cts`
 
-Planned Vite set:
+Vite set:
 
 - `vite.config.js`
 - `vite.config.mjs`
@@ -348,6 +351,32 @@ Use the real LSP service for end-to-end tests:
 
 Vite support must be use-case driven. Parsing `vite.config.*` is not itself valuable unless an extractor produces CSS-language information.
 
+### Static preprocessor `additionalData`
+
+Vite documents
+[`css.preprocessorOptions[extension].additionalData`](https://vite.dev/config/shared-options.html#css-preprocessoroptions-extension-additionaldata)
+as code prepended to each stylesheet handled by that preprocessor. A static
+string can therefore contain real CSS custom-property declarations:
+
+```ts
+export default defineConfig({
+    css: {
+        preprocessorOptions: {
+            scss: {
+                additionalData: `:root { --brand-color: #123456; }`,
+            },
+        },
+    },
+});
+```
+
+The initial Vite extractor accepts only direct string literals and
+no-substitution template literals under `sass`, `scss`, `less`, `styl`, or
+`stylus`. It parses those snippets through the existing CSS parser so
+completion, diagnostics, symbols, and navigation preserve the source ranges in
+`vite.config.*`. Function-valued `additionalData`, escaped strings whose source
+does not match the decoded value, and unrelated properties are ignored.
+
 ### Initial candidates
 
 #### `define` constants
@@ -370,7 +399,11 @@ Known first-party or project-specific Vite plugins may have options that declare
 
 #### Aliases and CSS preprocessing
 
-Vite aliases, `css.preprocessorOptions`, and CSS Modules settings can influence file resolution and class naming, but they do not directly define CSS custom properties. Keep them out of scope until the language server has a feature that consumes them.
+Vite aliases, CSS Modules settings, and ordinary preprocessor options can
+influence file resolution and class naming, but they do not directly define CSS
+custom properties. Keep them out of scope until the language server has a
+feature that consumes them. Static `additionalData` is the narrow exception
+because Vite injects that source into processed stylesheets.
 
 ### Vite configuration forms
 

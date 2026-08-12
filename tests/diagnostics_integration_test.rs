@@ -1261,9 +1261,7 @@ async fn test_initialize_indexes_vite_preprocessor_additional_data() {
         std::process::id()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join("vite.config.mjs"),
-        r#"
+    let config_text = r#"
             import { defineConfig } from "vite";
 
             export default defineConfig({
@@ -1277,9 +1275,8 @@ async fn test_initialize_indexes_vite_preprocessor_additional_data() {
                     },
                 },
             });
-        "#,
-    )
-    .unwrap();
+        "#;
+    std::fs::write(root.join("vite.config.mjs"), config_text).unwrap();
 
     let root_uri = Uri::from_file_path(&root).unwrap();
     let config_uri = Uri::from_file_path(root.join("vite.config.mjs")).unwrap();
@@ -1346,6 +1343,39 @@ async fn test_initialize_indexes_vite_preprocessor_additional_data() {
     };
     assert_eq!(location.uri, config_uri);
     assert_eq!(location.range, symbols[0].location.range);
+
+    open_document(
+        &mut service,
+        config_uri.clone(),
+        "javascript",
+        config_text,
+        1,
+    )
+    .await;
+
+    change_document(
+        &mut service,
+        config_uri,
+        2,
+        r#"
+            import { defineConfig } from "vite";
+            export default defineConfig({
+                css: {
+                    preprocessorOptions: {
+                        scss: {
+                            additionalData: () => ":root { --vite-brand: #123456; }",
+                        },
+                    },
+                },
+            });
+        "#,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &diagnostic_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert!(workspace_symbols(&mut service, "--vite-brand")
+        .await
+        .is_empty());
 
     std::fs::remove_dir_all(root).unwrap();
 }

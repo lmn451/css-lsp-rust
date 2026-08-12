@@ -66,6 +66,10 @@ editor extensions and CI sandboxes.
   `astro.config.{js,mjs,cjs,ts,mts,cts}` using Oxc. Configuration code is
   parsed but never executed, and only literal `fonts[].cssVariable` values are
   registered.
+- **Vite injected CSS variables** are indexed from static
+  `css.preprocessorOptions.*.additionalData` strings in
+  `vite.config.{js,mjs,cjs,ts,mts,cts}`. Dynamic functions and unrelated Vite
+  options are ignored.
 - **Cascade sorting** and **CSS specificity calculation** including
   `:is()`, `:not()`, `:where()`, attribute selectors, pseudo-classes, and
   pseudo-elements.
