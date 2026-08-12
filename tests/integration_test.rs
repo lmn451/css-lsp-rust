@@ -170,6 +170,38 @@ async fn test_color_resolution_chain() {
     assert!(color.is_some());
 }
 
+/// Integration test: !important participates in the cascade without becoming
+/// part of the custom property's value.
+#[tokio::test]
+async fn test_color_resolution_with_important_definition() {
+    let manager = CssVariableManager::new(Config::default());
+    let uri = Uri::from_str("file:///important-colors.css").unwrap();
+
+    let css_content = r#"
+        .card {
+            --color: #ff0000;
+            --color: #0000ff !important;
+            color: var(--color);
+        }
+    "#;
+
+    parse_css_document(css_content, &uri, &manager)
+        .await
+        .unwrap();
+
+    let definitions = manager.get_variables("--color").await;
+    let important = definitions.iter().find(|definition| definition.important);
+    assert_eq!(
+        important.map(|definition| definition.value.as_str()),
+        Some("#0000ff")
+    );
+
+    let color = manager.resolve_variable_color("--color").await.unwrap();
+    assert!((color.red - 0.0).abs() < 0.01);
+    assert!((color.green - 0.0).abs() < 0.01);
+    assert!((color.blue - 1.0).abs() < 0.01);
+}
+
 /// Integration test: Color resolution follows var() fallback syntax
 #[tokio::test]
 async fn test_color_resolution_with_fallbacks() {

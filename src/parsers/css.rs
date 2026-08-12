@@ -79,6 +79,52 @@ fn should_block_variables(at_rule: &str) -> bool {
     false
 }
 
+fn trim_css_trivia_end(value: &str, mut end: usize) -> usize {
+    loop {
+        while end > 0 && value.as_bytes()[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+
+        let Some(prefix) = value.get(..end) else {
+            break;
+        };
+        if !prefix.ends_with("*/") {
+            break;
+        }
+        let Some(comment_start) = prefix[..prefix.len() - 2].rfind("/*") else {
+            break;
+        };
+        end = comment_start;
+    }
+
+    end
+}
+
+/// Split a trailing CSS `!important` annotation from a custom-property value.
+///
+/// CSS removes the annotation from the property's value while retaining its
+/// cascade importance. Whitespace and comments are allowed around the `!`.
+fn split_important_annotation(value: &str) -> (&str, bool) {
+    let keyword_end = trim_css_trivia_end(value, value.len());
+    let Some(keyword_start) = keyword_end.checked_sub("important".len()) else {
+        return (value, false);
+    };
+    let Some(keyword) = value.get(keyword_start..keyword_end) else {
+        return (value, false);
+    };
+    if !keyword.eq_ignore_ascii_case("important") {
+        return (value, false);
+    }
+
+    let bang_end = trim_css_trivia_end(value, keyword_start);
+    if bang_end == 0 || value.as_bytes()[bang_end - 1] != b'!' {
+        return (value, false);
+    }
+
+    let value_end = trim_css_trivia_end(value, bang_end - 1);
+    (&value[..value_end], true)
+}
+
 /// Configuration for parsing CSS snippets
 pub struct CssParseContext<'a> {
     pub css_text: &'a str,
@@ -175,15 +221,17 @@ async fn extract_definitions(
                 return None;
             }
 
-            let value = css_text[value_start..value_end].trim().to_string();
+            let raw_value = &css_text[value_start..value_end];
+            let (value, important) = split_important_annotation(raw_value);
             let abs_name_start = base_offset + property_name_start;
             let abs_name_end = base_offset + property_name_end;
             let abs_value_start = base_offset + value_start;
             let abs_value_end = base_offset + value_end;
+            let abs_semantic_value_end = abs_value_start + value.len();
 
             Some(CssVariable {
                 name: property_name.to_string(),
-                value: value.clone(),
+                value: value.to_string(),
                 uri: uri.clone(),
                 range: Range::new(
                     offset_to_position(full_text, abs_name_start),
@@ -195,10 +243,10 @@ async fn extract_definitions(
                 )),
                 value_range: Some(Range::new(
                     offset_to_position(full_text, abs_value_start),
-                    offset_to_position(full_text, abs_value_end),
+                    offset_to_position(full_text, abs_semantic_value_end),
                 )),
                 selector,
-                important: value.to_lowercase().contains("!important"),
+                important,
                 inline,
                 source_position: abs_name_start,
             })
@@ -1158,6 +1206,27 @@ mod edge_case_tests {
     use ls_types::Uri;
     use std::str::FromStr;
 
+    #[test]
+    fn test_split_important_annotation_handles_css_trivia() {
+        assert_eq!(split_important_annotation("red !important"), ("red", true));
+        assert_eq!(
+            split_important_annotation("#00f ! IMPORTANT /* trailing */"),
+            ("#00f", true)
+        );
+        assert_eq!(
+            split_important_annotation("rgb(0 0 0) !/**/important"),
+            ("rgb(0 0 0)", true)
+        );
+        assert_eq!(
+            split_important_annotation("red /* !important */"),
+            ("red /* !important */", false)
+        );
+        assert_eq!(
+            split_important_annotation("red!important-value"),
+            ("red!important-value", false)
+        );
+    }
+
     #[tokio::test]
     async fn test_parse_empty_css() {
         let manager = CssVariableManager::new(Config::default());
@@ -1206,6 +1275,7 @@ mod edge_case_tests {
         let vars = manager.get_variables("--color").await;
         assert_eq!(vars.len(), 1);
         assert!(vars[0].important);
+        assert_eq!(vars[0].value, "red");
 
         let spacing = manager.get_variables("--spacing").await;
         assert!(!spacing[0].important);
