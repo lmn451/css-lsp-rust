@@ -1632,6 +1632,35 @@ mod tests {
             .get_variables("--vite-dynamic-return")
             .await
             .is_empty());
+
+        let computed_manager = CssVariableManager::new(Config::default());
+        parse_config_document(
+            r#"
+                import { defineConfig } from "vite";
+
+                const CSS = {
+                    preprocessorOptions: {
+                        scss: {
+                            additionalData: ":root { --vite-before-computed: green; }",
+                            [runtimeKey]: runtimeValue,
+                        },
+                    },
+                };
+
+                export default defineConfig({
+                    css: CSS,
+                    [runtimeKey]: runtimeValue,
+                });
+            "#,
+            &uri,
+            &computed_manager,
+        )
+        .await
+        .unwrap();
+        assert!(computed_manager
+            .get_variables("--vite-before-computed")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1848,16 +1877,22 @@ mod tests {
     async fn extracts_from_a_direct_default_object() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("astro.config.mjs");
+        let text = r#"export default { fonts: [{ cssVariable: "--font-direct" }] };"#;
 
-        parse_config_document(
-            r#"export default { fonts: [{ cssVariable: "--font-direct" }] };"#,
-            &uri,
-            &manager,
-        )
-        .await
-        .unwrap();
+        parse_config_document(text, &uri, &manager).await.unwrap();
 
-        assert_eq!(manager.get_variables("--font-direct").await.len(), 1);
+        let variables = manager.get_variables("--font-direct").await;
+        assert_eq!(variables.len(), 1);
+        let declaration_start = text.find("cssVariable").unwrap();
+        let declaration_end = text.find("\"--font-direct\"").unwrap() + "\"--font-direct\"".len();
+        assert_eq!(
+            variables[0].range,
+            Range::new(
+                offset_to_position(text, declaration_start),
+                offset_to_position(text, declaration_end),
+            ),
+            "direct literals should retain the containing property declaration range"
+        );
     }
 
     #[tokio::test]
@@ -1896,6 +1931,48 @@ mod tests {
 
         assert_eq!(
             manager.get_variables("--font-commonjs-helper").await.len(),
+            1
+        );
+
+        let direct_manager = CssVariableManager::new(Config::default());
+        parse_config_document(
+            r#"
+                const defineConfig = require("astro/config").defineConfig;
+                module.exports = defineConfig({
+                    fonts: [{ cssVariable: "--font-commonjs-direct-helper" }],
+                });
+            "#,
+            &uri,
+            &direct_manager,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            direct_manager
+                .get_variables("--font-commonjs-direct-helper")
+                .await
+                .len(),
+            1
+        );
+
+        let namespace_manager = CssVariableManager::new(Config::default());
+        parse_config_document(
+            r#"
+                const astro = require("astro/config");
+                module.exports = astro.defineConfig({
+                    fonts: [{ cssVariable: "--font-commonjs-namespace-helper" }],
+                });
+            "#,
+            &uri,
+            &namespace_manager,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            namespace_manager
+                .get_variables("--font-commonjs-namespace-helper")
+                .await
+                .len(),
             1
         );
     }
