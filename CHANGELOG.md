@@ -4,6 +4,20 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.4] - 2026-08-12
+
+### Fixed
+- Prevented lock-order deadlocks and stale color indexes during concurrent document updates.
+- `prepareRename` now returns the variable range from the document being renamed.
+- Workspace folder additions and removals now update indexed variables, and repeated scans no longer duplicate references.
+- CSS-in-JS template escapes and HTML entities now preserve source ranges for navigation and rename operations.
+- Nested `var()` fallbacks are indexed as usages for references and rename support.
+- Undefined-variable quick fixes no longer insert raw `:root` blocks into JavaScript or HTML documents.
+
+### Tests
+- Added regression coverage for manager concurrency, workspace lifecycle, parser offsets, nested fallbacks, rename ranges, and document-safe quick fixes.
+
 ## [0.3.3] - 2026-07-31
 
 ### Fixed
