@@ -2354,6 +2354,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_source_replaces_stale_state_with_safe_recovered_prefix() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"export default { fonts: [{ cssVariable: "--font-stale" }] };"#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        parse_config_document(
+            r#"
+                export default {
+                    fonts: [
+                        { cssVariable: "--font-safe-prefix" },
+                        { cssVariable:
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--font-stale").await.is_empty());
+        assert_eq!(manager.get_variables("--font-safe-prefix").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_config_preserves_the_last_valid_analysis() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"export default { fonts: [{ cssVariable: "--font-before-oversize" }] };"#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        let oversized = " ".repeat(MAX_CONFIG_BYTES + 1);
+        parse_config_document(&oversized, &uri, &manager)
+            .await
+            .expect("oversized recognized configs should be skipped without an LSP error");
+
+        assert_eq!(
+            manager.get_variables("--font-before-oversize").await.len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn commonjs_exports_must_be_unconditional_top_level_assignments() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("astro.config.cjs");
