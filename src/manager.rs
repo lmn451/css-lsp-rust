@@ -512,6 +512,7 @@ mod tests {
             important: false,
             inline: false,
             source_position: 0,
+            source: Default::default(),
         }
     }
 
@@ -1079,6 +1080,7 @@ mod tests {
                 important: false,
                 inline: false,
                 source_position: 0,
+                source: Default::default(),
             };
 
             match manager.add_variable(var).await {
@@ -1186,6 +1188,7 @@ mod tests {
             important: false,
             inline: false,
             source_position: 0,
+            source: Default::default(),
         };
         manager
             .add_variable(var)
@@ -1211,6 +1214,7 @@ mod tests {
                     important: false,
                     inline: false,
                     source_position: 0,
+                    source: Default::default(),
                 };
                 manager_clone
                     .add_variable(var)

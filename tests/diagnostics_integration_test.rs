@@ -1437,13 +1437,22 @@ async fn test_initialize_indexes_vite_preprocessor_additional_data() {
         1,
     )
     .await;
-    let labels = completion_labels(
+    let items = completion_items(
         &mut service,
         completion_uri,
         ls_types::Position::new(0, completion_text.len() as u32),
     )
     .await;
+    let labels: Vec<_> = items.iter().map(|item| item.label.clone()).collect();
     assert!(labels.contains(&"--vite-brand".to_string()));
+    let vite_completion = items
+        .iter()
+        .find(|item| item.label == "--vite-brand")
+        .expect("Vite variable should be present in completion");
+    assert_eq!(
+        vite_completion.detail.as_deref(),
+        Some("#123456 • Vite SCSS additionalData")
+    );
 
     let definition_uri = Uri::from_file_path(root.join("definition.css")).unwrap();
     let definition_text = ".card { color: var(--vite-brand); }";
