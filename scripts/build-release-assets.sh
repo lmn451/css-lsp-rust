@@ -98,17 +98,27 @@ build_target() {
 
   if [[ "${target}" == *"windows"* ]]; then
     local zip_path="${DIST_DIR}/${asset_base}.zip"
+    local archive_dir="${DIST_DIR}/${asset_base}-archive"
+    rm -rf "${archive_dir}"
+    mkdir -p "${archive_dir}"
+    cp "${bin_path}" "${ROOT_DIR}/LICENSE" "${ROOT_DIR}/THIRD_PARTY_NOTICES.md" "${archive_dir}/"
     if command -v zip >/dev/null 2>&1; then
-      (cd "${ROOT_DIR}/target/${target}/release" && zip -q "${zip_path}" "${bin_name}")
+      (cd "${archive_dir}" && zip -q "${zip_path}" "${bin_name}" LICENSE THIRD_PARTY_NOTICES.md)
     elif command -v powershell.exe >/dev/null 2>&1; then
-      powershell.exe -NoProfile -Command "Compress-Archive -Path '${bin_path}' -DestinationPath '${zip_path}'"
+      powershell.exe -NoProfile -Command "Compress-Archive -Path '${archive_dir}\\*' -DestinationPath '${zip_path}'"
     else
       echo "zip not found; skipping archive for ${target}"
       return 1
     fi
+    rm -rf "${archive_dir}"
   else
     local tar_path="${DIST_DIR}/${asset_base}.tar.gz"
-    tar -C "${ROOT_DIR}/target/${target}/release" -czf "${tar_path}" "${bin_name}"
+    local archive_dir="${DIST_DIR}/${asset_base}-archive"
+    rm -rf "${archive_dir}"
+    mkdir -p "${archive_dir}"
+    cp "${bin_path}" "${ROOT_DIR}/LICENSE" "${ROOT_DIR}/THIRD_PARTY_NOTICES.md" "${archive_dir}/"
+    tar -C "${archive_dir}" -czf "${tar_path}" "${bin_name}" LICENSE THIRD_PARTY_NOTICES.md
+    rm -rf "${archive_dir}"
   fi
 }
 

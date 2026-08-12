@@ -115,11 +115,11 @@ impl CssVariableManager {
             tracked.remove(uri);
         } else {
             tracked.insert(uri.clone());
-            for variable in variables {
-                vars.entry(variable.name.clone())
-                    .or_default()
-                    .push(variable);
-            }
+        }
+        for variable in variables {
+            vars.entry(variable.name.clone())
+                .or_default()
+                .push(variable);
         }
 
         Ok(())
@@ -140,7 +140,8 @@ impl CssVariableManager {
 
         let max_documents = self.config.read().await.max_documents;
         let mut tracked = self.tracked_documents.write().await;
-        let introduces_document = !variables.is_empty() && !tracked.contains(uri);
+        let has_analysis = !variables.is_empty() || !usages.is_empty();
+        let introduces_document = has_analysis && !tracked.contains(uri);
         if max_documents > 0 && introduces_document && tracked.len() >= max_documents {
             return Err(format!(
                 "Maximum document limit ({max_documents}) reached. Cannot add more documents."
@@ -161,15 +162,15 @@ impl CssVariableManager {
         }
         stored_usages.retain(|_, document_usages| !document_usages.is_empty());
 
-        if variables.is_empty() {
+        if !has_analysis {
             tracked.remove(uri);
         } else {
             tracked.insert(uri.clone());
-            for variable in variables {
-                vars.entry(variable.name.clone())
-                    .or_default()
-                    .push(variable);
-            }
+        }
+        for variable in variables {
+            vars.entry(variable.name.clone())
+                .or_default()
+                .push(variable);
         }
 
         for usage in usages {

@@ -712,6 +712,7 @@ impl LanguageServer for CssVariableLsp {
 
         let mut config = self.live_config.read().await.clone();
         let prev_lookup_files = config.lookup_files.clone();
+        let prev_ignore_globs = config.ignore_globs.clone();
         config = apply_config_patch(config, patch);
 
         {
@@ -726,8 +727,11 @@ impl LanguageServer for CssVariableLsp {
             let new_map = build_lookup_extension_map(&config.lookup_files);
             let mut stored = self.lookup_extension_map.write().await;
             *stored = new_map;
+        }
 
-            // Patterns changed => rescan workspace folders.
+        // Discovery or ignore patterns changed => rescan workspace folders. The scan wrapper
+        // restores open-document text after reading disk so unsaved buffers stay authoritative.
+        if config.lookup_files != prev_lookup_files || config.ignore_globs != prev_ignore_globs {
             if let Some(folders) = self.workspace_folders_for_scan().await {
                 self.scan_workspace_folders(folders).await;
             }

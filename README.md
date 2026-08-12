@@ -476,4 +476,6 @@ under "Known limitations" in `CHANGELOG.md`.
 ## License
 
 [GPL-3.0](LICENSE). Originally derived from the TypeScript
-`css-variable-lsp` by the same author.
+`css-variable-lsp` by the same author. Dependency license notices are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and are included in release
+archives.

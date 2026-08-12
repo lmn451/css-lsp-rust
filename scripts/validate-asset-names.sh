@@ -84,6 +84,14 @@ if [[ -f "${BUILD_SCRIPT}" ]]; then
   fi
 
   echo -e "${GREEN}✓ All expected asset names found in build script${NC}"
+
+  for required_notice in "LICENSE" "THIRD_PARTY_NOTICES.md"; do
+    if ! grep -q "${required_notice}" "${BUILD_SCRIPT}"; then
+      echo -e "${RED}Build script does not package ${required_notice}${NC}"
+      exit 1
+    fi
+  done
+  echo -e "${GREEN}✓ Local release archives include project and third-party notices${NC}"
 fi
 
 echo -e "\n${GREEN}Asset naming validation passed!${NC}"

@@ -525,24 +525,44 @@ impl AssignedBindingCollector {
         collector.visit_assignment_target(target);
         self.record_names(collector.names);
 
-        let Some(property) = self.tracked_member_property else {
-            return;
-        };
         let Some(member) = target.as_member_expression() else {
             return;
         };
-        if member.static_property_name() != Some(property) {
-            return;
-        }
-        if let Expression::Identifier(identifier) = unwrap_expression(member.object()) {
-            self.record_names(HashSet::from([identifier.name.as_str().to_string()]));
-        }
+        self.record_member_assignment(member);
     }
 
     fn record_simple_assignment_target<'a>(&mut self, target: &SimpleAssignmentTarget<'a>) {
         let mut collector = AssignmentTargetNameCollector::default();
         collector.visit_simple_assignment_target(target);
         self.record_names(collector.names);
+        if let Some(member) = target.as_member_expression() {
+            self.record_member_assignment(member);
+        }
+    }
+
+    fn record_member_assignment(&mut self, member: &MemberExpression<'_>) {
+        if self
+            .tracked_member_property
+            .is_some_and(|property| member.static_property_name() != Some(property))
+        {
+            return;
+        }
+
+        let mut object = member.object();
+        loop {
+            match unwrap_expression(object) {
+                Expression::Identifier(identifier) => {
+                    self.record_names(HashSet::from([identifier.name.as_str().to_string()]));
+                    return;
+                }
+                expression => {
+                    let Some(parent) = expression.as_member_expression() else {
+                        return;
+                    };
+                    object = parent.object();
+                }
+            }
+        }
     }
 
     fn record_for_statement_left<'a>(&mut self, left: &ForStatementLeft<'a>) {
@@ -633,7 +653,9 @@ impl<'a> Visit<'a> for AssignedBindingCollector {
         walk_update_expression(self, expression);
     }
 
-    fn visit_function_body(&mut self, _body: &oxc_ast::ast::FunctionBody<'a>) {}
+    fn visit_function_body(&mut self, body: &oxc_ast::ast::FunctionBody<'a>) {
+        oxc_ast_visit::walk::walk_function_body(self, body);
+    }
 
     fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
         let names = Self::block_shadow_names(block);
@@ -1276,6 +1298,9 @@ fn commonjs_config_object<'a>(
     define_config_namespaces: &HashSet<String>,
     resolver: &StaticExpressionResolver<'a>,
 ) -> Option<&'a ObjectExpression<'a>> {
+    let mut assignments = ModuleExportsAssignmentCollector::new(source);
+    assignments.visit_program(program);
+
     for statement in program.body.iter().rev() {
         let Statement::ExpressionStatement(statement) = statement else {
             continue;
@@ -1285,6 +1310,13 @@ fn commonjs_config_object<'a>(
             continue;
         };
         if is_module_exports_assignment(assignment, source) {
+            if assignments
+                .spans
+                .iter()
+                .any(|span| span.start > assignment.span.start)
+            {
+                return None;
+            }
             return config_object_from_expression(
                 &assignment.right,
                 define_config_bindings,
@@ -1294,6 +1326,31 @@ fn commonjs_config_object<'a>(
         }
     }
     None
+}
+
+struct ModuleExportsAssignmentCollector<'s> {
+    source: &'s str,
+    spans: Vec<Span>,
+}
+
+impl<'s> ModuleExportsAssignmentCollector<'s> {
+    fn new(source: &'s str) -> Self {
+        Self {
+            source,
+            spans: Vec::new(),
+        }
+    }
+}
+
+impl<'a> Visit<'a> for ModuleExportsAssignmentCollector<'_> {
+    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
+        if is_module_exports_assignment(assignment, self.source) {
+            self.spans.push(assignment.span);
+        }
+        walk_assignment_expression(self, assignment);
+    }
+
+    fn visit_function_body(&mut self, _body: &oxc_ast::ast::FunctionBody<'a>) {}
 }
 
 fn is_require_expression(expression: &Expression<'_>, module_source: &str) -> bool {

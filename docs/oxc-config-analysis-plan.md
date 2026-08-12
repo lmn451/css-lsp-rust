@@ -604,8 +604,10 @@ Completed gates:
 9. No dependency security command was introduced because neither `cargo-deny`
    nor `cargo-audit` is part of this repository's toolchain. Oxc remains pinned
    exactly and is covered by lockfile review and normal dependency updates.
-10. The crate package contains 53 intentional files after adding the canonical
-    GPL-3.0 license text; `.pi/`, logs, fixtures, and build output are excluded.
+10. The crate package contains 54 intentional files after adding the canonical
+    GPL-3.0 license text and Oxc's MIT notice; `.pi/`, logs, fixtures, and build
+    output are excluded. Release archives include both `LICENSE` and
+    `THIRD_PARTY_NOTICES.md` alongside the binary.
 
 ## Rollout strategy
 
@@ -630,7 +632,7 @@ Final branch evidence on macOS aarch64:
   hover, document and workspace symbols, goto-definition, rename, edits, and
   malformed recovery. Workspace-level tests cover deleted or newly ignored
   config files and workspace rescans;
-- 187 library tests, 5 binary tests, 29 diagnostics integration tests, 14
+- 192 library tests, 5 binary tests, 30 diagnostics integration tests, 14
   workflow integration tests, 4 Issue #16 guards, and 9 issue proof tests pass;
 - release binary: 8,229,136 bytes, approximately 14.7% above `master`;
 - clean release build: 51.59 seconds; incremental release build: 0.22 seconds;
@@ -638,8 +640,8 @@ Final branch evidence on macOS aarch64:
   4.4222 ms at 1,048,575 bytes;
 - ten public workspace scans over 64 configs averaged 12.117 ms per scan,
   produced exactly 64 definitions, and reported 7,847,936 bytes maximum RSS;
-- `cargo package` contains 53 files and is 699.6 KiB uncompressed and
-  150.6 KiB compressed after including `LICENSE`;
+- `cargo package` contains 54 files and is 711.2 KiB uncompressed and
+  152.7 KiB compressed after including `LICENSE` and `THIRD_PARTY_NOTICES.md`;
 - the release workflow covers Linux, macOS, and Windows on x86_64 and aarch64;
 - an external scratch crate compiles a pre-existing public `CssVariable` struct
   literal, confirming the provenance UI did not break that source interface.

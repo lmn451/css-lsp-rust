@@ -38,6 +38,8 @@ The **Zed extension** (`zed-css-variables`) expects assets with these **exact na
 - [ ] Update version in `Cargo.toml`
 - [ ] Update `CHANGELOG.md` with release notes
 - [ ] Ensure all tests pass: `cargo test`
+- [ ] Verify release archives include `LICENSE` and `THIRD_PARTY_NOTICES.md`:
+      `./scripts/validate-asset-names.sh`
 - [ ] (Optional) Build locally: `./scripts/build-release-assets.sh`
 - [ ] (Optional) Smoke test local assets: `./scripts/smoke-test-release.sh --local`
 
@@ -63,6 +65,8 @@ The **Zed extension** (`zed-css-variables`) expects assets with these **exact na
    - Wait for GitHub Actions to complete
    - Check [Releases](../../releases) for all 6 assets
    - Ensure asset names match the contract above
+   - Ensure every archive contains the binary, `LICENSE`, and
+     `THIRD_PARTY_NOTICES.md`
 
 4. **Smoke test the release**
    ```bash
