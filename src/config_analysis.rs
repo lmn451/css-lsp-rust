@@ -324,6 +324,10 @@ mod tests {
     use super::*;
     use crate::types::Config;
 
+    fn test_uri(name: &str) -> Uri {
+        Uri::from_file_path(std::env::temp_dir().join(name)).unwrap()
+    }
+
     #[test]
     fn recognizes_only_supported_astro_config_names() {
         assert!(is_supported_config_path(Path::new("astro.config.mjs")));
@@ -338,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn extracts_static_font_variables_from_current_and_legacy_locations() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Uri::from_file_path("/workspace/astro.config.ts").unwrap();
+        let uri = test_uri("astro.config.ts");
         let text = r#"
             import { defineConfig as astroConfig } from "astro/config";
             const dynamicName = "--font-dynamic";
@@ -370,7 +374,7 @@ mod tests {
     #[tokio::test]
     async fn extracts_from_a_direct_default_object() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Uri::from_file_path("/workspace/astro.config.mjs").unwrap();
+        let uri = test_uri("astro.config.mjs");
 
         parse_config_document(
             r#"export default { fonts: [{ cssVariable: "--font-direct" }] };"#,
@@ -386,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn extracts_from_commonjs_configs() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Uri::from_file_path("/workspace/astro.config.cjs").unwrap();
+        let uri = test_uri("astro.config.cjs");
 
         parse_config_document(
             r#"module.exports = { fonts: [{ cssVariable: "--font-commonjs" }] };"#,
@@ -402,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_and_escaped_values_are_not_indexed() {
         let manager = CssVariableManager::new(Config::default());
-        let uri = Uri::from_file_path("/workspace/astro.config.ts").unwrap();
+        let uri = test_uri("astro.config.ts");
 
         parse_config_document(
             r#"export default { fonts: [{ cssVariable: "--font-escaped\x2dname" }] };"#,
