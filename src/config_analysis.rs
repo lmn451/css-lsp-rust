@@ -42,6 +42,7 @@ const VITE_CONFIG_NAMES: &[&str] = &[
 const VITE_PREPROCESSOR: &str = "scss";
 const MAX_STATIC_STRING_DEPTH: usize = 16;
 const MAX_STATIC_STRING_VISITS: usize = 64;
+const MAX_STATIC_STRUCTURE_VISITS: usize = 1024;
 
 #[derive(Clone, Copy)]
 enum ConfigKind {
@@ -314,6 +315,22 @@ impl<'a> StaticExpressionResolver<'a> {
         object: &'a ObjectExpression<'a>,
         name: &str,
     ) -> Option<ResolvedProperty<'a>> {
+        let mut visits = 0;
+        self.property_inner(object, name, 0, &mut visits)
+    }
+
+    fn property_inner(
+        &self,
+        object: &'a ObjectExpression<'a>,
+        name: &str,
+        depth: usize,
+        visits: &mut usize,
+    ) -> Option<ResolvedProperty<'a>> {
+        if depth >= MAX_STATIC_STRING_DEPTH || *visits >= MAX_STATIC_STRUCTURE_VISITS {
+            return Some(ResolvedProperty::Unknown);
+        }
+        *visits += 1;
+
         let mut unknown_after_match = false;
         for property in object.properties.iter().rev() {
             match property {
@@ -338,7 +355,7 @@ impl<'a> StaticExpressionResolver<'a> {
                         unknown_after_match = true;
                         continue;
                     };
-                    match self.property(spread_object, name) {
+                    match self.property_inner(spread_object, name, depth + 1, visits) {
                         Some(known @ ResolvedProperty::Known { .. }) if !unknown_after_match => {
                             return Some(known);
                         }
@@ -912,10 +929,54 @@ impl<'a, 's> AstroFontExtractor<'a, 's> {
     }
 
     fn extract_fonts(&mut self, fonts: &'a ArrayExpression<'a>) {
+        let mut active_arrays = HashSet::new();
+        let mut visits = 0;
+        if !self.array_is_fully_static(fonts, 0, &mut visits, &mut active_arrays) {
+            return;
+        }
+        self.extract_known_fonts(fonts);
+    }
+
+    fn array_is_fully_static(
+        &self,
+        array: &'a ArrayExpression<'a>,
+        depth: usize,
+        visits: &mut usize,
+        active_arrays: &mut HashSet<(u32, u32)>,
+    ) -> bool {
+        if depth >= MAX_STATIC_STRING_DEPTH || *visits >= MAX_STATIC_STRUCTURE_VISITS {
+            return false;
+        }
+        *visits += 1;
+        let key = (array.span.start, array.span.end);
+        if !active_arrays.insert(key) {
+            return false;
+        }
+
+        let mut is_static = true;
+        for element in &array.elements {
+            let ArrayExpressionElement::SpreadElement(spread) = element else {
+                continue;
+            };
+            let Some(spread_array) = self.expression_resolver.as_array(&spread.argument) else {
+                is_static = false;
+                break;
+            };
+            if !self.array_is_fully_static(spread_array, depth + 1, visits, active_arrays) {
+                is_static = false;
+                break;
+            }
+        }
+
+        active_arrays.remove(&key);
+        is_static
+    }
+
+    fn extract_known_fonts(&mut self, fonts: &'a ArrayExpression<'a>) {
         for element in &fonts.elements {
             if let ArrayExpressionElement::SpreadElement(spread) = element {
                 if let Some(array) = self.expression_resolver.as_array(&spread.argument) {
-                    self.extract_fonts(array);
+                    self.extract_known_fonts(array);
                 }
                 continue;
             }
