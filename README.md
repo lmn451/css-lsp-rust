@@ -64,13 +64,19 @@ editor extensions and CI sandboxes.
   `emotion`, etc.), correctly handling template expressions.
 - **Astro font variables** are statically indexed from
   `astro.config.{js,mjs,cjs,ts,mts,cts}` using Oxc. Configuration code is
-  parsed but never executed. `fonts[].cssVariable` accepts direct literals and
-  bounded aliases to immutable, unexported module-level `const` strings.
+  parsed but never executed. `fonts[].cssVariable` accepts direct literals,
+  bounded immutable `const` aliases, static object and array aliases, and known
+  spreads. Proven ESM and CommonJS `defineConfig` helpers are supported.
 - **Vite injected CSS variables** are indexed from static
   `css.preprocessorOptions.scss.additionalData` strings in
-  `vite.config.{js,mjs,cjs,ts,mts,cts}`. Direct literals and bounded aliases to
-  immutable, unexported module-level `const` strings are accepted. Dynamic functions,
-  unrelated Vite options, and SCSS control-flow directives are ignored.
+  `vite.config.{js,mjs,cjs,ts,mts,cts}`. Direct literals, immutable aliases,
+  static structures and spreads, and simple unconditional function returns are
+  accepted. Dynamic values, unrelated Vite options, unknown computed
+  properties, and SCSS control-flow directives are ignored.
+- **Safe config lifecycle** atomically updates definitions and usages. Oxc's
+  recoverable AST replaces stale state, while catastrophic syntax errors and
+  files over 1 MiB retain the last valid analysis. Completion, hover, and
+  document symbols identify whether a definition came from Astro or Vite.
 - **Cascade sorting** and **CSS specificity calculation** including
   `:is()`, `:not()`, `:where()`, attribute selectors, pseudo-classes, and
   pseudo-elements.
@@ -109,8 +115,9 @@ editor extensions and CI sandboxes.
 
 All of these are configurable via the `--lookup-files` flag.
 
-Recognized `astro.config.*` files are discovered independently of
-`--lookup-files` so users do not need to scan every JavaScript file eagerly.
+Recognized `astro.config.*` and `vite.config.*` files are discovered
+independently of `--lookup-files` so users do not need to scan every JavaScript
+file eagerly.
 
 ---
 
