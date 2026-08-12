@@ -1101,6 +1101,70 @@ async fn test_initialize_scans_root_uri_without_workspace_folders() {
 }
 
 #[tokio::test]
+async fn test_initialize_indexes_astro_font_css_variables() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-astro-fonts-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("astro.config.mjs"),
+        r#"
+            import { defineConfig, fontProviders } from "astro/config";
+
+            export default defineConfig({
+                fonts: [
+                    {
+                        provider: fontProviders.google(),
+                        name: "Roboto",
+                        cssVariable: "--font-roboto",
+                    },
+                    {
+                        provider: fontProviders.google(),
+                        name: "Inter",
+                        cssVariable: "--font-inter",
+                    },
+                ],
+            });
+        "#,
+    )
+    .unwrap();
+
+    let root_uri = Uri::from_file_path(&root).unwrap();
+    let mut service = setup_scan_service(None, None).await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+
+    let roboto = workspace_symbols(&mut service, "--font-roboto").await;
+    assert_eq!(roboto.len(), 1);
+    assert_eq!(
+        roboto[0].location.uri,
+        Uri::from_file_path(root.join("astro.config.mjs")).unwrap()
+    );
+    assert_eq!(workspace_symbols(&mut service, "--font-inter").await.len(), 1);
+
+    let consumer_uri = Uri::from_file_path(root.join("consumer.css")).unwrap();
+    let consumer_text = ".card { font-family: var(--";
+    open_document(
+        &mut service,
+        consumer_uri.clone(),
+        "css",
+        consumer_text,
+        1,
+    )
+    .await;
+    let labels = completion_labels(
+        &mut service,
+        consumer_uri,
+        ls_types::Position::new(0, consumer_text.len() as u32),
+    )
+    .await;
+    assert!(labels.contains(&"--font-roboto".to_string()));
+    assert!(labels.contains(&"--font-inter".to_string()));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn test_initialize_scans_legacy_root_path() {
     let (root, _root_uri) = workspace_fixture("root-path", "--legacy-color");
     let mut service = setup_scan_service(None, None).await;
