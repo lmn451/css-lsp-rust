@@ -11,6 +11,21 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  msrv:
+    name: MSRV (Rust 1.95.0)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install declared minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Check all targets at the declared MSRV
+        run: cargo check --locked --all-targets --all-features
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}

@@ -252,8 +252,21 @@ export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] });"#,
 
     change_document(
         &mut service,
-        config_uri,
+        config_uri.clone(),
         2,
+        r#"export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] )"#,
+    )
+    .await;
+    assert_eq!(
+        workspace_symbols(&mut service, "--font-roboto").await.len(),
+        1,
+        "a malformed in-progress edit must not discard the last valid config state"
+    );
+
+    change_document(
+        &mut service,
+        config_uri,
+        3,
         r#"export default defineConfig({ fonts: [{ cssVariable: dynamicName }] });"#,
     )
     .await;

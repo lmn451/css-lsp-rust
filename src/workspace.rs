@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use tokio::fs;
 use walkdir::WalkDir;
 
-use crate::config_analysis::{is_supported_config_path, parse_config_document};
+use crate::config_analysis::{is_supported_config_path, parse_config_document, MAX_CONFIG_BYTES};
 use crate::manager::CssVariableManager;
 use crate::parsers::{parse_css_document, parse_html_document};
 
@@ -45,12 +45,14 @@ pub async fn scan_workspace(
 
     // Collect all files from all folders
     let mut all_files = HashSet::new();
+    let mut scanned_folder_paths = Vec::new();
 
     for folder_uri in folders {
         let folder_path = match crate::path_display::to_normalized_fs_path(&folder_uri) {
             Some(path) => path,
             None => continue,
         };
+        scanned_folder_paths.push(folder_path.clone());
 
         for entry in WalkDir::new(&folder_path)
             .follow_links(false)
@@ -90,9 +92,36 @@ pub async fn scan_workspace(
     all_files.sort();
     let total = all_files.len();
 
-    // A scan replaces the previously indexed state for every discovered file. This
-    // keeps repeated scans and overlapping workspace folders from accumulating copies.
-    let file_uris: HashSet<Uri> = all_files.iter().filter_map(Uri::from_file_path).collect();
+    let discovered_config_uris: HashSet<Uri> = all_files
+        .iter()
+        .filter(|path| is_supported_config_path(path))
+        .filter_map(Uri::from_file_path)
+        .collect();
+    let stale_config_uris: HashSet<Uri> = manager
+        .get_document_uris()
+        .await
+        .into_iter()
+        .filter(|uri| {
+            let Some(path) = crate::path_display::to_normalized_fs_path(uri) else {
+                return false;
+            };
+            is_supported_config_path(&path)
+                && scanned_folder_paths
+                    .iter()
+                    .any(|folder| path.starts_with(folder))
+                && !discovered_config_uris.contains(uri)
+        })
+        .collect();
+    manager.remove_documents(&stale_config_uris).await;
+
+    // Normal discovered files are cleared as a batch. Configuration sources replace their
+    // definitions atomically after successful analysis, preserving the last valid state while
+    // an editor or disk file is temporarily malformed.
+    let file_uris: HashSet<Uri> = all_files
+        .iter()
+        .filter(|path| !is_supported_config_path(path))
+        .filter_map(Uri::from_file_path)
+        .collect();
     manager.remove_documents(&file_uris).await;
 
     // Build the extension->kind map once for the whole scan so we agree with the
@@ -103,6 +132,21 @@ pub async fn scan_workspace(
     for (i, file_path) in all_files.iter().enumerate() {
         // Report progress
         on_progress(i + 1, total);
+
+        let is_config = is_supported_config_path(file_path);
+        if is_config {
+            let oversized = fs::metadata(file_path)
+                .await
+                .is_ok_and(|metadata| metadata.len() > MAX_CONFIG_BYTES as u64);
+            if oversized {
+                tracing::debug!(
+                    file = %file_path.display(),
+                    limit = MAX_CONFIG_BYTES,
+                    "workspace scan: skipped oversized configuration source"
+                );
+                continue;
+            }
+        }
 
         // Read file content
         let content = match fs::read_to_string(file_path).await {
@@ -116,7 +160,7 @@ pub async fn scan_workspace(
             None => continue,
         };
 
-        if is_supported_config_path(file_path) {
+        if is_config {
             if let Err(e) = parse_config_document(&content, &file_uri, manager).await {
                 tracing::debug!(
                     file = %file_path.display(),
@@ -183,6 +227,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(manager.get_variables("--primary").await.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rescans_remove_deleted_and_newly_ignored_astro_configs() {
+        let root = std::env::temp_dir().join(format!(
+            "css-variable-lsp-config-rescan-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("astro.config.ts");
+        let config_text = r#"export default { fonts: [{ cssVariable: "--font-scan" }] };"#;
+        std::fs::write(&config_path, config_text).unwrap();
+
+        let manager = CssVariableManager::new(Config::default());
+        let root_uri = Uri::from_file_path(&root).unwrap();
+        scan_workspace(vec![root_uri.clone()], &manager, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(manager.get_variables("--font-scan").await.len(), 1);
+
+        std::fs::remove_file(&config_path).unwrap();
+        scan_workspace(vec![root_uri.clone()], &manager, |_, _| {})
+            .await
+            .unwrap();
+        assert!(manager.get_variables("--font-scan").await.is_empty());
+
+        std::fs::write(&config_path, config_text).unwrap();
+        scan_workspace(vec![root_uri.clone()], &manager, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(manager.get_variables("--font-scan").await.len(), 1);
+
+        let mut config = manager.get_config().await;
+        config.ignore_globs.push("astro.config.ts".to_string());
+        manager.set_config(config).await;
+        scan_workspace(vec![root_uri], &manager, |_, _| {})
+            .await
+            .unwrap();
+        assert!(manager.get_variables("--font-scan").await.is_empty());
+
         std::fs::remove_dir_all(root).unwrap();
     }
 }

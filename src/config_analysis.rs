@@ -4,8 +4,9 @@ use std::path::Path;
 use ls_types::{Range, Uri};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpression, AssignmentExpression, ExportDefaultDeclaration, Expression, ImportDeclaration,
-    ImportDeclarationSpecifier, ObjectExpression, ObjectPropertyKind, PropertyKey,
+    Argument, ArrayExpression, AssignmentExpression, BindingPattern, ExportDefaultDeclaration,
+    Expression, ImportDeclaration, ImportDeclarationSpecifier, ObjectExpression,
+    ObjectPropertyKind, Program, PropertyKey, Statement, VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
@@ -14,7 +15,7 @@ use oxc_span::{GetSpan, SourceType, Span};
 use crate::manager::CssVariableManager;
 use crate::types::{offset_to_position, CssVariable};
 
-const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const ASTRO_CONFIG_NAMES: &[&str] = &[
     "astro.config.js",
     "astro.config.mjs",
@@ -23,6 +24,13 @@ const ASTRO_CONFIG_NAMES: &[&str] = &[
     "astro.config.mts",
     "astro.config.cts",
 ];
+
+fn supports_commonjs(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("js" | "cjs" | "ts" | "cts")
+    )
+}
 
 /// Return whether a path is a supported framework configuration source.
 pub fn is_supported_config_path(path: &Path) -> bool {
@@ -50,7 +58,10 @@ pub async fn parse_config_document(
         return Ok(());
     }
 
-    let variables = extract_config_variables(text, path, uri)?
+    let Some(extracted_variables) = extract_config_variables(text, path, uri)? else {
+        return Ok(());
+    };
+    let variables = extracted_variables
         .into_iter()
         .map(|extracted| CssVariable {
             name: extracted.name,
@@ -65,14 +76,14 @@ pub async fn parse_config_document(
             source_position: extracted.declaration_span.start as usize,
         })
         .collect();
-    manager.add_variables(variables).await
+    manager.replace_document_variables(uri, variables).await
 }
 
 fn extract_config_variables(
     text: &str,
     path: &Path,
     uri: &Uri,
-) -> Result<Vec<ExtractedVariable>, String> {
+) -> Result<Option<Vec<ExtractedVariable>>, String> {
     let source_type = SourceType::from_path(path)
         .map_err(|_| format!("Unsupported configuration source type: {}", path.display()))?;
     let allocator = Allocator::default();
@@ -84,11 +95,14 @@ fn extract_config_variables(
             errors = parsed.diagnostics.len(),
             "configuration analysis skipped a malformed source"
         );
-        return Ok(Vec::new());
+        return Ok(None);
     }
 
     let mut imports = AstroImportCollector::default();
     imports.visit_program(&parsed.program);
+    if supports_commonjs(path) {
+        imports.collect_commonjs_program(&parsed.program);
+    }
 
     let mut extractor = AstroFontExtractor {
         source: text,
@@ -96,7 +110,10 @@ fn extract_config_variables(
         variables: Vec::new(),
     };
     extractor.visit_program(&parsed.program);
-    Ok(extractor.variables)
+    if supports_commonjs(path) {
+        extractor.extract_commonjs_program(&parsed.program);
+    }
+    Ok(Some(extractor.variables))
 }
 
 struct ExtractedVariable {
@@ -108,6 +125,48 @@ struct ExtractedVariable {
 #[derive(Default)]
 struct AstroImportCollector {
     define_config_bindings: HashSet<String>,
+}
+
+impl AstroImportCollector {
+    fn collect_commonjs_program(&mut self, program: &Program<'_>) {
+        for statement in &program.body {
+            let Statement::VariableDeclaration(declaration) = statement else {
+                continue;
+            };
+            for declarator in &declaration.declarations {
+                self.collect_commonjs_declarator(declarator);
+            }
+        }
+    }
+
+    fn collect_commonjs_declarator(&mut self, declarator: &VariableDeclarator<'_>) {
+        let Some(Expression::CallExpression(call)) =
+            declarator.init.as_ref().map(unwrap_expression)
+        else {
+            return;
+        };
+        if !call.is_require_call()
+            || !matches!(
+                call.arguments.first(),
+                Some(Argument::StringLiteral(source)) if source.value.as_str() == "astro/config"
+            )
+        {
+            return;
+        }
+
+        let BindingPattern::ObjectPattern(pattern) = &declarator.id else {
+            return;
+        };
+        for property in &pattern.properties {
+            if property.computed || !property_key_matches(&property.key, "defineConfig") {
+                continue;
+            }
+            if let BindingPattern::BindingIdentifier(local) = &property.value {
+                self.define_config_bindings
+                    .insert(local.name.as_str().to_string());
+            }
+        }
+    }
 }
 
 impl<'a> Visit<'a> for AstroImportCollector {
@@ -164,6 +223,23 @@ impl AstroFontExtractor<'_> {
         }
     }
 
+    fn extract_commonjs_program<'a>(&mut self, program: &'a Program<'a>) {
+        for statement in program.body.iter().rev() {
+            let Statement::ExpressionStatement(statement) = statement else {
+                continue;
+            };
+            let Expression::AssignmentExpression(assignment) =
+                unwrap_expression(&statement.expression)
+            else {
+                continue;
+            };
+            if is_module_exports_assignment(assignment, self.source) {
+                self.extract_default_expression(&assignment.right);
+                break;
+            }
+        }
+    }
+
     fn extract_astro_config<'a>(&mut self, config: &'a ObjectExpression<'a>) {
         if let Some(fonts) = object_property(config, "fonts").and_then(expression_as_array) {
             self.extract_fonts(fonts);
@@ -195,7 +271,7 @@ impl AstroFontExtractor<'_> {
             let Some((name, name_span)) = static_string_value(&property.value, self.source) else {
                 continue;
             };
-            if !name.starts_with("--") || name.len() <= 2 {
+            if !is_supported_custom_property_name(&name) {
                 continue;
             }
 
@@ -214,17 +290,13 @@ impl<'a> Visit<'a> for AstroFontExtractor<'_> {
             self.extract_default_expression(expression);
         }
     }
+}
 
-    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
-        if assignment.operator.is_assign()
-            && self
-                .source
-                .get(assignment.left.span().start as usize..assignment.left.span().end as usize)
-                .is_some_and(|target| target.trim() == "module.exports")
-        {
-            self.extract_default_expression(&assignment.right);
-        }
-    }
+fn is_module_exports_assignment(assignment: &AssignmentExpression<'_>, source: &str) -> bool {
+    assignment.operator.is_assign()
+        && source
+            .get(assignment.left.span().start as usize..assignment.left.span().end as usize)
+            .is_some_and(|target| target.trim() == "module.exports")
 }
 
 fn unwrap_expression<'a>(mut expression: &'a Expression<'a>) -> &'a Expression<'a> {
@@ -245,15 +317,26 @@ fn object_property_node<'a>(
     object: &'a ObjectExpression<'a>,
     name: &str,
 ) -> Option<&'a oxc_ast::ast::ObjectProperty<'a>> {
-    object.properties.iter().find_map(|property| {
+    for property in object.properties.iter().rev() {
         let ObjectPropertyKind::ObjectProperty(property) = property else {
             return None;
         };
-        if property.computed || property.method || !property_key_matches(&property.key, name) {
+
+        let matches = if property.computed {
+            property.key.is_specific_string_literal(name)
+        } else {
+            property_key_matches(&property.key, name)
+        };
+        if matches {
+            return Some(property.as_ref());
+        }
+
+        if property.computed && property.key.name().is_none() {
             return None;
         }
-        Some(property.as_ref())
-    })
+    }
+
+    None
 }
 
 fn object_property<'a>(object: &'a ObjectExpression<'a>, name: &str) -> Option<&'a Expression<'a>> {
@@ -262,6 +345,16 @@ fn object_property<'a>(object: &'a ObjectExpression<'a>, name: &str) -> Option<&
 
 fn property_key_matches(key: &PropertyKey<'_>, name: &str) -> bool {
     key.is_specific_id(name) || key.is_specific_string_literal(name)
+}
+
+fn is_supported_custom_property_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix("--") else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '-' | '_'))
 }
 
 fn as_object_expression<'a>(expression: &'a Expression<'a>) -> Option<&'a ObjectExpression<'a>> {
@@ -404,6 +497,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extracts_from_commonjs_define_config_require() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.cts");
+
+        parse_config_document(
+            r#"
+                const { defineConfig: astroConfig } = require("astro/config");
+                module.exports = astroConfig({
+                    fonts: [{ cssVariable: "--font-commonjs-helper" }],
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            manager.get_variables("--font-commonjs-helper").await.len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn module_exports_is_ignored_in_explicit_esm_configs() {
+        for name in ["astro.config.mjs", "astro.config.mts"] {
+            let manager = CssVariableManager::new(Config::default());
+            let uri = test_uri(name);
+            parse_config_document(
+                r#"module.exports = { fonts: [{ cssVariable: "--font-wrong-module" }] };"#,
+                &uri,
+                &manager,
+            )
+            .await
+            .unwrap();
+            assert!(manager
+                .get_variables("--font-wrong-module")
+                .await
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn malformed_and_escaped_values_are_not_indexed() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("astro.config.ts");
@@ -428,5 +564,96 @@ mod tests {
         .await
         .unwrap();
         assert!(manager.get_variables("--font-phantom").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn commonjs_exports_must_be_unconditional_top_level_assignments() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.cjs");
+
+        parse_config_document(
+            r#"
+                function unused() {
+                    module.exports = { fonts: [{ cssVariable: "--font-nested" }] };
+                }
+                if (false) {
+                    module.exports = { fonts: [{ cssVariable: "--font-conditional" }] };
+                }
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--font-nested").await.is_empty());
+        assert!(manager.get_variables("--font-conditional").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_last_top_level_commonjs_export_wins() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.cts");
+
+        parse_config_document(
+            r#"
+                module.exports = { fonts: [{ cssVariable: "--font-old-export" }] };
+                module.exports = { fonts: [{ cssVariable: "--font-current-export" }] };
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--font-old-export").await.is_empty());
+        assert_eq!(
+            manager.get_variables("--font-current-export").await.len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_follows_effective_object_properties_conservatively() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.mjs");
+
+        parse_config_document(
+            r#"
+                export default {
+                    fonts: [{ cssVariable: "--font-overridden-root" }],
+                    fonts: [
+                        {
+                            cssVariable: "--font-overridden-value",
+                            cssVariable: "--font-effective",
+                        },
+                        {
+                            cssVariable: "--font-possibly-overridden",
+                            ...fontOverrides,
+                        },
+                        { cssVariable: "--font invalid" },
+                    ],
+                };
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--font-effective").await.len(), 1);
+        assert!(manager
+            .get_variables("--font-overridden-root")
+            .await
+            .is_empty());
+        assert!(manager
+            .get_variables("--font-overridden-value")
+            .await
+            .is_empty());
+        assert!(manager
+            .get_variables("--font-possibly-overridden")
+            .await
+            .is_empty());
+        assert!(manager.get_variables("--font invalid").await.is_empty());
     }
 }

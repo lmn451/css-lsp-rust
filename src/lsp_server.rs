@@ -297,8 +297,6 @@ impl CssVariableLsp {
     }
 
     async fn parse_document_text(&self, uri: &Uri, text: &str, language_id: Option<&str>) {
-        self.manager.remove_document(uri).await;
-
         let path = uri.path().as_str();
         if is_supported_config_path(std::path::Path::new(path)) {
             if let Err(e) = parse_config_document(text, uri, &self.manager).await {
@@ -312,6 +310,8 @@ impl CssVariableLsp {
             self.manager.rebuild_color_index().await;
             return;
         }
+
+        self.manager.remove_document(uri).await;
 
         let lookup_map = self.lookup_extension_map.read().await.clone();
         let kind = resolve_document_kind(path, language_id, &lookup_map);

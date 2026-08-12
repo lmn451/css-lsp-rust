@@ -113,6 +113,7 @@ Recognized `astro.config.*` files are discovered independently of
 
 ```bash
 # Install from crates.io
+# Building from source requires Rust 1.95 or newer.
 cargo install css-variable-lsp
 
 # …or download a release binary for your platform
