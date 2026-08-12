@@ -1161,12 +1161,14 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         r#"
             import { defineConfig, fontProviders } from "astro/config";
 
+            const ROBOTO_VARIABLE = "--font-roboto";
+
             export default defineConfig({
                 fonts: [
                     {
                         provider: fontProviders.google(),
                         name: "Roboto",
-                        cssVariable: "--font-roboto",
+                        cssVariable: ROBOTO_VARIABLE,
                     },
                     {
                         provider: fontProviders.google(),
@@ -1264,13 +1266,15 @@ async fn test_initialize_indexes_vite_preprocessor_additional_data() {
     let config_text = r#"
             import { defineConfig } from "vite";
 
+            const SHARED_SCSS = `:root {
+                --vite-brand: #123456;
+            }`;
+
             export default defineConfig({
                 css: {
                     preprocessorOptions: {
                         scss: {
-                            additionalData: `:root {
-                                --vite-brand: #123456;
-                            }`,
+                            additionalData: SHARED_SCSS,
                         },
                     },
                 },

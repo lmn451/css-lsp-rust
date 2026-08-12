@@ -703,6 +703,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_reusable_top_level_const_strings_for_astro_and_vite() {
+        let astro_manager = CssVariableManager::new(Config::default());
+        let astro_uri = test_uri("astro.config.ts");
+        let astro_text = r#"
+            import { defineConfig } from "astro/config";
+
+            const FONT_NAME = "--font-const";
+            const FONT_ALIAS = FONT_NAME;
+
+            export default defineConfig({
+                fonts: [{ cssVariable: FONT_ALIAS }],
+            });
+        "#;
+
+        parse_config_document(astro_text, &astro_uri, &astro_manager)
+            .await
+            .unwrap();
+
+        let font = astro_manager.get_variables("--font-const").await;
+        assert_eq!(font.len(), 1);
+        let font_start = astro_text.find("--font-const").unwrap();
+        assert_eq!(
+            font[0].name_range,
+            Some(Range::new(
+                offset_to_position(astro_text, font_start),
+                offset_to_position(astro_text, font_start + "--font-const".len()),
+            ))
+        );
+
+        let vite_manager = CssVariableManager::new(Config::default());
+        let vite_uri = test_uri("vite.config.ts");
+        let vite_text = r#"
+            import { defineConfig } from "vite";
+
+            const SHARED_SCSS = `:root {
+                --vite-const: #123456;
+                --vite-const-derived: var(--base-color);
+            }`;
+
+            export default defineConfig({
+                css: {
+                    preprocessorOptions: {
+                        scss: { additionalData: SHARED_SCSS },
+                    },
+                },
+            });
+        "#;
+
+        parse_config_document(vite_text, &vite_uri, &vite_manager)
+            .await
+            .unwrap();
+
+        assert_eq!(vite_manager.get_variables("--vite-const").await.len(), 1);
+        assert_eq!(
+            vite_manager
+                .get_variables("--vite-const-derived")
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(vite_manager.get_usages("--base-color").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn const_string_resolution_rejects_dynamic_or_unsafe_bindings() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                import { defineConfig } from "astro/config";
+
+                let LET_NAME = "--font-let";
+                var VAR_NAME = "--font-var";
+                const REASSIGNED = "--font-before-reassignment";
+                REASSIGNED = "--font-after-reassignment";
+                const DYNAMIC = `--font-${family}`;
+
+                export default defineConfig({
+                    fonts: [
+                        { cssVariable: LET_NAME },
+                        { cssVariable: VAR_NAME },
+                        { cssVariable: REASSIGNED },
+                        { cssVariable: DYNAMIC },
+                        { cssVariable: DECLARED_AFTER_USE },
+                        { cssVariable: LOCAL_ONLY },
+                    ],
+                });
+
+                const DECLARED_AFTER_USE = "--font-after-use";
+                function unused() {
+                    const LOCAL_ONLY = "--font-local";
+                    return LOCAL_ONLY;
+                }
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        for name in [
+            "--font-let",
+            "--font-var",
+            "--font-before-reassignment",
+            "--font-after-reassignment",
+            "--font-after-use",
+            "--font-local",
+        ] {
+            assert!(manager.get_variables(name).await.is_empty(), "{name}");
+        }
+    }
+
+    #[tokio::test]
     async fn vite_extraction_accepts_commonjs_and_rejects_dynamic_or_unrelated_values() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("vite.config.cjs");
