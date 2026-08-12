@@ -22,7 +22,7 @@ use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::manager::CssVariableManager;
 use crate::parsers::css::{parse_css_snippet, CssParseContext};
-use crate::types::{offset_to_position, CssVariable, CssVariableSource};
+use crate::types::{offset_to_position, CssVariable};
 
 pub(crate) const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const ASTRO_CONFIG_NAMES: &[&str] = &[
@@ -54,6 +54,21 @@ enum ConfigKind {
     Vite,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ConfigVariableSource {
+    AstroFont,
+    ViteScssAdditionalData,
+}
+
+impl ConfigVariableSource {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::AstroFont => "Astro font configuration",
+            Self::ViteScssAdditionalData => "Vite SCSS additionalData",
+        }
+    }
+}
+
 fn config_kind(path: &Path) -> Option<ConfigKind> {
     let name = path.file_name()?.to_str()?;
     if ASTRO_CONFIG_NAMES.contains(&name) {
@@ -75,6 +90,13 @@ fn supports_commonjs(path: &Path) -> bool {
 /// Return whether a path is a supported framework configuration source.
 pub fn is_supported_config_path(path: &Path) -> bool {
     config_kind(path).is_some()
+}
+
+pub(crate) fn config_variable_source(uri: &Uri) -> Option<ConfigVariableSource> {
+    match config_kind(Path::new(uri.path().as_str()))? {
+        ConfigKind::Astro => Some(ConfigVariableSource::AstroFont),
+        ConfigKind::Vite => Some(ConfigVariableSource::ViteScssAdditionalData),
+    }
 }
 
 /// Parse a recognized framework configuration file without executing it.
@@ -117,7 +139,6 @@ pub async fn parse_config_document(
             important: false,
             inline: false,
             source_position: extracted.declaration_span.start as usize,
-            source: CssVariableSource::AstroFont,
         })
         .collect();
 
@@ -137,11 +158,7 @@ pub async fn parse_config_document(
             })
             .await?;
         }
-        let mut snippet_variables = snippet_manager.get_document_variables(uri).await;
-        for variable in &mut snippet_variables {
-            variable.source = CssVariableSource::ViteScssAdditionalData;
-        }
-        variables.extend(snippet_variables);
+        variables.extend(snippet_manager.get_document_variables(uri).await);
         usages.extend(snippet_manager.get_document_usages(uri).await);
     }
 

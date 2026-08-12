@@ -4,8 +4,7 @@ use tracing::warn;
 use crate::color::normalized_color_key;
 use crate::manager::CssVariableManager;
 use crate::types::{
-    offset_to_position, CssVariable, CssVariableSource, CssVariableUsage, DOMNodeInfo,
-    LiteralColorOccurrence,
+    offset_to_position, CssVariable, CssVariableUsage, DOMNodeInfo, LiteralColorOccurrence,
 };
 
 const UNKNOWN_SELECTOR: &str = "<unknown>";
@@ -202,7 +201,6 @@ async fn extract_definitions(
                 important: value.to_lowercase().contains("!important"),
                 inline,
                 source_position: abs_name_start,
-                source: CssVariableSource::Css,
             })
         },
         |variable| async move {
