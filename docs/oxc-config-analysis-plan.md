@@ -4,7 +4,7 @@
 
 Phases 0 through 2 are implemented for Astro font variables. The first Phase 3
 slice is implemented as a stacked change for static CSS custom properties in
-Vite's `css.preprocessorOptions.*.additionalData`. Other Vite and framework
+Vite's `css.preprocessorOptions.scss.additionalData`. Other Vite and framework
 extractors remain future, use-case-driven work.
 
 The initial macOS aarch64 release build measured 8,039,360 bytes with Oxc versus 7,176,352 bytes on `master`, an increase of 863,008 bytes, or approximately 12%. This result is acceptable for the initial implementation but should continue to be tracked in release review.
@@ -371,11 +371,21 @@ export default defineConfig({
 ```
 
 The initial Vite extractor accepts only direct string literals and
-no-substitution template literals under `sass`, `scss`, `less`, `styl`, or
-`stylus`. It parses those snippets through the existing CSS parser so
-completion, diagnostics, symbols, and navigation preserve the source ranges in
-`vite.config.*`. Function-valued `additionalData`, escaped strings whose source
-does not match the decoded value, and unrelated properties are ignored.
+no-substitution template literals under `scss`. It parses those snippets
+through the existing CSS parser so definitions and `var()` usages preserve
+their source ranges in `vite.config.*`. Completion, diagnostics, references,
+symbols, and navigation then use the same workspace indexes as ordinary CSS.
+Function-valued `additionalData`, escaped literals, non-SCSS preprocessors, and
+unrelated properties are ignored.
+
+SCSS control-flow and reusable-code directives such as `@if`, `@for`,
+`@mixin`, and `@include` cause the entire snippet to be ignored. This avoids
+indexing declarations from branches or mixins that may never emit CSS. CRLF is
+preserved by using the exact template source when it contains no escapes.
+
+As with ordinary CSS files, the current manager is workspace-global rather
+than import-graph-aware. A statically extracted SCSS definition is therefore
+offered across CSS-like documents in the workspace.
 
 ### Initial candidates
 

@@ -125,6 +125,63 @@ impl CssVariableManager {
         Ok(())
     }
 
+    /// Atomically replace variable definitions and usages owned by one document.
+    pub async fn replace_document_analysis(
+        &self,
+        uri: &Uri,
+        variables: Vec<CssVariable>,
+        usages: Vec<CssVariableUsage>,
+    ) -> Result<(), String> {
+        if variables.iter().any(|variable| &variable.uri != uri)
+            || usages.iter().any(|usage| &usage.uri != uri)
+        {
+            return Err("Replacement analysis must belong to the target document".to_string());
+        }
+
+        let max_documents = self.config.read().await.max_documents;
+        let mut tracked = self.tracked_documents.write().await;
+        let introduces_document = !variables.is_empty() && !tracked.contains(uri);
+        if max_documents > 0 && introduces_document && tracked.len() >= max_documents {
+            return Err(format!(
+                "Maximum document limit ({max_documents}) reached. Cannot add more documents."
+            ));
+        }
+
+        // Keep the same tracked -> variables -> usages order as document removal.
+        let mut vars = self.variables.write().await;
+        let mut stored_usages = self.usages.write().await;
+
+        for definitions in vars.values_mut() {
+            definitions.retain(|variable| &variable.uri != uri);
+        }
+        vars.retain(|_, definitions| !definitions.is_empty());
+
+        for document_usages in stored_usages.values_mut() {
+            document_usages.retain(|usage| &usage.uri != uri);
+        }
+        stored_usages.retain(|_, document_usages| !document_usages.is_empty());
+
+        if variables.is_empty() {
+            tracked.remove(uri);
+        } else {
+            tracked.insert(uri.clone());
+            for variable in variables {
+                vars.entry(variable.name.clone())
+                    .or_default()
+                    .push(variable);
+            }
+        }
+
+        for usage in usages {
+            stored_usages
+                .entry(usage.name.clone())
+                .or_default()
+                .push(usage);
+        }
+
+        Ok(())
+    }
+
     /// Add a variable usage
     pub async fn add_usage(&self, usage: CssVariableUsage) {
         let mut usages = self.usages.write().await;
@@ -587,6 +644,35 @@ mod tests {
         assert!(manager.get_variables("--old").await.is_empty());
         assert_eq!(manager.get_variables("--new-a").await.len(), 1);
         assert_eq!(manager.get_variables("--new-b").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn replace_document_analysis_replaces_definitions_and_usages_together() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///vite.config.ts").unwrap();
+
+        manager
+            .replace_document_analysis(
+                &uri,
+                vec![create_test_variable("--old", "red", ":root", uri.as_str())],
+                vec![create_test_usage("--old-dependency", ":root", uri.as_str())],
+            )
+            .await
+            .unwrap();
+
+        manager
+            .replace_document_analysis(
+                &uri,
+                vec![create_test_variable("--new", "blue", ":root", uri.as_str())],
+                vec![create_test_usage("--new-dependency", ":root", uri.as_str())],
+            )
+            .await
+            .unwrap();
+
+        assert!(manager.get_variables("--old").await.is_empty());
+        assert!(manager.get_usages("--old-dependency").await.is_empty());
+        assert_eq!(manager.get_variables("--new").await.len(), 1);
+        assert_eq!(manager.get_usages("--new-dependency").await.len(), 1);
     }
 
     #[tokio::test]

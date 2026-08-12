@@ -33,7 +33,7 @@ const VITE_CONFIG_NAMES: &[&str] = &[
     "vite.config.mts",
     "vite.config.cts",
 ];
-const VITE_PREPROCESSORS: &[&str] = &["sass", "scss", "less", "styl", "stylus"];
+const VITE_PREPROCESSOR: &str = "scss";
 
 #[derive(Clone, Copy)]
 enum ConfigKind {
@@ -102,6 +102,7 @@ pub async fn parse_config_document(
         })
         .collect();
 
+    let mut usages = Vec::new();
     if !extracted.css_snippets.is_empty() {
         let snippet_manager = CssVariableManager::new(manager.get_config().await);
         for snippet in extracted.css_snippets {
@@ -118,9 +119,12 @@ pub async fn parse_config_document(
             .await?;
         }
         variables.extend(snippet_manager.get_document_variables(uri).await);
+        usages.extend(snippet_manager.get_document_usages(uri).await);
     }
 
-    manager.replace_document_variables(uri, variables).await
+    manager
+        .replace_document_analysis(uri, variables, usages)
+        .await
 }
 
 fn extract_config_variables(
@@ -154,6 +158,11 @@ fn extract_config_variables(
         imports.collect_commonjs_program(&parsed.program);
     }
 
+    let has_esm_default = parsed
+        .program
+        .body
+        .iter()
+        .any(|statement| matches!(statement, Statement::ExportDefaultDeclaration(_)));
     let extracted = match kind {
         ConfigKind::Astro => {
             let mut extractor = AstroFontExtractor {
@@ -162,7 +171,7 @@ fn extract_config_variables(
                 variables: Vec::new(),
             };
             extractor.visit_program(&parsed.program);
-            if supports_commonjs(path) {
+            if supports_commonjs(path) && !has_esm_default {
                 extractor.extract_commonjs_program(&parsed.program);
             }
             ConfigExtraction {
@@ -177,7 +186,7 @@ fn extract_config_variables(
                 css_snippets: Vec::new(),
             };
             extractor.visit_program(&parsed.program);
-            if supports_commonjs(path) {
+            if supports_commonjs(path) && !has_esm_default {
                 extractor.extract_commonjs_program(&parsed.program);
             }
             ConfigExtraction {
@@ -263,7 +272,9 @@ impl<'s> DefineConfigImportCollector<'s> {
 
 impl<'a> Visit<'a> for DefineConfigImportCollector<'_> {
     fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
-        if declaration.source.value.as_str() != self.module_source {
+        if declaration.import_kind.is_type()
+            || declaration.source.value.as_str() != self.module_source
+        {
             return;
         }
         let Some(specifiers) = declaration.specifiers.as_ref() else {
@@ -274,7 +285,9 @@ impl<'a> Visit<'a> for DefineConfigImportCollector<'_> {
             let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
                 continue;
             };
-            if specifier.imported.name().as_str() == "defineConfig" {
+            if specifier.import_kind.is_value()
+                && specifier.imported.name().as_str() == "defineConfig"
+            {
                 self.define_config_bindings
                     .insert(specifier.local.name.as_str().to_string());
             }
@@ -391,23 +404,23 @@ impl ViteAdditionalDataExtractor<'_> {
             return;
         };
 
-        for preprocessor in VITE_PREPROCESSORS {
-            let Some(options) = object_property(preprocessor_options, preprocessor)
-                .map(unwrap_expression)
-                .and_then(as_object_expression)
-            else {
-                continue;
-            };
-            let Some(additional_data) = object_property(options, "additionalData") else {
-                continue;
-            };
-            let Some((text, content_span)) = static_string_value(additional_data, self.source)
-            else {
-                continue;
-            };
-            self.css_snippets
-                .push(ExtractedCssSnippet { text, content_span });
+        let Some(options) = object_property(preprocessor_options, VITE_PREPROCESSOR)
+            .map(unwrap_expression)
+            .and_then(as_object_expression)
+        else {
+            return;
+        };
+        let Some(additional_data) = object_property(options, "additionalData") else {
+            return;
+        };
+        let Some((text, content_span)) = static_string_value(additional_data, self.source) else {
+            return;
+        };
+        if contains_unsupported_scss_control_flow(&text) {
+            return;
         }
+        self.css_snippets
+            .push(ExtractedCssSnippet { text, content_span });
     }
 }
 
@@ -559,20 +572,46 @@ fn static_string_value(expression: &Expression<'_>, source: &str) -> Option<(Str
         Expression::TemplateLiteral(template)
             if template.expressions.is_empty() && template.quasis.len() == 1 =>
         {
-            let quasi = &template.quasis[0];
-            let value = quasi
-                .value
-                .cooked
-                .as_ref()
-                .unwrap_or(&quasi.value.raw)
-                .as_str()
-                .to_string();
             let span = literal_content_span(template.span);
             let raw = source.get(span.start as usize..span.end as usize)?;
-            (raw == value).then_some((value, span))
+            (!raw.contains('\\')).then_some((raw.to_string(), span))
         }
         _ => None,
     }
+}
+
+fn contains_unsupported_scss_control_flow(source: &str) -> bool {
+    const UNSUPPORTED_AT_RULES: &[&str] = &[
+        "if", "else", "for", "each", "while", "mixin", "include", "content", "function", "return",
+        "extend", "at-root",
+    ];
+
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'@' {
+            index += 1;
+            continue;
+        }
+
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-') {
+            end += 1;
+        }
+        if end > start {
+            let name = &source[start..end];
+            if UNSUPPORTED_AT_RULES
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            {
+                return true;
+            }
+        }
+        index = end.max(index + 1);
+    }
+
+    false
 }
 
 fn span_to_range(text: &str, span: Span) -> Range {
@@ -631,10 +670,11 @@ mod tests {
                         scss: {
                             additionalData: `:root {
                                 --vite-brand: #123456;
+                                --vite-derived: var(--base-color);
                             }`,
                         },
                         less: {
-                            additionalData: ".theme { --vite-accent: rebeccapurple; }",
+                            additionalData: ".theme { --vite-less: rebeccapurple; }",
                         },
                     },
                 },
@@ -657,10 +697,9 @@ mod tests {
             )
         );
 
-        let accent = manager.get_variables("--vite-accent").await;
-        assert_eq!(accent.len(), 1);
-        assert_eq!(accent[0].value, "rebeccapurple");
-        assert_eq!(accent[0].selector, ".theme");
+        assert_eq!(manager.get_variables("--vite-derived").await.len(), 1);
+        assert_eq!(manager.get_usages("--base-color").await.len(), 1);
+        assert!(manager.get_variables("--vite-less").await.is_empty());
     }
 
     #[tokio::test]
@@ -680,7 +719,7 @@ mod tests {
                             scss: {
                                 additionalData: () => ":root { --dynamic: red; }",
                             },
-                            less: {
+                            scss: {
                                 additionalData: ":root { --vite-cjs: blue; }",
                             },
                         },
@@ -723,6 +762,122 @@ mod tests {
         .unwrap();
 
         assert!(manager.get_variables("--unproven-vite").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_rejects_type_only_define_config_imports() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                import type { defineConfig } from "vite";
+                export default defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --type-only-vite: red; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--type-only-vite").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_prefers_esm_over_commonjs_in_ambiguous_sources() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                import { defineConfig } from "vite";
+                export default defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-esm: red; }",
+                            },
+                        },
+                    },
+                });
+                module.exports = {
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-cjs-shadow: blue; }",
+                            },
+                        },
+                    },
+                };
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--vite-esm").await.len(), 1);
+        assert!(manager.get_variables("--vite-cjs-shadow").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_preserves_crlf_template_ranges() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        let text = "import { defineConfig } from \"vite\";\r\nexport default defineConfig({ css: { preprocessorOptions: { scss: { additionalData: `:root {\r\n  --vite-crlf: red;\r\n}` } } } });\r\n";
+
+        parse_config_document(text, &uri, &manager).await.unwrap();
+
+        let variable = manager.get_variables("--vite-crlf").await;
+        assert_eq!(variable.len(), 1);
+        let start = text.find("--vite-crlf").unwrap();
+        assert_eq!(
+            variable[0].name_range,
+            Some(Range::new(
+                offset_to_position(text, start),
+                offset_to_position(text, start + "--vite-crlf".len()),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_rejects_scss_control_flow_conservatively() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                export default {
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: `
+                                    @if false {
+                                        :root { --vite-phantom: red; }
+                                    }
+                                    :root { --vite-after-conditional: blue; }
+                                `,
+                            },
+                        },
+                    },
+                };
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--vite-phantom").await.is_empty());
+        assert!(manager
+            .get_variables("--vite-after-conditional")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
