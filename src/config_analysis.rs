@@ -1359,6 +1359,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_static_config_structures_and_vite_function_returns() {
+        let astro_manager = CssVariableManager::new(Config::default());
+        let astro_uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                import { defineConfig } from "astro/config";
+
+                const BODY_FONT = { cssVariable: "--font-structured-body" };
+                const HEADING_FONT = { cssVariable: "--font-structured-heading" };
+                const BASE_FONTS = [BODY_FONT];
+                const FONTS = [...BASE_FONTS, HEADING_FONT];
+                const FONT_CONFIG = { fonts: FONTS };
+                const CONFIG = { ...FONT_CONFIG };
+
+                export default defineConfig(CONFIG);
+            "#,
+            &astro_uri,
+            &astro_manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            astro_manager
+                .get_variables("--font-structured-body")
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            astro_manager
+                .get_variables("--font-structured-heading")
+                .await
+                .len(),
+            1
+        );
+
+        let vite_manager = CssVariableManager::new(Config::default());
+        let vite_uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                import { defineConfig } from "vite";
+
+                const SHARED_SCSS = `:root { --vite-structured: #123456; }`;
+                const SCSS = { additionalData: SHARED_SCSS };
+                const PREPROCESSORS = { scss: SCSS };
+                const CSS = { preprocessorOptions: PREPROCESSORS };
+                const BASE = { css: CSS };
+
+                export default defineConfig(() => ({ ...BASE }));
+            "#,
+            &vite_uri,
+            &vite_manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            vite_manager
+                .get_variables("--vite-structured")
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn static_structure_resolution_rejects_unknown_overrides_and_dynamic_functions() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                import { defineConfig } from "vite";
+
+                const VALID = {
+                    css: {
+                        preprocessorOptions: {
+                            scss: { additionalData: ":root { --vite-before-unknown: red; }" },
+                        },
+                    },
+                    ...runtimeConfig,
+                };
+
+                export default defineConfig((env) => {
+                    if (env.mode === "production") {
+                        return VALID;
+                    }
+                    return {
+                        css: {
+                            preprocessorOptions: {
+                                scss: { additionalData: ":root { --vite-dynamic-return: blue; }" },
+                            },
+                        },
+                    };
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--vite-before-unknown")
+            .await
+            .is_empty());
+        assert!(manager
+            .get_variables("--vite-dynamic-return")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn vite_extraction_accepts_commonjs_and_rejects_dynamic_or_unrelated_values() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("vite.config.cjs");
