@@ -8,8 +8,8 @@ use oxc_ast::ast::{
     BlockStatement, CatchClause, ExportDefaultDeclaration, Expression, ForInStatement,
     ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, ImportDeclaration,
     ImportDeclarationSpecifier, MemberExpression, ObjectExpression, ObjectPropertyKind, Program,
-    PropertyKey, SimpleAssignmentTarget, Statement, UpdateExpression, VariableDeclaration,
-    VariableDeclarator,
+    PropertyKey, SimpleAssignmentTarget, Statement, SwitchStatement, UpdateExpression,
+    VariableDeclaration, VariableDeclarator,
 };
 use oxc_ast_visit::{
     walk::{walk_assignment_expression, walk_block_statement, walk_update_expression},
@@ -364,6 +364,31 @@ impl AssignedBindingCollector {
         names
     }
 
+    fn switch_shadow_names(statement: &SwitchStatement<'_>) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for case in &statement.cases {
+            for statement in &case.consequent {
+                match statement {
+                    Statement::VariableDeclaration(declaration) => {
+                        names.extend(Self::lexical_declaration_names(declaration));
+                    }
+                    Statement::FunctionDeclaration(function) => {
+                        if let Some(identifier) = &function.id {
+                            names.insert(identifier.name.as_str().to_string());
+                        }
+                    }
+                    Statement::ClassDeclaration(class) => {
+                        if let Some(identifier) = &class.id {
+                            names.insert(identifier.name.as_str().to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        names
+    }
+
     fn with_shadowed_scope(&mut self, names: HashSet<String>, visit: impl FnOnce(&mut Self)) {
         self.shadowed_scopes.push(names);
         visit(self);
@@ -396,6 +421,14 @@ impl<'a> Visit<'a> for AssignedBindingCollector {
         }
         self.with_shadowed_scope(names.names, |collector| {
             collector.visit_block_statement(&clause.body);
+        });
+    }
+
+    fn visit_switch_statement(&mut self, statement: &SwitchStatement<'a>) {
+        self.visit_expression(&statement.discriminant);
+        let names = Self::switch_shadow_names(statement);
+        self.with_shadowed_scope(names, |collector| {
+            collector.visit_switch_cases(&statement.cases);
         });
     }
 
@@ -1264,6 +1297,13 @@ mod tests {
                     let SHADOWED = 0;
                     SHADOWED++;
                 }
+                const SWITCH_SHADOWED = "--font-switch-shadowed";
+                switch (mode) {
+                    case 1:
+                        let SWITCH_SHADOWED;
+                        SWITCH_SHADOWED = source;
+                        break;
+                }
                 const CYCLE_A = CYCLE_B;
                 const CYCLE_B = CYCLE_A;
                 const VALUE_20 = "--font-depth";
@@ -1284,6 +1324,7 @@ mod tests {
         assert!(!values.contains_key("FOR_OF_TARGET"));
         assert!(!values.contains_key("TS_WRAPPED"));
         assert!(values.contains_key("SHADOWED"));
+        assert!(values.contains_key("SWITCH_SHADOWED"));
         assert!(!values.contains_key("CYCLE_A"));
         assert!(!values.contains_key("CYCLE_B"));
         assert!(!values.contains_key("VALUE_0"));
