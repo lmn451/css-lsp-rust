@@ -1236,6 +1236,24 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         Uri::from_file_path(root.join("astro.config.mjs")).unwrap()
     );
     let config_text = std::fs::read_to_string(root.join("astro.config.mjs")).unwrap();
+    let config_uri = Uri::from_file_path(root.join("astro.config.mjs")).unwrap();
+    let document_symbols_request = Request::build("textDocument/documentSymbol")
+        .id(48)
+        .params(serde_json::json!({
+            "textDocument": { "uri": config_uri.clone() }
+        }))
+        .finish();
+    let document_symbols = send_request_for_result(&mut service, document_symbols_request)
+        .await
+        .expect("Astro config document symbols should resolve");
+    let document_symbols: ls_types::DocumentSymbolResponse =
+        serde_json::from_value(document_symbols).unwrap();
+    let ls_types::DocumentSymbolResponse::Nested(document_symbols) = document_symbols else {
+        panic!("expected nested Astro config document symbols");
+    };
+    assert!(document_symbols
+        .iter()
+        .all(|symbol| { symbol.detail.as_deref() == Some("Astro font configuration") }));
     let roboto_start = config_text.find("--font-roboto").unwrap();
     assert_eq!(
         roboto[0].location.range,
@@ -1354,7 +1372,6 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         .await
         .expect("rename should return an edit");
     let rename: ls_types::WorkspaceEdit = serde_json::from_value(rename).unwrap();
-    let config_uri = Uri::from_file_path(root.join("astro.config.mjs")).unwrap();
     let config_edits = rename
         .changes
         .as_ref()
