@@ -3,9 +3,11 @@
 ## Status
 
 Phases 0 through 2 are implemented for Astro font variables. The first Phase 3
-slice is implemented as a stacked change for static CSS custom properties in
-Vite's `css.preprocessorOptions.scss.additionalData`. Other Vite and framework
-extractors remain future, use-case-driven work.
+slice is implemented for static CSS custom properties in Vite's
+`css.preprocessorOptions.scss.additionalData`. The first Phase 4 slice adds a
+shared, bounded resolver for immutable module-level `const` strings used by
+both extractors. Other static operations and framework extractors remain
+future, use-case-driven work.
 
 The initial macOS aarch64 release build measured 8,039,360 bytes with Oxc versus 7,176,352 bytes on `master`, an increase of 863,008 bytes, or approximately 12%. This result is acceptable for the initial implementation but should continue to be tracked in release review.
 
@@ -432,6 +434,29 @@ Do not attempt control-flow evaluation of `command`, `mode`, environment variabl
 ## Phase 4: reusable static values
 
 Only add a static-value engine after at least two extractors need it.
+
+### Implemented first slice: module-level `const` strings
+
+Astro `fonts[].cssVariable` and Vite SCSS `additionalData` may reference a
+direct module-level `const` string or a chain of such aliases:
+
+```ts
+const FONT_VARIABLE = "--font-body";
+const FONT_ALIAS = FONT_VARIABLE;
+const SHARED_SCSS = `:root { --brand: #123456; }`;
+```
+
+Resolution remains syntax-only and preserves the originating literal span for
+rename and navigation. A binding is ignored when it is declared after the
+reference, reassigned or updated at module scope, declared with `let` or `var`,
+nested inside a function, cyclic, escaped, substitution-bearing, or deeper than
+the configured traversal limits. Resolution is capped at 16 recursive levels
+and 64 visited expressions per requested binding.
+
+This slice deliberately does not resolve object or array constants, exported
+declarations, destructuring, concatenation, spreads, computed properties,
+imports, calls, or `JSON.stringify`. Those operations remain candidates only
+when a concrete extractor requires them and can define conservative semantics.
 
 Potential supported operations:
 

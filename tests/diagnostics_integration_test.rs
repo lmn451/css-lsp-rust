@@ -1191,6 +1191,19 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         roboto[0].location.uri,
         Uri::from_file_path(root.join("astro.config.mjs")).unwrap()
     );
+    let config_text = std::fs::read_to_string(root.join("astro.config.mjs")).unwrap();
+    let roboto_start = config_text.find("--font-roboto").unwrap();
+    assert_eq!(
+        roboto[0].location.range,
+        Range::new(
+            css_variable_lsp::types::offset_to_position(&config_text, roboto_start),
+            css_variable_lsp::types::offset_to_position(
+                &config_text,
+                roboto_start + "--font-roboto".len(),
+            ),
+        ),
+        "indirect Astro definitions should navigate to the resolved const literal"
+    );
     assert_eq!(
         workspace_symbols(&mut service, "--font-inter").await.len(),
         1
@@ -1253,6 +1266,28 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         "workspace symbols and goto definition must expose the same declaration range"
     );
 
+    let rename_request = Request::build("textDocument/rename")
+        .id(46)
+        .params(serde_json::json!({
+            "textDocument": { "uri": definition_consumer_uri },
+            "position": position_of(definition_consumer_text, "--font-roboto"),
+            "newName": "--font-renamed"
+        }))
+        .finish();
+    let rename = send_request_for_result(&mut service, rename_request)
+        .await
+        .expect("rename should return an edit");
+    let rename: ls_types::WorkspaceEdit = serde_json::from_value(rename).unwrap();
+    let config_uri = Uri::from_file_path(root.join("astro.config.mjs")).unwrap();
+    let config_edits = rename
+        .changes
+        .as_ref()
+        .and_then(|changes| changes.get(&config_uri))
+        .expect("rename should edit the resolved const literal");
+    assert_eq!(config_edits.len(), 1);
+    assert_eq!(config_edits[0].range, roboto[0].location.range);
+    assert_eq!(config_edits[0].new_text, "--font-renamed");
+
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1290,6 +1325,19 @@ async fn test_initialize_indexes_vite_preprocessor_additional_data() {
     let symbols = workspace_symbols(&mut service, "--vite-brand").await;
     assert_eq!(symbols.len(), 1);
     assert_eq!(symbols[0].location.uri, config_uri);
+    let vite_start = config_text.find("--vite-brand").unwrap();
+    let vite_end = vite_start
+        + config_text[vite_start..]
+            .find(';')
+            .expect("Vite declaration should end with a semicolon");
+    assert_eq!(
+        symbols[0].location.range,
+        Range::new(
+            css_variable_lsp::types::offset_to_position(config_text, vite_start),
+            css_variable_lsp::types::offset_to_position(config_text, vite_end),
+        ),
+        "Vite definitions should retain the CSS declaration range inside the const literal"
+    );
 
     let diagnostic_uri = Uri::from_file_path(root.join("diagnostic.css")).unwrap();
     open_document(
