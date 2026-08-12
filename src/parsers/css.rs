@@ -682,7 +682,10 @@ async fn extract_usages(
                 manager.add_usage(usage).await;
             }
 
-            i = var_end;
+            // Continue through the arguments so nested var() calls used as fallbacks are
+            // indexed as usages too. Starting after the opening parenthesis avoids
+            // re-indexing the outer call while retaining the normal comment/string guards.
+            i = args_start;
             continue;
         }
 
@@ -1078,10 +1081,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parse_css_document_skips_nested_var_fallback_usages() {
+    async fn parse_css_document_indexes_nested_var_fallback_usages() {
         let manager = CssVariableManager::new(Config::default());
         let uri = Uri::from_str("file:///test.css").unwrap();
-        let text = ".button { color: var(--primary, var(--fallback)); }";
+        let text = ".button { color: var(--primary, var(--fallback, var(--deep))); }";
 
         parse_css_document(text, &uri, &manager).await.unwrap();
 
@@ -1089,7 +1092,20 @@ mod tests {
         assert_eq!(primary_usages.len(), 1);
 
         let fallback_usages = manager.get_usages("--fallback").await;
-        assert_eq!(fallback_usages.len(), 0);
+        assert_eq!(fallback_usages.len(), 1);
+        let fallback_start = text.find("var(--fallback").unwrap();
+        assert_eq!(
+            fallback_usages[0].range.start,
+            offset_to_position(text, fallback_start),
+        );
+
+        let deep_usages = manager.get_usages("--deep").await;
+        assert_eq!(deep_usages.len(), 1);
+        let deep_name_start = text.find("--deep").unwrap();
+        assert_eq!(
+            deep_usages[0].name_range.unwrap().start,
+            offset_to_position(text, deep_name_start),
+        );
     }
 
     #[tokio::test]

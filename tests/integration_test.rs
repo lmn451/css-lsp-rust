@@ -245,7 +245,7 @@ async fn test_var_fallback_handling() {
         .await
         .unwrap();
 
-    // Verify usages are tracked (but not nested fallbacks)
+    // Verify usages are tracked, including nested fallbacks.
     let primary_usages = manager.get_usages("--primary-color").await;
     assert_eq!(primary_usages.len(), 1);
 
@@ -255,9 +255,9 @@ async fn test_var_fallback_handling() {
     let spacing_usages = manager.get_usages("--spacing").await;
     assert_eq!(spacing_usages.len(), 1);
 
-    // Nested fallback should not be tracked as separate usage
+    // Nested fallback is a separate variable usage.
     let fallback_usages = manager.get_usages("--fallback").await;
-    assert_eq!(fallback_usages.len(), 0);
+    assert_eq!(fallback_usages.len(), 1);
 }
 
 /// Integration test: CSS variables in @media queries
@@ -646,9 +646,9 @@ async fn test_lsp_rename_preserves_fallbacks() {
     let secondary_usages = manager.get_usages("--secondary-color").await;
     assert_eq!(secondary_usages.len(), 1); // One with fallback
 
-    // Verify nested fallback is NOT tracked (as expected)
+    // Verify nested fallback is tracked for references and rename.
     let fallback_usages = manager.get_usages("--fallback-color").await;
-    assert_eq!(fallback_usages.len(), 0); // Nested fallbacks should not be tracked
+    assert_eq!(fallback_usages.len(), 1);
 
     // Test that ranges are correct for rename operations
     let (defs, usages) = manager.get_references("--primary-color").await;

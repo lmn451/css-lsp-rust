@@ -37,7 +37,10 @@ pub async fn parse_html_document(
             .find_node_at_position(inline.attribute_start);
 
         let context = CssParseContext {
-            css_text: &inline.value,
+            // CSS ranges must be measured against the raw attribute text. The decoded
+            // value can be shorter than an entity such as `&quot;`, shifting every range
+            // that follows it in the source document.
+            css_text: &inline.raw_value,
             full_text: text,
             uri,
             manager,
@@ -56,7 +59,7 @@ pub async fn parse_html_document(
 mod tests {
     use super::*;
     use crate::manager::CssVariableManager;
-    use crate::types::Config;
+    use crate::types::{offset_to_position, Config};
     use std::collections::HashSet;
     use std::str::FromStr;
 
@@ -108,6 +111,33 @@ mod tests {
         assert!(literals.contains("#fff"));
         assert!(literals.contains("rgb(255, 0, 0)"));
         assert!(!literals.contains("blue"));
+    }
+
+    #[tokio::test]
+    async fn parse_html_document_preserves_raw_offsets_after_inline_entities() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///test.html").unwrap();
+        let text =
+            r#"<div style="content: &quot;x&quot;; color: var(--tone); --after: red"></div>"#;
+
+        parse_html_document(text, &uri, &manager).await.unwrap();
+
+        let usage = manager.get_usages("--tone").await.pop().unwrap();
+        let usage_start = text.find("var(--tone)").unwrap();
+        let name_start = text.find("--tone").unwrap();
+        assert_eq!(usage.range.start, offset_to_position(text, usage_start));
+        assert_eq!(
+            usage.name_range.unwrap().start,
+            offset_to_position(text, name_start),
+        );
+
+        let definition = manager.get_variables("--after").await.pop().unwrap();
+        let definition_start = text.find("--after").unwrap();
+        assert_eq!(definition.source_position, definition_start);
+        assert_eq!(
+            definition.name_range.unwrap().start,
+            offset_to_position(text, definition_start),
+        );
     }
 }
 

@@ -113,6 +113,7 @@ pub struct StyleBlock {
 #[derive(Debug, Clone)]
 pub struct InlineStyle {
     pub value: String,
+    pub raw_value: String,
     pub value_start: usize,
     pub attribute_start: usize,
 }
@@ -245,6 +246,7 @@ impl DomTree {
                 }
 
                 let mut value: Option<String> = None;
+                let mut raw_value: Option<String> = None;
                 let mut value_start = None;
                 if i < len && bytes[i] == b'=' {
                     i += 1;
@@ -259,8 +261,9 @@ impl DomTree {
                             i += 1;
                         }
                         let end = i.min(len);
-                        let raw_value = html[start..end].to_string();
-                        value = Some(decode_html_entities(&raw_value));
+                        let raw = html[start..end].to_string();
+                        value = Some(decode_html_entities(&raw));
+                        raw_value = Some(raw);
                         value_start = Some(start);
                         if i < len {
                             i += 1;
@@ -271,8 +274,9 @@ impl DomTree {
                             i += 1;
                         }
                         let end = i;
-                        let raw_value = html[start..end].to_string();
-                        value = Some(decode_html_entities(&raw_value));
+                        let raw = html[start..end].to_string();
+                        value = Some(decode_html_entities(&raw));
+                        raw_value = Some(raw);
                         value_start = Some(start);
                     }
                 }
@@ -291,9 +295,12 @@ impl DomTree {
                         }
                     }
                     "style" => {
-                        if let (Some(v), Some(v_start)) = (value.clone(), value_start) {
+                        if let (Some(v), Some(raw), Some(v_start)) =
+                            (value.clone(), raw_value, value_start)
+                        {
                             inline_styles.push(InlineStyle {
                                 value: v,
+                                raw_value: raw,
                                 value_start: v_start,
                                 attribute_start: attr_name_start,
                             });

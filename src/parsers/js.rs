@@ -84,6 +84,26 @@ fn append_blank_bytes(content: &mut String, byte_count: usize) {
     content.extend(std::iter::repeat_n(' ', byte_count));
 }
 
+fn escaped_sequence_byte_len(text: &str, slash_offset: usize) -> usize {
+    let bytes = text.as_bytes();
+    if slash_offset + 1 >= bytes.len() {
+        return 1;
+    }
+
+    if bytes[slash_offset + 1] == b'\r'
+        && slash_offset + 2 < bytes.len()
+        && bytes[slash_offset + 2] == b'\n'
+    {
+        return 3;
+    }
+
+    1 + text[slash_offset + 1..]
+        .chars()
+        .next()
+        .map(char::len_utf8)
+        .unwrap_or(0)
+}
+
 /// Extract all CSS-like string/template literal snippets from a JS source.
 pub(crate) fn extract_js_css_snippets(text: &str) -> Vec<JsCssSnippet> {
     let bytes = text.as_bytes();
@@ -132,7 +152,7 @@ pub(crate) fn extract_js_css_snippets(text: &str) -> Vec<JsCssSnippet> {
                         // Blank every consumed source byte so later offsets remain stable.
                         if let Some(q) = expr_quote {
                             if bytes[i] == b'\\' {
-                                let consumed = (bytes.len() - i).min(2);
+                                let consumed = escaped_sequence_byte_len(text, i);
                                 append_blank_bytes(&mut content, consumed);
                                 i += consumed;
                                 continue;
@@ -173,7 +193,9 @@ pub(crate) fn extract_js_css_snippets(text: &str) -> Vec<JsCssSnippet> {
 
                     // Inside template literal (not in expression)
                     if bytes[i] == b'\\' {
-                        i += 2;
+                        let consumed = escaped_sequence_byte_len(text, i);
+                        append_blank_bytes(&mut content, consumed);
+                        i += consumed;
                         continue;
                     }
                     if bytes[i] == b'`' {
@@ -289,6 +311,12 @@ mod tests {
     #[tokio::test]
     async fn test_escaped_template_expression_preserves_following_range() {
         let text = r#"const css = `color: ${"re\"d"}; --after: blue;`;"#;
+        assert_variable_name_position(text, "--after").await;
+    }
+
+    #[tokio::test]
+    async fn test_template_escape_preserves_following_range() {
+        let text = r#"const css = `content: \`; --after: blue;`;"#;
         assert_variable_name_position(text, "--after").await;
     }
 
