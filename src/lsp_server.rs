@@ -470,6 +470,15 @@ impl CssVariableLsp {
     }
 
     fn get_word_at_position(&self, text: &str, position: Position) -> Option<String> {
+        self.get_word_and_range_at_position(text, position)
+            .map(|(word, _)| word)
+    }
+
+    fn get_word_and_range_at_position(
+        &self,
+        text: &str,
+        position: Position,
+    ) -> Option<(String, Range)> {
         let offset = position_to_offset(text, position)?;
         let offset = clamp_to_char_boundary(text, offset);
         let before = &text[..offset];
@@ -482,7 +491,15 @@ impl CssVariableLsp {
         let right = after.split(|c: char| !is_word_char(c)).next().unwrap_or("");
         let word = format!("{}{}", left, right);
         if word.starts_with("--") {
-            Some(word)
+            let start = offset - left.len();
+            let end = offset + right.len();
+            Some((
+                word,
+                Range::new(
+                    crate::types::offset_to_position(text, start),
+                    crate::types::offset_to_position(text, end),
+                ),
+            ))
         } else {
             None
         }
@@ -886,22 +903,59 @@ impl LanguageServer for CssVariableLsp {
             paths.clone()
         };
 
-        for removed in params.event.removed {
+        let mut removed_paths = Vec::new();
+        for removed in &params.event.removed {
             if let Some(path) = to_normalized_fs_path(&removed.uri) {
                 current_paths.retain(|p| p != &path);
+                removed_paths.push(path);
             }
         }
 
+        let mut added_folders = Vec::new();
         for added in params.event.added {
             if let Some(path) = to_normalized_fs_path(&added.uri) {
-                current_paths.push(path);
+                if !current_paths.contains(&path) {
+                    current_paths.push(path);
+                    added_folders.push(added);
+                }
             }
         }
 
         current_paths.sort_by_key(|b| std::cmp::Reverse(b.to_string_lossy().len()));
 
-        let mut stored = self.workspace_folder_paths.write().await;
-        *stored = current_paths;
+        {
+            let mut stored = self.workspace_folder_paths.write().await;
+            *stored = current_paths.clone();
+        }
+
+        if !removed_paths.is_empty() {
+            let open_uris: HashSet<Uri> = self.document_map.read().await.keys().cloned().collect();
+            let stale_uris: HashSet<Uri> = self
+                .manager
+                .get_document_uris()
+                .await
+                .into_iter()
+                .filter(|uri| !open_uris.contains(uri))
+                .filter(|uri| {
+                    let Some(path) = to_normalized_fs_path(uri) else {
+                        return false;
+                    };
+                    removed_paths
+                        .iter()
+                        .any(|removed| path.starts_with(removed))
+                        && !current_paths
+                            .iter()
+                            .any(|current| path.starts_with(current))
+                })
+                .collect();
+            self.manager.remove_documents(&stale_uris).await;
+        }
+
+        if added_folders.is_empty() {
+            self.validate_all_open_documents().await;
+        } else {
+            self.scan_workspace_folders(added_folders).await;
+        }
     }
 
     async fn completion(
@@ -1396,54 +1450,10 @@ impl LanguageServer for CssVariableLsp {
             None => return Ok(None),
         };
 
-        let name = match self.get_word_at_position(&text, position) {
-            Some(name) => name,
+        let (_, range) = match self.get_word_and_range_at_position(&text, position) {
+            Some(word_and_range) => word_and_range,
             None => return Ok(None),
         };
-
-        // Prefer the precise name range when available.
-        let definitions = self.manager.get_variables(&name).await;
-        let range = definitions
-            .first()
-            .and_then(|d| d.name_range)
-            .unwrap_or_else(|| {
-                // Fallback to the word bounds at the cursor position.
-                // We intentionally return the cursor word selection rather than the whole declaration.
-                let offset = position_to_offset(&text, position).unwrap_or(0);
-                let offset = clamp_to_char_boundary(&text, offset);
-
-                let before = &text[..offset];
-                let after = &text[offset..];
-
-                // Compute byte indices for the word under the cursor.
-                // We do this manually because LSP positions are UTF-16 based.
-                //
-                // Note: get_word_at_position already verifies we're on a `--var`.
-                // So the scan boundaries are safe for our token definition.
-
-                // Simpler: recompute via byte indices using char_indices
-                let mut start_byte = offset;
-                for (i, c) in before.char_indices().rev() {
-                    if is_word_char(c) {
-                        start_byte = i;
-                    } else {
-                        break;
-                    }
-                }
-                let mut end_byte = offset;
-                for (i, c) in after.char_indices() {
-                    if is_word_char(c) {
-                        end_byte = offset + i + c.len_utf8();
-                    } else {
-                        break;
-                    }
-                }
-
-                Range::new(
-                    crate::types::offset_to_position(&text, start_byte),
-                    crate::types::offset_to_position(&text, end_byte),
-                )
-            });
 
         Ok(Some(PrepareRenameResponse::Range(range)))
     }
@@ -1624,6 +1634,21 @@ impl CssVariableLsp {
                     .log_message(MessageType::ERROR, format!("Workspace scan failed: {}", e))
                     .await;
             }
+        }
+
+        // A disk scan can encounter an open document. Restore its in-memory text so
+        // unsaved editor contents remain authoritative after any initial or repeat scan.
+        let open_documents = {
+            let documents = self.document_map.read().await;
+            let languages = self.document_language_map.read().await;
+            documents
+                .iter()
+                .map(|(uri, text)| (uri.clone(), text.clone(), languages.get(uri).cloned()))
+                .collect::<Vec<_>>()
+        };
+        for (uri, text, language_id) in open_documents {
+            self.parse_document_text(&uri, &text, language_id.as_deref())
+                .await;
         }
 
         self.validate_all_open_documents().await;

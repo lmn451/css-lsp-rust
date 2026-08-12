@@ -51,26 +51,19 @@ impl CssVariableManager {
 
     /// Add a variable definition
     pub async fn add_variable(&self, variable: CssVariable) -> Result<(), String> {
-        let config = self.config.read().await;
+        let max_documents = self.config.read().await.max_documents;
+        let mut tracked = self.tracked_documents.write().await;
 
         // Check document limit
-        if config.max_documents > 0 {
-            let tracked = self.tracked_documents.read().await;
-            if tracked.contains(&variable.uri) {
-                // Document already tracked, no limit check needed
-            } else if tracked.len() >= config.max_documents {
-                return Err(format!(
-                    "Maximum document limit ({}) reached. Cannot add more documents.",
-                    config.max_documents
-                ));
-            }
-            drop(tracked);
-
-            // Track this document
-            let mut tracked = self.tracked_documents.write().await;
-            tracked.insert(variable.uri.clone());
+        if max_documents > 0 && !tracked.contains(&variable.uri) && tracked.len() >= max_documents {
+            return Err(format!(
+                "Maximum document limit ({}) reached. Cannot add more documents.",
+                max_documents
+            ));
         }
+        tracked.insert(variable.uri.clone());
 
+        // Keep the tracked-documents -> variables lock order consistent with removals.
         let mut vars = self.variables.write().await;
         vars.entry(variable.name.clone())
             .or_insert_with(Vec::new)
@@ -193,37 +186,64 @@ impl CssVariableManager {
 
     /// Remove all data for a document
     pub async fn remove_document(&self, uri: &Uri) {
+        self.remove_documents(&HashSet::from([uri.clone()])).await;
+    }
+
+    /// Remove all data for a set of documents.
+    pub async fn remove_documents(&self, uris: &HashSet<Uri>) {
+        if uris.is_empty() {
+            return;
+        }
+
+        // This order must match add_variable: tracked_documents before variables.
+        let mut tracked = self.tracked_documents.write().await;
         let mut vars = self.variables.write().await;
         let mut usages = self.usages.write().await;
         let mut literal_colors = self.literal_colors.write().await;
         let mut dom_trees = self.dom_trees.write().await;
-        let mut tracked = self.tracked_documents.write().await;
 
-        // Remove from tracked documents
-        tracked.remove(uri);
+        tracked.retain(|uri| !uris.contains(uri));
 
-        // Remove variables from this document
         for var_list in vars.values_mut() {
-            var_list.retain(|v| &v.uri != uri);
+            var_list.retain(|variable| !uris.contains(&variable.uri));
         }
         vars.retain(|_, var_list| !var_list.is_empty());
 
-        // Remove usages from this document
         for usage_list in usages.values_mut() {
-            usage_list.retain(|u| &u.uri != uri);
+            usage_list.retain(|usage| !uris.contains(&usage.uri));
         }
         usages.retain(|_, usage_list| !usage_list.is_empty());
 
-        literal_colors.remove(uri);
-        dom_trees.remove(uri);
+        literal_colors.retain(|uri, _| !uris.contains(uri));
+        dom_trees.retain(|uri, _| !uris.contains(uri));
 
-        // FIX: Rebuild color index to remove stale entries
+        // Rebuild the color index after releasing all document-data locks.
+        drop(tracked);
         drop(vars);
         drop(usages);
         drop(literal_colors);
         drop(dom_trees);
-        drop(tracked);
         self.rebuild_color_index().await;
+    }
+
+    /// Get every document URI currently represented in manager state.
+    pub async fn get_document_uris(&self) -> HashSet<Uri> {
+        let mut uris = self.tracked_documents.read().await.clone();
+
+        {
+            let usages = self.usages.read().await;
+            uris.extend(usages.values().flatten().map(|usage| usage.uri.clone()));
+        }
+        {
+            let literal_colors = self.literal_colors.read().await;
+            uris.extend(literal_colors.keys().cloned());
+        }
+        {
+            let dom_trees = self.dom_trees.read().await;
+            uris.extend(dom_trees.keys().cloned());
+        }
+
+        uris
     }
 
     /// Get all variables defined in a specific document
@@ -893,6 +913,54 @@ mod tests {
             vars.len()
         );
     }
+
+    #[tokio::test]
+    async fn test_add_and_remove_use_consistent_lock_order() {
+        use tokio::time::{timeout, Duration};
+
+        let manager = CssVariableManager::new(Config::default());
+        let existing_uri = Uri::from_str("file:///existing.css").unwrap();
+        manager
+            .add_variable(create_test_variable(
+                "--existing",
+                "red",
+                ":root",
+                existing_uri.as_str(),
+            ))
+            .await
+            .unwrap();
+
+        // Hold variables so remove queues for that lock. With the old variables -> tracked
+        // removal order, the later add held tracked while waiting behind remove, deadlocking.
+        let variables_guard = manager.variables.write().await;
+        let remove_manager = manager.clone();
+        let remove_task = tokio::spawn(async move {
+            remove_manager.remove_document(&existing_uri).await;
+        });
+        tokio::task::yield_now().await;
+
+        let add_manager = manager.clone();
+        let add_task = tokio::spawn(async move {
+            add_manager
+                .add_variable(create_test_variable(
+                    "--added",
+                    "blue",
+                    ":root",
+                    "file:///added.css",
+                ))
+                .await
+        });
+        tokio::task::yield_now().await;
+        drop(variables_guard);
+
+        timeout(Duration::from_secs(1), async {
+            remove_task.await.unwrap();
+            add_task.await.unwrap().unwrap();
+        })
+        .await
+        .expect("concurrent add/remove should not deadlock");
+    }
+
     /// Bug demonstration: Color index can be stale during concurrent access
     ///
     /// ISSUE: rebuild_color_index() reads from variables and writes to color_variables.

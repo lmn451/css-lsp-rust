@@ -81,6 +81,20 @@ async fn completion_labels(
     }
 }
 
+async fn workspace_symbols(
+    service: &mut LspService<CssVariableLsp>,
+    query: &str,
+) -> Vec<ls_types::SymbolInformation> {
+    let request = Request::build("workspace/symbol")
+        .id(43)
+        .params(serde_json::json!({ "query": query }))
+        .finish();
+    let result = send_request_for_result(service, request)
+        .await
+        .expect("workspace/symbol should return result");
+    serde_json::from_value(result).unwrap()
+}
+
 fn position_of(text: &str, needle: &str) -> ls_types::Position {
     let offset = text.find(needle).expect("needle should exist in text");
     css_variable_lsp::types::offset_to_position(text, offset)
@@ -389,15 +403,26 @@ async fn test_initialize_advertises_workspace_folder_change_notifications() {
 }
 
 #[tokio::test]
-async fn test_prepare_rename_returns_range() {
+async fn test_prepare_rename_returns_current_document_range() {
     let (mut service, _diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
 
+    let definition_uri = Uri::from_str("file:///theme.scss").unwrap();
+    open_document(
+        &mut service,
+        definition_uri,
+        "scss",
+        ":root { --dark: #111; }",
+        1,
+    )
+    .await;
+
     let uri = Uri::from_str("file:///index.scss").unwrap();
-    let text = ".card { color: var(--dark); }";
+    let text = "h1 { color: red; }\n\n.card { color: var(--dark); }";
     open_document(&mut service, uri.clone(), "scss", text, 1).await;
 
-    let pos = position_of(text, "--dark");
+    let start = position_of(text, "--dark");
+    let pos = ls_types::Position::new(start.line, start.character + 2);
     let req = Request::build("textDocument/prepareRename")
         .params(
             serde_json::to_value(TextDocumentPositionParams {
@@ -409,8 +434,21 @@ async fn test_prepare_rename_returns_range() {
         .id(1)
         .finish();
 
-    let result = send_request_for_result(&mut service, req).await;
-    assert!(result.is_some());
+    let result = send_request_for_result(&mut service, req)
+        .await
+        .expect("prepareRename should return a range");
+    let response: ls_types::PrepareRenameResponse = serde_json::from_value(result).unwrap();
+    let range = match response {
+        ls_types::PrepareRenameResponse::Range(range) => range,
+        other => panic!("expected range response, got {other:?}"),
+    };
+    assert_eq!(
+        range,
+        Range::new(
+            start,
+            ls_types::Position::new(start.line, start.character + "--dark".len() as u32),
+        )
+    );
 }
 
 #[tokio::test]
@@ -1114,4 +1152,54 @@ async fn test_initialize_multiroot_does_not_rescan_root_uri() {
     assert_eq!(symbols.len(), 1, "root must not be scanned twice");
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn test_workspace_folder_changes_remove_old_and_scan_added_folders() {
+    let (old_root, old_uri) = workspace_fixture("folder-old", "--old-color");
+    let (new_root, new_uri) = workspace_fixture("folder-new", "--new-color");
+    let old_folder = WorkspaceFolder {
+        uri: old_uri,
+        name: "old".to_string(),
+    };
+    let new_folder = WorkspaceFolder {
+        uri: new_uri,
+        name: "new".to_string(),
+    };
+    let mut service = setup_scan_service(Some(vec![old_folder.clone()]), None).await;
+    initialize_with_root(
+        &mut service,
+        None,
+        None,
+        Some(vec![old_folder.clone()]),
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        workspace_symbols(&mut service, "--old-color").await.len(),
+        1
+    );
+    send_notification(
+        &mut service,
+        "workspace/didChangeWorkspaceFolders",
+        serde_json::json!({
+            "event": {
+                "added": [new_folder],
+                "removed": [old_folder]
+            }
+        }),
+    )
+    .await;
+
+    assert!(workspace_symbols(&mut service, "--old-color")
+        .await
+        .is_empty());
+    assert_eq!(
+        workspace_symbols(&mut service, "--new-color").await.len(),
+        1
+    );
+
+    std::fs::remove_dir_all(old_root).unwrap();
+    std::fs::remove_dir_all(new_root).unwrap();
 }

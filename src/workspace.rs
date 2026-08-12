@@ -1,5 +1,6 @@
 use globset::{Glob, GlobSetBuilder};
 use ls_types::Uri;
+use std::collections::HashSet;
 use tokio::fs;
 use walkdir::WalkDir;
 
@@ -42,7 +43,7 @@ pub async fn scan_workspace(
         .map_err(|e| format!("Failed to build ignore glob set: {}", e))?;
 
     // Collect all files from all folders
-    let mut all_files = Vec::new();
+    let mut all_files = HashSet::new();
 
     for folder_uri in folders {
         let folder_path = match crate::path_display::to_normalized_fs_path(&folder_uri) {
@@ -78,12 +79,19 @@ pub async fn scan_workspace(
 
             // Include if matches lookup pattern
             if lookup_set.is_match(&*path_str) {
-                all_files.push(path.to_path_buf());
+                all_files.insert(path.to_path_buf());
             }
         }
     }
 
+    let mut all_files: Vec<_> = all_files.into_iter().collect();
+    all_files.sort();
     let total = all_files.len();
+
+    // A scan replaces the previously indexed state for every discovered file. This
+    // keeps repeated scans and overlapping workspace folders from accumulating copies.
+    let file_uris: HashSet<Uri> = all_files.iter().filter_map(Uri::from_file_path).collect();
+    manager.remove_documents(&file_uris).await;
 
     // Build the extension->kind map once for the whole scan so we agree with the
     // editor on what counts as CSS vs HTML vs JS without re-deriving it per file.
@@ -133,5 +141,35 @@ pub async fn scan_workspace(
         }
     }
 
+    manager.rebuild_color_index().await;
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Config;
+
+    #[tokio::test]
+    async fn repeated_scans_replace_existing_document_state() {
+        let root = std::env::temp_dir().join(format!(
+            "css-variable-lsp-repeat-scan-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("variables.css"), ":root { --primary: red; }").unwrap();
+
+        let manager = CssVariableManager::new(Config::default());
+        let root_uri = Uri::from_file_path(&root).unwrap();
+        scan_workspace(vec![root_uri.clone()], &manager, |_, _| {})
+            .await
+            .unwrap();
+        scan_workspace(vec![root_uri], &manager, |_, _| {})
+            .await
+            .unwrap();
+
+        assert_eq!(manager.get_variables("--primary").await.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
