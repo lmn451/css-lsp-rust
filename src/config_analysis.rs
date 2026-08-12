@@ -905,7 +905,7 @@ mod tests {
         let astro_text = r#"
             import { defineConfig } from "astro/config";
 
-            const FONT_NAME = "--font-const";
+            const FONT_NAME = ("--font-const" as const) satisfies string;
             const FONT_ALIAS = FONT_NAME;
 
             export default defineConfig({
@@ -972,6 +972,28 @@ mod tests {
             1
         );
         assert_eq!(vite_manager.get_usages("--base-color").await.len(), 1);
+
+        let commonjs_manager = CssVariableManager::new(Config::default());
+        let commonjs_uri = test_uri("astro.config.cjs");
+        parse_config_document(
+            r#"
+                const FONT_NAME = "--font-commonjs-const";
+                module.exports = {
+                    fonts: [{ cssVariable: FONT_NAME }],
+                };
+            "#,
+            &commonjs_uri,
+            &commonjs_manager,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            commonjs_manager
+                .get_variables("--font-commonjs-const")
+                .await
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -243,7 +243,8 @@ async fn test_astro_font_config_changes_revalidate_consumers() {
         config_uri.clone(),
         "typescript",
         r#"import { defineConfig } from "astro/config";
-export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] });"#,
+const FONT_NAME = "--font-roboto";
+export default defineConfig({ fonts: [{ cssVariable: FONT_NAME }] });"#,
         1,
     )
     .await;
@@ -265,13 +266,47 @@ export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] });"#,
 
     change_document(
         &mut service,
-        config_uri,
+        config_uri.clone(),
         3,
-        r#"export default defineConfig({ fonts: [{ cssVariable: dynamicName }] });"#,
+        r#"import { defineConfig } from "astro/config";
+const FONT_NAME = "--font-inter";
+export default defineConfig({ fonts: [{ cssVariable: FONT_NAME }] });"#,
     )
     .await;
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert!(workspace_symbols(&mut service, "--font-roboto")
+        .await
+        .is_empty());
+    assert_eq!(
+        workspace_symbols(&mut service, "--font-inter").await.len(),
+        1
+    );
+
+    let inter_uri = Uri::from_str("file:///inter.css").unwrap();
+    open_document(
+        &mut service,
+        inter_uri.clone(),
+        "css",
+        ".card { font-family: var(--font-inter); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &inter_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
+
+    change_document(
+        &mut service,
+        config_uri,
+        4,
+        r#"export default { fonts: [{ cssVariable: dynamicName }] };"#,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &inter_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert!(workspace_symbols(&mut service, "--font-inter")
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
