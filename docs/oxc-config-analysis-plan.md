@@ -33,9 +33,10 @@ visible during future Oxc upgrades.
   and array aliases, and known object or array spreads. Resolution preserves
   the originating literal span.
 - Static resolution is bounded to 16 recursive levels, 64 expression visits
-  per string lookup, and 1,024 structural property or spread visits. Cycles,
-  computed runtime keys, unknown spreads, mutation, concatenation, calls,
-  imports, environment access, and filesystem access propagate `Unknown`.
+  per string lookup, and 1,024 structural property or spread visits per
+  requested property traversal. Cycles, computed runtime keys, unknown spreads,
+  mutation, concatenation, calls, imports, environment access, and filesystem
+  access propagate `Unknown`.
 - Object properties follow effective last-property semantics. A later unknown
   computed property or spread prevents extraction rather than guessing.
 - Astro indexes `fonts[].cssVariable` and legacy
@@ -487,7 +488,8 @@ cyclic, escaped, substitution-bearing, or beyond the configured limits.
 Implemented safeguards:
 
 - maximum recursion depth of 16;
-- maximum 64 string-expression visits and 1,024 structural visits;
+- maximum 64 string-expression visits per string lookup and 1,024 structural
+  visits per requested property traversal;
 - cycle detection for bindings;
 - no getters, calls, imports, computed runtime properties, or proxy behavior;
 - deterministic `Unknown` propagation;
@@ -625,8 +627,9 @@ Final branch evidence on macOS aarch64:
 - stable and Rust 1.95: formatting, strict Clippy, all targets, all features,
   release build, and the complete test suite pass;
 - real LSP tests cover Astro and Vite initialization, diagnostics, completion,
-  hover, document and workspace symbols, goto-definition, rename, edits,
-  deletion, workspace changes, and malformed recovery;
+  hover, document and workspace symbols, goto-definition, rename, edits, and
+  malformed recovery. Workspace-level tests cover deleted or newly ignored
+  config files and workspace rescans;
 - 187 library tests, 5 binary tests, 29 diagnostics integration tests, 14
   workflow integration tests, 4 Issue #16 guards, and 9 issue proof tests pass;
 - release binary: 8,229,136 bytes, approximately 14.7% above `master`;

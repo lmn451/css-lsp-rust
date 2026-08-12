@@ -3,7 +3,7 @@
 A fast, **Rust**-based [Language Server Protocol][lsp] implementation focused on
 **CSS custom properties** (`--variables`) and the **`var()`** function. It is a
 ground-up rewrite of the original TypeScript `css-variable-lsp`, designed to
-ship as a single static binary that any LSP-aware editor (Zed, VS Code,
+ship as a standalone native executable that any LSP-aware editor (Zed, VS Code,
 Neovim, Helix, …) can launch with no Node.js runtime in sight.
 
 [lsp]: https://microsoft.github.io/language-server-protocol/
@@ -38,15 +38,15 @@ Neovim, Helix, …) can launch with no Node.js runtime in sight.
 
 |                    | TypeScript `css-variable-lsp` | This crate            |
 | ------------------ | ----------------------------- | --------------------- |
-| Runtime            | Node.js + npm dependencies    | **None** — static bin |
-| Binary size        | ~50–100 MB                    | **~6 MB**             |
+| Runtime            | Node.js + npm dependencies    | **Native, no Node.js** |
+| Binary size        | ~50–100 MB                    | **~8.2 MB** (macOS aarch64) |
 | Cold start         | ~500 ms                       | **~10 ms**            |
 | Baseline memory    | 50–100 MB                     | **10–20 MB**          |
 | Parse time (typ.)  | Fast (`css-tree`)             | **Very fast** (regex) |
 | Distribution       | npm package                   | `cargo install`, GitHub Releases, crates.io |
 
-A single-binary, zero-dependency server is dramatically easier to embed in
-editor extensions and CI sandboxes.
+A standalone executable with no Node.js or npm runtime dependency is
+dramatically easier to embed in editor extensions and CI sandboxes.
 
 ---
 
@@ -455,8 +455,8 @@ for post-release validation.
 
 | Feature               | TypeScript                           | Rust                       |
 | --------------------- | ------------------------------------ | -------------------------- |
-| Runtime               | Node + npm packages                  | **None**                   |
-| Binary size           | 50–100 MB                            | **6 MB**                   |
+| Runtime               | Node + npm packages                  | **Native, no Node.js**     |
+| Binary size           | 50–100 MB                            | **~8.2 MB** (macOS aarch64) |
 | Cold start            | ~500 ms                              | **~10 ms**                 |
 | Memory at idle        | 50–100 MB                            | **10–20 MB**               |
 | Parser                | `css-tree` (full AST)                | Regex + state machine      |
