@@ -536,6 +536,51 @@ async fn test_code_actions_for_undefined_variable() {
 }
 
 #[tokio::test]
+async fn test_code_actions_do_not_insert_root_block_into_javascript() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    let _init = initialize(&mut service).await;
+
+    let uri = Uri::from_str("file:///component.js").unwrap();
+    let text = "const styles = `color: var(--missing);`;";
+    open_document(&mut service, uri.clone(), "javascript", text, 1).await;
+
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri },
+        range: Range::new(ls_types::Position::new(0, 0), ls_types::Position::new(0, 0)),
+        context: CodeActionContext {
+            diagnostics: diagnostics.diagnostics,
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let request = Request::build("textDocument/codeAction")
+        .id(100)
+        .params(serde_json::to_value(params).unwrap())
+        .finish();
+    let result = send_request_for_result(&mut service, request)
+        .await
+        .expect("codeAction should return result");
+    let actions: CodeActionResponse = serde_json::from_value(result).unwrap();
+    let titles: Vec<_> = actions
+        .into_iter()
+        .filter_map(|action| match action {
+            ls_types::CodeActionOrCommand::CodeAction(action) => Some(action.title),
+            _ => None,
+        })
+        .collect();
+
+    assert!(!titles
+        .iter()
+        .any(|title| title.contains("Create --missing")));
+    assert!(titles.iter().any(|title| title.contains("Add fallback")));
+}
+
+#[tokio::test]
 async fn test_diagnostics_fallback_off_omits() {
     let mut env = HashMap::new();
     env.insert(

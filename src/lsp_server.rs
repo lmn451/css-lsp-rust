@@ -57,6 +57,7 @@ fn code_actions_for_undefined_variables(
     text: &str,
     context: &CodeActionContext,
     runtime_config: &RuntimeConfig,
+    allow_create_definition: bool,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
 
@@ -80,34 +81,34 @@ fn code_actions_for_undefined_variables(
             None => continue,
         };
 
-        // Very conservative quickfix: insert a :root block at the start of the current file.
-        // This avoids trying to parse/modify existing CSS.
-        let insert_text = format!(":root {{\n    {}: ;\n}}\n\n", name);
+        // A raw :root block is only valid in a CSS-family document. In HTML or
+        // JavaScript it would corrupt the source at the insertion point.
+        if allow_create_definition {
+            let insert_text = format!(":root {{\n    {}: ;\n}}\n\n", name);
 
-        let edit = WorkspaceEdit {
-            changes: Some(HashMap::from([(
-                uri.clone(),
-                vec![TextEdit {
-                    range: Range::new(Position::new(0, 0), Position::new(0, 0)),
-                    new_text: insert_text,
-                }],
-            )])),
-            document_changes: None,
-            change_annotations: None,
-        };
+            let edit = WorkspaceEdit {
+                changes: Some(HashMap::from([(
+                    uri.clone(),
+                    vec![TextEdit {
+                        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                        new_text: insert_text,
+                    }],
+                )])),
+                document_changes: None,
+                change_annotations: None,
+            };
 
-        let action = CodeAction {
-            title: format!("Create {} in :root", name),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(edit),
-            command: None,
-            is_preferred: Some(true),
-            disabled: None,
-            data: None,
-        };
-
-        actions.push(CodeActionOrCommand::CodeAction(action));
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Create {} in :root", name),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(edit),
+                command: None,
+                is_preferred: Some(true),
+                disabled: None,
+                data: None,
+            }));
+        }
 
         // Optional quickfix: add fallback to `var(--name)` -> `var(--name, )`
         // Only offered when the diagnostic covers a `var(...)` call without a comma.
@@ -1229,12 +1230,23 @@ impl LanguageServer for CssVariableLsp {
 
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
+        let language_id = {
+            let languages = self.document_language_map.read().await;
+            languages.get(&uri).cloned()
+        };
+        let lookup_map = self.lookup_extension_map.read().await.clone();
+        let allow_create_definition = matches!(
+            resolve_document_kind(uri.path().as_str(), language_id.as_deref(), &lookup_map),
+            Some(DocumentKind::Css)
+        );
+
         // 1) Quick-fix undefined variable diagnostics.
         actions.extend(code_actions_for_undefined_variables(
             &uri,
             &text,
             &params.context,
             &self.runtime_config,
+            allow_create_definition,
         ));
         actions.extend(code_actions_for_replaceable_literal_colors(
             &uri,
