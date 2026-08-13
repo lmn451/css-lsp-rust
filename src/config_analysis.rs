@@ -1,14 +1,20 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use ls_types::{Range, Uri};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpression, AssignmentExpression, BindingPattern, ExportDefaultDeclaration,
-    Expression, ImportDeclaration, ImportDeclarationSpecifier, ObjectExpression,
-    ObjectPropertyKind, Program, PropertyKey, Statement, VariableDeclarator,
+    Argument, ArrayExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
+    BlockStatement, CatchClause, ExportDefaultDeclaration, Expression, ForInStatement,
+    ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, ImportDeclaration,
+    ImportDeclarationSpecifier, MemberExpression, ObjectExpression, ObjectPropertyKind, Program,
+    PropertyKey, SimpleAssignmentTarget, Statement, SwitchStatement, UpdateExpression,
+    VariableDeclaration, VariableDeclarator,
 };
-use oxc_ast_visit::Visit;
+use oxc_ast_visit::{
+    walk::{walk_assignment_expression, walk_block_statement, walk_update_expression},
+    Visit,
+};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 
@@ -34,6 +40,8 @@ const VITE_CONFIG_NAMES: &[&str] = &[
     "vite.config.cts",
 ];
 const VITE_PREPROCESSOR: &str = "scss";
+const MAX_STATIC_STRING_DEPTH: usize = 16;
+const MAX_STATIC_STRING_VISITS: usize = 64;
 
 #[derive(Clone, Copy)]
 enum ConfigKind {
@@ -157,6 +165,7 @@ fn extract_config_variables(
     if supports_commonjs(path) {
         imports.collect_commonjs_program(&parsed.program);
     }
+    let static_strings = collect_static_string_values(&parsed.program, text);
 
     let has_esm_default = parsed
         .program
@@ -168,6 +177,7 @@ fn extract_config_variables(
             let mut extractor = AstroFontExtractor {
                 source: text,
                 define_config_bindings: imports.define_config_bindings,
+                static_strings,
                 variables: Vec::new(),
             };
             extractor.visit_program(&parsed.program);
@@ -183,6 +193,7 @@ fn extract_config_variables(
             let mut extractor = ViteAdditionalDataExtractor {
                 source: text,
                 define_config_bindings: imports.define_config_bindings,
+                static_strings,
                 css_snippets: Vec::new(),
             };
             extractor.visit_program(&parsed.program);
@@ -213,6 +224,387 @@ struct ExtractedVariable {
 struct ExtractedCssSnippet {
     text: String,
     content_span: Span,
+}
+
+#[derive(Clone)]
+struct ResolvedStaticString {
+    content_span: Span,
+    available_after: u32,
+}
+
+#[derive(Default)]
+struct AssignmentTargetNameCollector {
+    names: HashSet<String>,
+}
+
+impl<'a> Visit<'a> for AssignmentTargetNameCollector {
+    fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
+        self.names.insert(identifier.name.as_str().to_string());
+    }
+
+    fn visit_member_expression(&mut self, _expression: &MemberExpression<'a>) {}
+
+    fn visit_assignment_target_with_default(
+        &mut self,
+        target: &oxc_ast::ast::AssignmentTargetWithDefault<'a>,
+    ) {
+        self.visit_assignment_target(&target.binding);
+    }
+
+    fn visit_assignment_target_property_identifier(
+        &mut self,
+        property: &oxc_ast::ast::AssignmentTargetPropertyIdentifier<'a>,
+    ) {
+        self.visit_identifier_reference(&property.binding);
+    }
+
+    fn visit_assignment_target_property_property(
+        &mut self,
+        property: &oxc_ast::ast::AssignmentTargetPropertyProperty<'a>,
+    ) {
+        self.visit_assignment_target_maybe_default(&property.binding);
+    }
+}
+
+#[derive(Default)]
+struct BindingNameCollector {
+    names: HashSet<String>,
+}
+
+impl<'a> Visit<'a> for BindingNameCollector {
+    fn visit_binding_identifier(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'a>) {
+        self.names.insert(identifier.name.as_str().to_string());
+    }
+
+    fn visit_expression(&mut self, _expression: &Expression<'a>) {}
+}
+
+struct AssignedBindingCollector {
+    tracked_names: HashSet<String>,
+    names: HashSet<String>,
+    shadowed_scopes: Vec<HashSet<String>>,
+}
+
+impl AssignedBindingCollector {
+    fn new(tracked_names: HashSet<String>) -> Self {
+        Self {
+            tracked_names,
+            names: HashSet::new(),
+            shadowed_scopes: Vec::new(),
+        }
+    }
+
+    fn record_names(&mut self, names: HashSet<String>) {
+        for name in names {
+            let shadowed = self
+                .shadowed_scopes
+                .iter()
+                .rev()
+                .any(|scope| scope.contains(&name));
+            if self.tracked_names.contains(&name) && !shadowed {
+                self.names.insert(name);
+            }
+        }
+    }
+
+    fn record_assignment_target<'a>(&mut self, target: &AssignmentTarget<'a>) {
+        let mut collector = AssignmentTargetNameCollector::default();
+        collector.visit_assignment_target(target);
+        self.record_names(collector.names);
+    }
+
+    fn record_simple_assignment_target<'a>(&mut self, target: &SimpleAssignmentTarget<'a>) {
+        let mut collector = AssignmentTargetNameCollector::default();
+        collector.visit_simple_assignment_target(target);
+        self.record_names(collector.names);
+    }
+
+    fn record_for_statement_left<'a>(&mut self, left: &ForStatementLeft<'a>) {
+        let mut collector = AssignmentTargetNameCollector::default();
+        collector.visit_for_statement_left(left);
+        self.record_names(collector.names);
+    }
+
+    fn declaration_names(declaration: &VariableDeclaration<'_>) -> HashSet<String> {
+        let mut collector = BindingNameCollector::default();
+        for declarator in &declaration.declarations {
+            collector.visit_binding_pattern(&declarator.id);
+        }
+        collector.names
+    }
+
+    fn lexical_declaration_names(declaration: &VariableDeclaration<'_>) -> HashSet<String> {
+        if declaration.kind.is_var() {
+            HashSet::new()
+        } else {
+            Self::declaration_names(declaration)
+        }
+    }
+
+    fn block_shadow_names(block: &BlockStatement<'_>) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for statement in &block.body {
+            match statement {
+                Statement::VariableDeclaration(declaration) => {
+                    names.extend(Self::lexical_declaration_names(declaration));
+                }
+                Statement::FunctionDeclaration(function) => {
+                    if let Some(identifier) = &function.id {
+                        names.insert(identifier.name.as_str().to_string());
+                    }
+                }
+                Statement::ClassDeclaration(class) => {
+                    if let Some(identifier) = &class.id {
+                        names.insert(identifier.name.as_str().to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        names
+    }
+
+    fn switch_shadow_names(statement: &SwitchStatement<'_>) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for case in &statement.cases {
+            for statement in &case.consequent {
+                match statement {
+                    Statement::VariableDeclaration(declaration) => {
+                        names.extend(Self::lexical_declaration_names(declaration));
+                    }
+                    Statement::FunctionDeclaration(function) => {
+                        if let Some(identifier) = &function.id {
+                            names.insert(identifier.name.as_str().to_string());
+                        }
+                    }
+                    Statement::ClassDeclaration(class) => {
+                        if let Some(identifier) = &class.id {
+                            names.insert(identifier.name.as_str().to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        names
+    }
+
+    fn with_shadowed_scope(&mut self, names: HashSet<String>, visit: impl FnOnce(&mut Self)) {
+        self.shadowed_scopes.push(names);
+        visit(self);
+        self.shadowed_scopes.pop();
+    }
+}
+
+impl<'a> Visit<'a> for AssignedBindingCollector {
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
+        self.record_assignment_target(&expression.left);
+        walk_assignment_expression(self, expression);
+    }
+
+    fn visit_update_expression(&mut self, expression: &UpdateExpression<'a>) {
+        self.record_simple_assignment_target(&expression.argument);
+        walk_update_expression(self, expression);
+    }
+
+    fn visit_function_body(&mut self, _body: &oxc_ast::ast::FunctionBody<'a>) {}
+
+    fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
+        let names = Self::block_shadow_names(block);
+        self.with_shadowed_scope(names, |collector| walk_block_statement(collector, block));
+    }
+
+    fn visit_catch_clause(&mut self, clause: &CatchClause<'a>) {
+        let mut names = BindingNameCollector::default();
+        if let Some(parameter) = &clause.param {
+            names.visit_binding_pattern(&parameter.pattern);
+        }
+        self.with_shadowed_scope(names.names, |collector| {
+            collector.visit_block_statement(&clause.body);
+        });
+    }
+
+    fn visit_switch_statement(&mut self, statement: &SwitchStatement<'a>) {
+        self.visit_expression(&statement.discriminant);
+        let names = Self::switch_shadow_names(statement);
+        self.with_shadowed_scope(names, |collector| {
+            collector.visit_switch_cases(&statement.cases);
+        });
+    }
+
+    fn visit_for_statement(&mut self, statement: &ForStatement<'a>) {
+        let shadowed = statement
+            .init
+            .as_ref()
+            .and_then(|init| match init {
+                ForStatementInit::VariableDeclaration(declaration) => {
+                    Some(Self::lexical_declaration_names(declaration))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.with_shadowed_scope(shadowed, |collector| {
+            if let Some(init) = &statement.init {
+                collector.visit_for_statement_init(init);
+            }
+            if let Some(test) = &statement.test {
+                collector.visit_expression(test);
+            }
+            if let Some(update) = &statement.update {
+                collector.visit_expression(update);
+            }
+            collector.visit_statement(&statement.body);
+        });
+    }
+
+    fn visit_for_in_statement(&mut self, statement: &ForInStatement<'a>) {
+        let shadowed = match &statement.left {
+            ForStatementLeft::VariableDeclaration(declaration) => {
+                Self::lexical_declaration_names(declaration)
+            }
+            _ => HashSet::new(),
+        };
+        self.with_shadowed_scope(shadowed, |collector| {
+            if matches!(&statement.left, ForStatementLeft::VariableDeclaration(_)) {
+                collector.visit_for_statement_left(&statement.left);
+            } else {
+                collector.record_for_statement_left(&statement.left);
+            }
+            collector.visit_expression(&statement.right);
+            collector.visit_statement(&statement.body);
+        });
+    }
+
+    fn visit_for_of_statement(&mut self, statement: &ForOfStatement<'a>) {
+        let shadowed = match &statement.left {
+            ForStatementLeft::VariableDeclaration(declaration) => {
+                Self::lexical_declaration_names(declaration)
+            }
+            _ => HashSet::new(),
+        };
+        self.with_shadowed_scope(shadowed, |collector| {
+            if matches!(&statement.left, ForStatementLeft::VariableDeclaration(_)) {
+                collector.visit_for_statement_left(&statement.left);
+            } else {
+                collector.record_for_statement_left(&statement.left);
+            }
+            collector.visit_expression(&statement.right);
+            collector.visit_statement(&statement.body);
+        });
+    }
+}
+
+struct StaticStringResolver<'a, 's> {
+    source: &'s str,
+    bindings: HashMap<String, &'a Expression<'a>>,
+    assigned_names: HashSet<String>,
+}
+
+impl<'a, 's> StaticStringResolver<'a, 's> {
+    fn from_program(program: &'a Program<'a>, source: &'s str) -> Self {
+        let mut bindings = HashMap::new();
+        let mut duplicate_names = HashSet::new();
+
+        for statement in &program.body {
+            let Statement::VariableDeclaration(declaration) = statement else {
+                continue;
+            };
+            if !declaration.kind.is_const() || declaration.declare {
+                continue;
+            }
+
+            for declarator in &declaration.declarations {
+                let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+                    continue;
+                };
+                let Some(init) = declarator.init.as_ref() else {
+                    continue;
+                };
+                let name = identifier.name.as_str().to_string();
+                if bindings.insert(name.clone(), init).is_some() {
+                    duplicate_names.insert(name);
+                }
+            }
+        }
+
+        for name in duplicate_names {
+            bindings.remove(&name);
+        }
+
+        let mut assignments = AssignedBindingCollector::new(bindings.keys().cloned().collect());
+        assignments.visit_program(program);
+
+        Self {
+            source,
+            bindings,
+            assigned_names: assignments.names,
+        }
+    }
+
+    fn resolve_all(&self) -> HashMap<String, ResolvedStaticString> {
+        self.bindings
+            .iter()
+            .filter_map(|(name, init)| {
+                if self.assigned_names.contains(name) {
+                    return None;
+                }
+
+                let mut resolving = HashSet::from([name.clone()]);
+                let mut visits = 0;
+                let content_span = self.resolve_expression(init, 0, &mut visits, &mut resolving)?;
+                Some((
+                    name.clone(),
+                    ResolvedStaticString {
+                        content_span,
+                        available_after: init.span().end,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn resolve_expression(
+        &self,
+        expression: &'a Expression<'a>,
+        depth: usize,
+        visits: &mut usize,
+        resolving: &mut HashSet<String>,
+    ) -> Option<Span> {
+        if depth >= MAX_STATIC_STRING_DEPTH || *visits >= MAX_STATIC_STRING_VISITS {
+            return None;
+        }
+        *visits += 1;
+
+        let expression = unwrap_expression(expression);
+        if let Some(span) = literal_static_string_span(expression, self.source) {
+            return Some(span);
+        }
+
+        let Expression::Identifier(identifier) = expression else {
+            return None;
+        };
+        let name = identifier.name.as_str();
+        if self.assigned_names.contains(name) || !resolving.insert(name.to_string()) {
+            return None;
+        }
+
+        let init = self.bindings.get(name)?;
+        if init.span().end > identifier.span.end {
+            resolving.remove(name);
+            return None;
+        }
+
+        let result = self.resolve_expression(init, depth + 1, visits, resolving);
+        resolving.remove(name);
+        result
+    }
+}
+
+fn collect_static_string_values(
+    program: &Program<'_>,
+    source: &str,
+) -> HashMap<String, ResolvedStaticString> {
+    StaticStringResolver::from_program(program, source).resolve_all()
 }
 
 struct DefineConfigImportCollector<'s> {
@@ -298,6 +690,7 @@ impl<'a> Visit<'a> for DefineConfigImportCollector<'_> {
 struct AstroFontExtractor<'s> {
     source: &'s str,
     define_config_bindings: HashSet<String>,
+    static_strings: HashMap<String, ResolvedStaticString>,
     variables: Vec<ExtractedVariable>,
 }
 
@@ -346,16 +739,32 @@ impl AstroFontExtractor<'_> {
             let Some(property) = object_property_node(font, "cssVariable") else {
                 continue;
             };
-            let Some((name, name_span)) = static_string_value(&property.value, self.source) else {
+            let Some((name, name_span)) =
+                static_string_value(&property.value, self.source, &self.static_strings)
+            else {
                 continue;
             };
             if !is_supported_custom_property_name(&name) {
                 continue;
             }
+            if self
+                .variables
+                .iter()
+                .any(|variable| variable.name == name && variable.name_span == name_span)
+            {
+                continue;
+            }
 
             self.variables.push(ExtractedVariable {
                 name,
-                declaration_span: property.span,
+                declaration_span: if matches!(
+                    unwrap_expression(&property.value),
+                    Expression::Identifier(_)
+                ) {
+                    name_span
+                } else {
+                    property.span
+                },
                 name_span,
             });
         }
@@ -373,6 +782,7 @@ impl<'a> Visit<'a> for AstroFontExtractor<'_> {
 struct ViteAdditionalDataExtractor<'s> {
     source: &'s str,
     define_config_bindings: HashSet<String>,
+    static_strings: HashMap<String, ResolvedStaticString>,
     css_snippets: Vec<ExtractedCssSnippet>,
 }
 
@@ -413,7 +823,9 @@ impl ViteAdditionalDataExtractor<'_> {
         let Some(additional_data) = object_property(options, "additionalData") else {
             return;
         };
-        let Some((text, content_span)) = static_string_value(additional_data, self.source) else {
+        let Some((text, content_span)) =
+            static_string_value(additional_data, self.source, &self.static_strings)
+        else {
             return;
         };
         if contains_unsupported_scss_control_flow(&text) {
@@ -562,22 +974,44 @@ fn literal_content_span(span: Span) -> Span {
     }
 }
 
-fn static_string_value(expression: &Expression<'_>, source: &str) -> Option<(String, Span)> {
-    match unwrap_expression(expression) {
+fn literal_static_string_span(expression: &Expression<'_>, source: &str) -> Option<Span> {
+    match expression {
         Expression::StringLiteral(literal) => {
             let span = literal_content_span(literal.span);
             let raw = source.get(span.start as usize..span.end as usize)?;
-            (raw == literal.value.as_str()).then_some((raw.to_string(), span))
+            (raw == literal.value.as_str()).then_some(span)
         }
         Expression::TemplateLiteral(template)
             if template.expressions.is_empty() && template.quasis.len() == 1 =>
         {
             let span = literal_content_span(template.span);
             let raw = source.get(span.start as usize..span.end as usize)?;
-            (!raw.contains('\\')).then_some((raw.to_string(), span))
+            (!raw.contains('\\')).then_some(span)
         }
         _ => None,
     }
+}
+
+fn static_string_value(
+    expression: &Expression<'_>,
+    source: &str,
+    static_strings: &HashMap<String, ResolvedStaticString>,
+) -> Option<(String, Span)> {
+    let expression = unwrap_expression(expression);
+    let content_span = if let Some(span) = literal_static_string_span(expression, source) {
+        span
+    } else {
+        let Expression::Identifier(identifier) = expression else {
+            return None;
+        };
+        let value = static_strings.get(identifier.name.as_str())?;
+        if value.available_after > identifier.span.start {
+            return None;
+        }
+        value.content_span
+    };
+    let value = source.get(content_span.start as usize..content_span.end as usize)?;
+    Some((value.to_string(), content_span))
 }
 
 fn contains_unsupported_scss_control_flow(source: &str) -> bool {
@@ -700,6 +1134,228 @@ mod tests {
         assert_eq!(manager.get_variables("--vite-derived").await.len(), 1);
         assert_eq!(manager.get_usages("--base-color").await.len(), 1);
         assert!(manager.get_variables("--vite-less").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolves_reusable_top_level_const_strings_for_astro_and_vite() {
+        let astro_manager = CssVariableManager::new(Config::default());
+        let astro_uri = test_uri("astro.config.ts");
+        let astro_text = r#"
+            import { defineConfig } from "astro/config";
+
+            const FONT_NAME = ("--font-const" as const) satisfies string;
+            const FONT_ALIAS = FONT_NAME;
+
+            export default defineConfig({
+                fonts: [
+                    { cssVariable: FONT_ALIAS },
+                    { cssVariable: FONT_ALIAS },
+                ],
+            });
+        "#;
+
+        parse_config_document(astro_text, &astro_uri, &astro_manager)
+            .await
+            .unwrap();
+
+        let font = astro_manager.get_variables("--font-const").await;
+        assert_eq!(font.len(), 1);
+        let font_start = astro_text.find("--font-const").unwrap();
+        assert_eq!(
+            font[0].name_range,
+            Some(Range::new(
+                offset_to_position(astro_text, font_start),
+                offset_to_position(astro_text, font_start + "--font-const".len()),
+            ))
+        );
+
+        let vite_manager = CssVariableManager::new(Config::default());
+        let vite_uri = test_uri("vite.config.ts");
+        let vite_text = r#"
+            import { defineConfig } from "vite";
+
+            const SHARED_SCSS = `:root {
+                --vite-const: #123456;
+                --vite-const-derived: var(--base-color);
+            }`;
+
+            export default defineConfig({
+                css: {
+                    preprocessorOptions: {
+                        scss: { additionalData: SHARED_SCSS },
+                    },
+                },
+            });
+        "#;
+
+        parse_config_document(vite_text, &vite_uri, &vite_manager)
+            .await
+            .unwrap();
+
+        assert_eq!(vite_manager.get_variables("--vite-const").await.len(), 1);
+        let vite_const = vite_manager.get_variables("--vite-const").await;
+        let vite_start = vite_text.find("--vite-const").unwrap();
+        assert_eq!(
+            vite_const[0].name_range,
+            Some(Range::new(
+                offset_to_position(vite_text, vite_start),
+                offset_to_position(vite_text, vite_start + "--vite-const".len()),
+            ))
+        );
+        assert_eq!(
+            vite_manager
+                .get_variables("--vite-const-derived")
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(vite_manager.get_usages("--base-color").await.len(), 1);
+
+        let commonjs_manager = CssVariableManager::new(Config::default());
+        let commonjs_uri = test_uri("astro.config.cjs");
+        parse_config_document(
+            r#"
+                const FONT_NAME = "--font-commonjs-const";
+                module.exports = {
+                    fonts: [{ cssVariable: FONT_NAME }],
+                };
+            "#,
+            &commonjs_uri,
+            &commonjs_manager,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            commonjs_manager
+                .get_variables("--font-commonjs-const")
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn const_string_resolution_rejects_dynamic_or_unsafe_bindings() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                import { defineConfig } from "astro/config";
+
+                let LET_NAME = "--font-let";
+                var VAR_NAME = "--font-var";
+                const DYNAMIC = `--font-${family}`;
+
+                export default defineConfig({
+                    fonts: [
+                        { cssVariable: LET_NAME },
+                        { cssVariable: VAR_NAME },
+                        { cssVariable: DYNAMIC },
+                        { cssVariable: DECLARED_AFTER_USE },
+                        { cssVariable: LOCAL_ONLY },
+                    ],
+                });
+
+                const DECLARED_AFTER_USE = "--font-after-use";
+                function unused() {
+                    const LOCAL_ONLY = "--font-local";
+                    return LOCAL_ONLY;
+                }
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        for name in [
+            "--font-let",
+            "--font-var",
+            "--font-after-use",
+            "--font-local",
+        ] {
+            assert!(manager.get_variables(name).await.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn static_string_resolution_rejects_mutation_cycles_and_excessive_depth() {
+        let mut text = String::from(
+            r#"
+                const REASSIGNED = "--font-before-reassignment";
+                REASSIGNED = "--font-after-reassignment";
+                const UPDATED = "--font-before-update";
+                UPDATED++;
+                const DESTRUCTURED = "--font-before-destructure";
+                ({ value: DESTRUCTURED } = source);
+                const FOR_OF_TARGET = "--font-before-for-of";
+                for (FOR_OF_TARGET of values) {}
+                const TS_WRAPPED = "--font-before-ts-assignment";
+                (TS_WRAPPED as string) = source;
+                const SHADOWED = "--font-shadowed";
+                {
+                    let SHADOWED = 0;
+                    SHADOWED++;
+                }
+                const SWITCH_SHADOWED = "--font-switch-shadowed";
+                switch (mode) {
+                    case 1:
+                        let SWITCH_SHADOWED;
+                        SWITCH_SHADOWED = source;
+                        break;
+                }
+                const CYCLE_A = CYCLE_B;
+                const CYCLE_B = CYCLE_A;
+                const VALUE_20 = "--font-depth";
+            "#,
+        );
+        for index in (0..20).rev() {
+            text.push_str(&format!("const VALUE_{index} = VALUE_{};\n", index + 1));
+        }
+
+        let allocator = Allocator::default();
+        let source_type = SourceType::from_path(Path::new("astro.config.ts")).unwrap();
+        let parsed = Parser::new(&allocator, &text, source_type).parse();
+        let values = collect_static_string_values(&parsed.program, &text);
+
+        assert!(!values.contains_key("REASSIGNED"));
+        assert!(!values.contains_key("UPDATED"));
+        assert!(!values.contains_key("DESTRUCTURED"));
+        assert!(!values.contains_key("FOR_OF_TARGET"));
+        assert!(!values.contains_key("TS_WRAPPED"));
+        assert!(values.contains_key("SHADOWED"));
+        assert!(values.contains_key("SWITCH_SHADOWED"));
+        assert!(!values.contains_key("CYCLE_A"));
+        assert!(!values.contains_key("CYCLE_B"));
+        assert!(!values.contains_key("VALUE_0"));
+        let depth_span = values.get("VALUE_5").unwrap().content_span;
+        assert_eq!(
+            text.get(depth_span.start as usize..depth_span.end as usize),
+            Some("--font-depth")
+        );
+    }
+
+    #[tokio::test]
+    async fn exported_const_strings_remain_out_of_scope() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                export const FONT_NAME = "--font-exported-const";
+                export default {
+                    fonts: [{ cssVariable: FONT_NAME }],
+                };
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--font-exported-const")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -886,7 +1542,7 @@ mod tests {
         let uri = test_uri("astro.config.ts");
         let text = r#"
             import { defineConfig as astroConfig } from "astro/config";
-            const dynamicName = "--font-dynamic";
+            let dynamicName = "--font-dynamic";
             const unrelated = { fonts: [{ cssVariable: "--font-unrelated" }] };
             export default astroConfig({
                 fonts: [

@@ -64,12 +64,13 @@ editor extensions and CI sandboxes.
   `emotion`, etc.), correctly handling template expressions.
 - **Astro font variables** are statically indexed from
   `astro.config.{js,mjs,cjs,ts,mts,cts}` using Oxc. Configuration code is
-  parsed but never executed, and only literal `fonts[].cssVariable` values are
-  registered.
+  parsed but never executed. `fonts[].cssVariable` accepts direct literals and
+  bounded aliases to immutable, unexported module-level `const` strings.
 - **Vite injected CSS variables** are indexed from static
   `css.preprocessorOptions.scss.additionalData` strings in
-  `vite.config.{js,mjs,cjs,ts,mts,cts}`. Dynamic functions and unrelated Vite
-  options are ignored, as are snippets containing SCSS control-flow directives.
+  `vite.config.{js,mjs,cjs,ts,mts,cts}`. Direct literals and bounded aliases to
+  immutable, unexported module-level `const` strings are accepted. Dynamic functions,
+  unrelated Vite options, and SCSS control-flow directives are ignored.
 - **Cascade sorting** and **CSS specificity calculation** including
   `:is()`, `:not()`, `:where()`, attribute selectors, pseudo-classes, and
   pseudo-elements.
