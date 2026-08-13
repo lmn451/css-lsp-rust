@@ -54,11 +54,11 @@ async fn send_request_for_result(
     response.and_then(|resp| resp.result().cloned())
 }
 
-async fn completion_labels(
+async fn completion_items(
     service: &mut LspService<CssVariableLsp>,
     uri: Uri,
     position: ls_types::Position,
-) -> Vec<String> {
+) -> Vec<ls_types::CompletionItem> {
     let req = Request::build("textDocument/completion")
         .id(42)
         .params(serde_json::json!({
@@ -72,13 +72,21 @@ async fn completion_labels(
         .expect("completion should return result");
     let response: ls_types::CompletionResponse = serde_json::from_value(result).unwrap();
     match response {
-        ls_types::CompletionResponse::Array(items) => {
-            items.into_iter().map(|item| item.label).collect()
-        }
-        ls_types::CompletionResponse::List(list) => {
-            list.items.into_iter().map(|item| item.label).collect()
-        }
+        ls_types::CompletionResponse::Array(items) => items,
+        ls_types::CompletionResponse::List(list) => list.items,
     }
+}
+
+async fn completion_labels(
+    service: &mut LspService<CssVariableLsp>,
+    uri: Uri,
+    position: ls_types::Position,
+) -> Vec<String> {
+    completion_items(service, uri, position)
+        .await
+        .into_iter()
+        .map(|item| item.label)
+        .collect()
 }
 
 async fn workspace_symbols(
@@ -243,7 +251,8 @@ async fn test_astro_font_config_changes_revalidate_consumers() {
         config_uri.clone(),
         "typescript",
         r#"import { defineConfig } from "astro/config";
-export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] });"#,
+const FONT_NAME = "--font-roboto";
+export default defineConfig({ fonts: [{ cssVariable: FONT_NAME }] });"#,
         1,
     )
     .await;
@@ -260,18 +269,53 @@ export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] });"#,
     assert_eq!(
         workspace_symbols(&mut service, "--font-roboto").await.len(),
         1,
-        "a malformed in-progress edit must not discard the last valid config state"
+        "a catastrophic in-progress edit must retain the last valid config state"
     );
 
     change_document(
         &mut service,
-        config_uri,
+        config_uri.clone(),
         3,
-        r#"export default defineConfig({ fonts: [{ cssVariable: dynamicName }] });"#,
+        r#"import { defineConfig } from "astro/config";
+const FONT_NAME = "--font-inter";
+export default defineConfig({ fonts: [{ cssVariable: FONT_NAME }] }); /*"#,
     )
     .await;
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert!(workspace_symbols(&mut service, "--font-roboto")
+        .await
+        .is_empty());
+    assert_eq!(
+        workspace_symbols(&mut service, "--font-inter").await.len(),
+        1,
+        "a recoverable malformed edit should replace stale state with the current safe AST"
+    );
+
+    let inter_uri = Uri::from_str("file:///inter.css").unwrap();
+    open_document(
+        &mut service,
+        inter_uri.clone(),
+        "css",
+        ".card { font-family: var(--font-inter); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &inter_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
+
+    change_document(
+        &mut service,
+        config_uri,
+        4,
+        r#"export default { fonts: [{ cssVariable: dynamicName }] };"#,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &inter_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert!(workspace_symbols(&mut service, "--font-inter")
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -1161,12 +1205,14 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         r#"
             import { defineConfig, fontProviders } from "astro/config";
 
+            const ROBOTO_VARIABLE = "--font-roboto";
+
             export default defineConfig({
                 fonts: [
                     {
                         provider: fontProviders.google(),
                         name: "Roboto",
-                        cssVariable: "--font-roboto",
+                        cssVariable: ROBOTO_VARIABLE,
                     },
                     {
                         provider: fontProviders.google(),
@@ -1189,6 +1235,37 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         roboto[0].location.uri,
         Uri::from_file_path(root.join("astro.config.mjs")).unwrap()
     );
+    let config_text = std::fs::read_to_string(root.join("astro.config.mjs")).unwrap();
+    let config_uri = Uri::from_file_path(root.join("astro.config.mjs")).unwrap();
+    let document_symbols_request = Request::build("textDocument/documentSymbol")
+        .id(48)
+        .params(serde_json::json!({
+            "textDocument": { "uri": config_uri.clone() }
+        }))
+        .finish();
+    let document_symbols = send_request_for_result(&mut service, document_symbols_request)
+        .await
+        .expect("Astro config document symbols should resolve");
+    let document_symbols: ls_types::DocumentSymbolResponse =
+        serde_json::from_value(document_symbols).unwrap();
+    let ls_types::DocumentSymbolResponse::Nested(document_symbols) = document_symbols else {
+        panic!("expected nested Astro config document symbols");
+    };
+    assert!(document_symbols
+        .iter()
+        .all(|symbol| { symbol.detail.as_deref() == Some("Astro font configuration") }));
+    let roboto_start = config_text.find("--font-roboto").unwrap();
+    assert_eq!(
+        roboto[0].location.range,
+        Range::new(
+            css_variable_lsp::types::offset_to_position(&config_text, roboto_start),
+            css_variable_lsp::types::offset_to_position(
+                &config_text,
+                roboto_start + "--font-roboto".len(),
+            ),
+        ),
+        "indirect Astro definitions should navigate to the resolved const literal"
+    );
     assert_eq!(
         workspace_symbols(&mut service, "--font-inter").await.len(),
         1
@@ -1209,14 +1286,29 @@ async fn test_initialize_indexes_astro_font_css_variables() {
     let consumer_uri = Uri::from_file_path(root.join("consumer.css")).unwrap();
     let consumer_text = ".card { font-family: var(--";
     open_document(&mut service, consumer_uri.clone(), "css", consumer_text, 1).await;
-    let labels = completion_labels(
+    let items = completion_items(
         &mut service,
-        consumer_uri,
+        consumer_uri.clone(),
         ls_types::Position::new(0, consumer_text.len() as u32),
     )
     .await;
+    let labels: Vec<_> = items.iter().map(|item| item.label.clone()).collect();
     assert!(labels.contains(&"--font-roboto".to_string()));
     assert!(labels.contains(&"--font-inter".to_string()));
+    let roboto_completion = items
+        .iter()
+        .find(|item| item.label == "--font-roboto")
+        .expect("Astro variable should be present in completion");
+    assert_eq!(
+        roboto_completion.detail.as_deref(),
+        Some("Astro font configuration")
+    );
+    let completion_documentation = match roboto_completion.documentation.as_ref() {
+        Some(ls_types::Documentation::String(text)) => text.as_str(),
+        Some(ls_types::Documentation::MarkupContent(content)) => content.value.as_str(),
+        None => panic!("Astro completion should identify its generated source"),
+    };
+    assert!(completion_documentation.contains("Generated by Astro font configuration"));
 
     let definition_consumer_uri = Uri::from_file_path(root.join("definition.css")).unwrap();
     let definition_consumer_text = ".card { font-family: var(--font-roboto); }";
@@ -1228,6 +1320,23 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         1,
     )
     .await;
+    let hover_request = Request::build("textDocument/hover")
+        .id(47)
+        .params(serde_json::json!({
+            "textDocument": { "uri": definition_consumer_uri.clone() },
+            "position": position_of(definition_consumer_text, "--font-roboto")
+        }))
+        .finish();
+    let hover = send_request_for_result(&mut service, hover_request)
+        .await
+        .expect("hover should resolve");
+    let hover: ls_types::Hover = serde_json::from_value(hover).unwrap();
+    let ls_types::HoverContents::Markup(hover_markup) = hover.contents else {
+        panic!("expected markdown hover contents");
+    };
+    assert!(hover_markup
+        .value
+        .contains("**Generated by:** Astro font configuration"));
     let definition_request = Request::build("textDocument/definition")
         .id(44)
         .params(serde_json::json!({
@@ -1250,6 +1359,293 @@ async fn test_initialize_indexes_astro_font_css_variables() {
         location.range, roboto[0].location.range,
         "workspace symbols and goto definition must expose the same declaration range"
     );
+
+    let rename_request = Request::build("textDocument/rename")
+        .id(46)
+        .params(serde_json::json!({
+            "textDocument": { "uri": definition_consumer_uri },
+            "position": position_of(definition_consumer_text, "--font-roboto"),
+            "newName": "--font-renamed"
+        }))
+        .finish();
+    let rename = send_request_for_result(&mut service, rename_request)
+        .await
+        .expect("rename should return an edit");
+    let rename: ls_types::WorkspaceEdit = serde_json::from_value(rename).unwrap();
+    let config_edits = rename
+        .changes
+        .as_ref()
+        .and_then(|changes| changes.get(&config_uri))
+        .expect("rename should edit the resolved const literal");
+    assert_eq!(config_edits.len(), 1);
+    assert_eq!(config_edits[0].range, roboto[0].location.range);
+    assert_eq!(config_edits[0].new_text, "--font-renamed");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn test_ignore_glob_configuration_changes_remove_generated_variables() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-ignore-config-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("astro.config.mjs"),
+        r#"export default { fonts: [{ cssVariable: "--font-ignore-change" }] };"#,
+    )
+    .unwrap();
+
+    let root_uri = Uri::from_file_path(&root).unwrap();
+    let mut service = setup_scan_service(None, None).await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+    assert_eq!(
+        workspace_symbols(&mut service, "--font-ignore-change")
+            .await
+            .len(),
+        1
+    );
+
+    send_notification(
+        &mut service,
+        "workspace/didChangeConfiguration",
+        DidChangeConfigurationParams {
+            settings: serde_json::json!({
+                "cssVariableLsp": {"ignoreGlobs": ["astro.config.mjs"]}
+            }),
+        },
+    )
+    .await;
+
+    assert!(workspace_symbols(&mut service, "--font-ignore-change")
+        .await
+        .is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn test_initialize_indexes_vite_preprocessor_additional_data() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-vite-additional-data-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let config_text = r#"
+            import { defineConfig } from "vite";
+
+            const SHARED_SCSS = `:root {
+                --vite-brand: #123456;
+            }`;
+
+            export default defineConfig({
+                css: {
+                    preprocessorOptions: {
+                        scss: {
+                            additionalData: SHARED_SCSS,
+                        },
+                    },
+                },
+            });
+        "#;
+    std::fs::write(root.join("vite.config.mjs"), config_text).unwrap();
+
+    let root_uri = Uri::from_file_path(&root).unwrap();
+    let config_uri = Uri::from_file_path(root.join("vite.config.mjs")).unwrap();
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+
+    let symbols = workspace_symbols(&mut service, "--vite-brand").await;
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].location.uri, config_uri);
+    let vite_start = config_text.find("--vite-brand").unwrap();
+    let vite_end = vite_start
+        + config_text[vite_start..]
+            .find(';')
+            .expect("Vite declaration should end with a semicolon");
+    assert_eq!(
+        symbols[0].location.range,
+        Range::new(
+            css_variable_lsp::types::offset_to_position(config_text, vite_start),
+            css_variable_lsp::types::offset_to_position(config_text, vite_end),
+        ),
+        "Vite definitions should retain the CSS declaration range inside the const literal"
+    );
+
+    let diagnostic_uri = Uri::from_file_path(root.join("diagnostic.css")).unwrap();
+    open_document(
+        &mut service,
+        diagnostic_uri.clone(),
+        "css",
+        ".card { color: var(--vite-brand); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &diagnostic_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
+
+    let completion_uri = Uri::from_file_path(root.join("completion.css")).unwrap();
+    let completion_text = ".card { color: var(--";
+    open_document(
+        &mut service,
+        completion_uri.clone(),
+        "css",
+        completion_text,
+        1,
+    )
+    .await;
+    let items = completion_items(
+        &mut service,
+        completion_uri,
+        ls_types::Position::new(0, completion_text.len() as u32),
+    )
+    .await;
+    let labels: Vec<_> = items.iter().map(|item| item.label.clone()).collect();
+    assert!(labels.contains(&"--vite-brand".to_string()));
+    let vite_completion = items
+        .iter()
+        .find(|item| item.label == "--vite-brand")
+        .expect("Vite variable should be present in completion");
+    assert_eq!(
+        vite_completion.detail.as_deref(),
+        Some("#123456 • Vite SCSS additionalData")
+    );
+
+    let definition_uri = Uri::from_file_path(root.join("definition.css")).unwrap();
+    let definition_text = ".card { color: var(--vite-brand); }";
+    open_document(
+        &mut service,
+        definition_uri.clone(),
+        "css",
+        definition_text,
+        1,
+    )
+    .await;
+    let definition_request = Request::build("textDocument/definition")
+        .id(45)
+        .params(serde_json::json!({
+            "textDocument": { "uri": definition_uri },
+            "position": position_of(definition_text, "--vite-brand")
+        }))
+        .finish();
+    let definition = send_request_for_result(&mut service, definition_request)
+        .await
+        .expect("definition should resolve");
+    let definition: ls_types::GotoDefinitionResponse = serde_json::from_value(definition).unwrap();
+    let ls_types::GotoDefinitionResponse::Scalar(location) = definition else {
+        panic!("expected a scalar definition location");
+    };
+    assert_eq!(location.uri, config_uri);
+    assert_eq!(location.range, symbols[0].location.range);
+
+    open_document(
+        &mut service,
+        config_uri.clone(),
+        "javascript",
+        config_text,
+        1,
+    )
+    .await;
+
+    change_document(
+        &mut service,
+        config_uri,
+        2,
+        r#"
+            import { defineConfig } from "vite";
+            export default defineConfig({
+                css: {
+                    preprocessorOptions: {
+                        scss: {
+                            additionalData: () => ":root { --vite-brand: #123456; }",
+                        },
+                    },
+                },
+            });
+        "#,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &diagnostic_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert!(workspace_symbols(&mut service, "--vite-brand")
+        .await
+        .is_empty());
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn test_initialize_indexes_static_config_structures_and_vite_function_configs() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-static-config-structures-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let astro_text = r#"
+        import { defineConfig } from "astro/config";
+        const FONT = { cssVariable: "--font-from-structure" };
+        const FONTS = [FONT];
+        const BASE = { fonts: FONTS };
+        const CONFIG = { ...BASE };
+        export default defineConfig(CONFIG);
+    "#;
+    std::fs::write(root.join("astro.config.ts"), astro_text).unwrap();
+
+    let vite_text = r#"
+        import { defineConfig } from "vite";
+        const SOURCE = `:root { --vite-from-function: #123456; }`;
+        const SCSS = { additionalData: SOURCE };
+        const PREPROCESSORS = { scss: SCSS };
+        const CSS = { preprocessorOptions: PREPROCESSORS };
+        const BASE = { css: CSS };
+        export default defineConfig(() => ({ ...BASE }));
+    "#;
+    std::fs::write(root.join("vite.config.ts"), vite_text).unwrap();
+
+    let root_uri = Uri::from_file_path(&root).unwrap();
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+
+    let astro_symbols = workspace_symbols(&mut service, "--font-from-structure").await;
+    assert_eq!(astro_symbols.len(), 1);
+    let astro_start = astro_text.find("cssVariable").unwrap();
+    let astro_end =
+        astro_text.find("\"--font-from-structure\"").unwrap() + "\"--font-from-structure\"".len();
+    assert_eq!(
+        astro_symbols[0].location.range,
+        Range::new(
+            css_variable_lsp::types::offset_to_position(astro_text, astro_start),
+            css_variable_lsp::types::offset_to_position(astro_text, astro_end),
+        )
+    );
+
+    let vite_symbols = workspace_symbols(&mut service, "--vite-from-function").await;
+    assert_eq!(vite_symbols.len(), 1);
+    let vite_start = vite_text.find("--vite-from-function").unwrap();
+    let vite_end = vite_start
+        + vite_text[vite_start..]
+            .find(';')
+            .expect("Vite declaration should end with a semicolon");
+    assert_eq!(
+        vite_symbols[0].location.range,
+        Range::new(
+            css_variable_lsp::types::offset_to_position(vite_text, vite_start),
+            css_variable_lsp::types::offset_to_position(vite_text, vite_end),
+        )
+    );
+
+    let consumer_uri = Uri::from_file_path(root.join("consumer.css")).unwrap();
+    open_document(
+        &mut service,
+        consumer_uri.clone(),
+        "css",
+        ".card { color: var(--vite-from-function); font-family: var(--font-from-structure); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
 
     std::fs::remove_dir_all(root).unwrap();
 }

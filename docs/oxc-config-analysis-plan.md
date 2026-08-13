@@ -2,9 +2,60 @@
 
 ## Status
 
-Phases 0 through 2 are implemented on this branch for Astro font variables. Vite and other framework extractors remain future, use-case-driven work.
+The concrete plan is implemented for Astro font variables and Vite SCSS
+`additionalData`. The shared Oxc layer includes exact config discovery, ESM and
+CommonJS framework proof, bounded static strings and structures, safe object and
+array spreads, simple unconditional Vite function returns, source-accurate
+navigation, atomic lifecycle replacement, recoverable parse handling,
+generated-source UI, and debug telemetry. Broader schemas remain explicitly
+future and use-case driven.
 
-The initial macOS aarch64 release build measured 8,039,360 bytes with Oxc versus 7,176,352 bytes on `master`, an increase of 863,008 bytes, or approximately 12%. This result is acceptable for the initial implementation but should continue to be tracked in release review.
+Final macOS aarch64 release measurements recorded 8,229,136 bytes versus
+7,176,352 bytes on `master`, an increase of 1,052,784 bytes, or approximately
+14.7%. A clean release build took 51.59 seconds versus 40.94 seconds on
+`master`; incremental builds took 0.22 and 0.17 seconds respectively. The size
+and clean-build increases are accepted for this implementation and must remain
+visible during future Oxc upgrades.
+
+## Implemented contract
+
+- Only exact `astro.config.*` and `vite.config.*` basenames listed below are
+  analyzed. Ordinary JavaScript files are not eagerly parsed as framework
+  configs.
+- JavaScript, TypeScript, ESM, and CommonJS variants are supported. Explicit
+  `.mjs` and `.mts` files reject CommonJS exports.
+- `defineConfig` is trusted only when a direct named, aliased, namespace, or
+  supported CommonJS binding is proven to originate from `astro/config` or
+  `vite`. Type-only, reassigned, mutated, nested, conditional, and unrelated
+  helpers are rejected.
+- Accepted static values are unescaped string literals, no-substitution
+  templates, immutable unexported module-level `const` aliases, static object
+  and array aliases, and known object or array spreads. Resolution preserves
+  the originating literal span.
+- Static resolution is bounded to 16 recursive levels, 64 expression visits
+  per string lookup, and 1,024 structural property or spread visits per
+  requested property traversal. Cycles, computed runtime keys, unknown spreads,
+  mutation, concatenation, calls, imports, environment access, and filesystem
+  access propagate `Unknown`.
+- Object properties follow effective last-property semantics. A later unknown
+  computed property or spread prevents extraction rather than guessing.
+- Astro indexes `fonts[].cssVariable` and legacy
+  `experimental.fonts[].cssVariable`. Vite indexes only static
+  `css.preprocessorOptions.scss.additionalData`; SCSS control flow and dynamic
+  values are rejected.
+- Vite accepts direct objects, proven `defineConfig(object)`, and simple
+  unconditional function or arrow-function returns. It does not evaluate
+  branches, promises, mode, command, or environment values.
+- Files larger than 1 MiB are skipped while retaining the last valid analysis.
+  Recoverable Oxc ASTs atomically replace stale state with the safe current
+  subset. Catastrophic parses retain the last valid state.
+- Diagnostics, references, rename, goto-definition, and workspace symbols use
+  the existing manager. Completion, hover, and document symbols additionally
+  identify Astro or Vite provenance without changing the public `CssVariable`
+  type.
+- Workspace scans and open-document lifecycle events replace definitions and
+  usages atomically. Delete, rename, ignore, and workspace-folder changes remove
+  stale config state and revalidate affected consumers.
 
 ## Motivation
 
@@ -78,7 +129,7 @@ Initial Astro set:
 - `astro.config.mts`
 - `astro.config.cts`
 
-Planned Vite set:
+Vite set:
 
 - `vite.config.js`
 - `vite.config.mjs`
@@ -97,20 +148,26 @@ Every extractor classifies a candidate as one of:
 - `Unknown`: dynamic or unsupported, ignored without inventing a value.
 - `Invalid`: malformed for the framework contract, ignored and optionally logged at debug level.
 
-Initially accepted string forms:
+Accepted string forms include direct literals and statically proven aliases:
 
 ```ts
+const FONT_VARIABLE = "--font-roboto";
+const FONT_ALIAS = FONT_VARIABLE;
 cssVariable: "--font-roboto"
 cssVariable: '--font-roboto'
 cssVariable: `--font-roboto`
+cssVariable: FONT_ALIAS
 ```
 
-A template literal is accepted only when it contains no substitutions. Escapes are decoded only if Oxc provides an unambiguous cooked value. The source range continues to refer to the original literal contents.
+A template literal is accepted only when it contains no substitutions or
+escapes. Source-backed aliases continue to navigate and rename at the
+originating literal contents.
 
-Initially rejected forms:
+Rejected forms include:
 
 ```ts
-cssVariable: FONT_VARIABLE
+let FONT_VARIABLE = "--font-roboto"
+export const FONT_VARIABLE = "--font-roboto"
 cssVariable: prefix + "roboto"
 cssVariable: `--font-${family}`
 cssVariable: getVariableName()
@@ -118,66 +175,25 @@ cssVariable: process.env.FONT_VARIABLE
 cssVariable: { toString() { return "--font-roboto" } }
 ```
 
-A later constant folder may support a deliberately small subset such as `const` bindings and string concatenation. That must be a separate phase with cycle detection, operation limits, and dedicated tests.
+Unknown values are ignored conservatively. The analyzer does not fold string
+concatenation, execute calls, inspect imports, or read runtime state.
 
-## Proposed architecture
+## Implementation architecture
 
-### Modules
+The implementation intentionally remains in `src/config_analysis.rs`. The Oxc
+allocator, AST, framework proof, static resolver, and extractors share one
+synchronous lifetime boundary, while only owned project types cross into the
+manager. Splitting this stable behavior into submodules may be considered later,
+but the proposed directory tree was not required for correctness or reviewability.
 
-```text
-src/config_analysis/
-    mod.rs
-    discovery.rs
-    parser.rs
-    static_value.rs
-    types.rs
-    extractors/
-        mod.rs
-        astro.rs
-        vite.rs
-```
+### Owned result boundary
 
-### Core types
-
-```rust
-pub struct GeneratedCssVariable {
-    pub name: String,
-    pub value: Option<String>,
-    pub source_range: Range,
-    pub name_range: Range,
-    pub framework: ConfigFramework,
-    pub reason: GeneratedDefinitionReason,
-}
-
-pub enum ConfigFramework {
-    Astro,
-    Vite,
-}
-
-pub enum GeneratedDefinitionReason {
-    AstroFont,
-    ViteDefine,
-    PluginDeclaredVariable,
-}
-```
-
-The exact representation can change during implementation. Framework-specific details should not leak into `CssVariableManager`.
-
-### Extractor interface
-
-```rust
-pub trait ConfigExtractor {
-    fn matches_path(&self, path: &Path) -> bool;
-
-    fn extract(
-        &self,
-        parsed: &ParsedConfig<'_>,
-        output: &mut Vec<GeneratedCssVariable>,
-    );
-}
-```
-
-A registry selects extractors by exact basename before parsing. Multiple extractors may inspect one file only when explicitly intended.
+Framework extractors produce owned variable definitions or owned CSS snippets
+with source spans. Astro definitions are converted directly to `CssVariable`;
+Vite snippets pass through the existing CSS parser so definitions and usages are
+collected together. Framework provenance is derived internally from exact config
+URIs when rendering LSP output. It does not add framework fields to the public
+`CssVariable` type or leak Oxc nodes into `CssVariableManager`.
 
 ### Oxc parsing boundary
 
@@ -195,25 +211,37 @@ source text
 
 Do not store Oxc AST nodes in `CssVariableManager` or across `.await` points. Extract owned strings and LSP-compatible offsets before returning.
 
-Configuration files are normally small. Begin by parsing inline, measure latency, and move parsing to `tokio::task::spawn_blocking` if profiling shows editor stalls. Establish a file-size limit before parsing, with a proposed default of 1 MiB for recognized config files.
+Configuration files are parsed inline and capped at 1 MiB. Final measurements
+were 0.0040 ms for 512-byte configs, 0.2782 ms for 64 KiB configs, and 4.4222 ms
+for a near-limit 1 MiB config on the development macOS aarch64 machine. These
+results do not justify `spawn_blocking`; revisit that decision if production
+telemetry shows editor stalls.
 
 ### Dependencies
 
-Prototype with narrowly selected, version-aligned Oxc crates rather than the umbrella crate:
+The implementation uses narrowly selected, version-aligned Oxc crates rather
+than the umbrella crate:
 
 - `oxc_allocator`
 - `oxc_ast`
 - `oxc_parser`
 - `oxc_span`
-- optionally `oxc_ast_visit` if a visitor reduces handwritten traversal
+- `oxc_ast_visit`
 
-Disable unnecessary default features where possible. Pin all Oxc crates to the same exact minor version because the project publishes frequent coordinated releases.
+All Oxc crates are pinned to exactly `0.144.0` because the project publishes
+frequent coordinated releases.
 
-At the time this plan was written, `oxc_parser 0.144.0` declares Rust 1.95.0 and uses Rust edition 2024. The local toolchain is Rust 1.97.1. Before merging the dependency, the project must decide and document an MSRV. If supporting an older compiler is required, select the newest compatible Oxc release and test it in CI.
+At implementation time, `oxc_parser 0.144.0` declares Rust 1.95.0 and uses
+Rust edition 2024 internally. The project now declares Rust 1.95 as its MSRV and
+checks all targets and features with that toolchain in CI.
 
 ## Phase 0: dependency and feasibility spike
 
-Create a short-lived prototype before changing product architecture.
+The dependency and feasibility spike is complete. Representative JS, ESM,
+CommonJS, TS, MTS, and CTS fixtures exercise source types, Unicode and CRLF
+ranges, malformed recovery, aliases, comments, wrappers, and lifecycle behavior.
+The final measurements and packaging evidence are recorded under
+[Validation evidence](#validation-evidence).
 
 1. Add the minimum Oxc crates on an experiment commit.
 2. Parse representative `.js`, `.mjs`, `.cjs`, `.ts`, `.mts`, and `.cts` files.
@@ -308,23 +336,29 @@ import { defineConfig as astroConfig } from "astro/config";
 export default astroConfig({ ... });
 ```
 
-Phase 2 should support aliases only when they can be proven from a direct import declaration. Do not resolve re-exports or imported wrapper functions.
+Aliases and namespaces are supported only when a direct ESM import or supported
+CommonJS `require` proves the helper package. Re-exports, imported wrappers,
+type-only imports, and mutated helpers are rejected.
 
 ### Registration semantics
 
-Register each generated font variable as a synthetic global definition:
+Each generated font variable is registered as a synthetic global definition:
 
 - `name`: configured CSS variable name;
-- `value`: descriptive non-color value such as `"Astro generated font"`, or an empty value if UI behavior is cleaner;
+- `value`: empty, so it is never mistaken for a CSS value or color;
 - `uri`: Astro config URI;
-- `range`: string literal or containing property range;
+- `range`: containing property for direct literals, or the originating literal
+  range for an alias;
 - `name_range`: literal content range, excluding quotes when safely representable;
 - `selector`: `:root`;
 - `important`: `false`;
 - `inline`: `false`;
 - `source_position`: property start offset.
 
-The hover text should identify the definition as generated by Astro rather than pretending the config literal is a CSS declaration. If `CssVariable` cannot express that distinction cleanly, add provenance metadata instead of encoding it into `value` or `selector`.
+Completion, hover, and document-symbol text identify the definition as generated
+by Astro rather than pretending the config literal is a CSS declaration.
+Provenance is derived from the exact config URI at the LSP boundary, preserving
+the published `CssVariable` structure and ordinary manager behavior.
 
 ### Astro acceptance tests
 
@@ -348,7 +382,44 @@ Use the real LSP service for end-to-end tests:
 
 Vite support must be use-case driven. Parsing `vite.config.*` is not itself valuable unless an extractor produces CSS-language information.
 
-### Initial candidates
+### Static preprocessor `additionalData`
+
+Vite documents
+[`css.preprocessorOptions[extension].additionalData`](https://vite.dev/config/shared-options.html#css-preprocessoroptions-extension-additionaldata)
+as code prepended to each stylesheet handled by that preprocessor. A static
+string can therefore contain real CSS custom-property declarations:
+
+```ts
+export default defineConfig({
+    css: {
+        preprocessorOptions: {
+            scss: {
+                additionalData: `:root { --brand-color: #123456; }`,
+            },
+        },
+    },
+});
+```
+
+The Vite extractor accepts direct string literals, no-substitution template
+literals, immutable static aliases, static config objects and arrays, and known
+spreads under `scss`. It parses those snippets through the existing CSS parser
+so definitions and `var()` usages preserve their source ranges in
+`vite.config.*`. Completion, diagnostics, references, symbols, and navigation
+then use the same workspace indexes as ordinary CSS. Function-valued
+`additionalData`, escaped literals, non-SCSS preprocessors, unknown spreads,
+and unrelated properties are ignored.
+
+SCSS control-flow and reusable-code directives such as `@if`, `@for`,
+`@mixin`, and `@include` cause the entire snippet to be ignored. This avoids
+indexing declarations from branches or mixins that may never emit CSS. CRLF is
+preserved by using the exact template source when it contains no escapes.
+
+As with ordinary CSS files, the current manager is workspace-global rather
+than import-graph-aware. A statically extracted SCSS definition is therefore
+offered across CSS-like documents in the workspace.
+
+### Future candidates
 
 #### `define` constants
 
@@ -370,13 +441,17 @@ Known first-party or project-specific Vite plugins may have options that declare
 
 #### Aliases and CSS preprocessing
 
-Vite aliases, `css.preprocessorOptions`, and CSS Modules settings can influence file resolution and class naming, but they do not directly define CSS custom properties. Keep them out of scope until the language server has a feature that consumes them.
+Vite aliases, CSS Modules settings, and ordinary preprocessor options can
+influence file resolution and class naming, but they do not directly define CSS
+custom properties. Keep them out of scope until the language server has a
+feature that consumes them. Static `additionalData` is the narrow exception
+because Vite injects that source into processed stylesheets.
 
 ### Vite configuration forms
 
-Vite supports object configs, `defineConfig(object)`, synchronous functions, and asynchronous functions. Initially analyze only direct objects and direct `defineConfig(object)` calls.
-
-For function configs, the analyzer may later inspect unconditional returned object literals:
+Vite supports object configs, `defineConfig(object)`, synchronous functions,
+and asynchronous functions. The analyzer accepts direct objects, proven
+`defineConfig` calls, and simple unconditional returned object expressions:
 
 ```ts
 export default defineConfig(() => ({
@@ -384,30 +459,45 @@ export default defineConfig(() => ({
 }));
 ```
 
-Do not attempt control-flow evaluation of `command`, `mode`, environment variables, promises, or arbitrary branches in the first implementation.
+It does not attempt control-flow evaluation of `command`, `mode`, environment
+variables, promises, or arbitrary branches.
 
 ## Phase 4: reusable static values
 
-Only add a static-value engine after at least two extractors need it.
+The shared static resolver is used by both Astro and Vite.
 
-Potential supported operations:
+### Implemented values and structures
 
-- string, boolean, number, null, array, and object literals;
-- parenthesized and TypeScript `as`/`satisfies` wrappers;
-- no-substitution template literals;
-- local immutable `const` references;
-- object and array spreads from locally known constants;
-- string concatenation where both operands are known;
-- `JSON.stringify` of a known primitive, if an extractor explicitly requests it.
+Astro `fonts[].cssVariable` and Vite SCSS `additionalData` may reference a
+direct, unexported module-level `const` string or a chain of such aliases:
 
-Required safeguards:
+```ts
+const FONT_VARIABLE = "--font-body";
+const FONT_ALIAS = FONT_VARIABLE;
+const SHARED_SCSS = `:root { --brand: #123456; }`;
+```
 
-- maximum recursion depth;
-- maximum visited nodes;
+Resolution remains syntax-only and preserves the originating literal span for
+rename and navigation. It supports module-level `const` strings, object and
+array aliases, parenthesized and TypeScript wrappers, known object and array
+spreads, nested property traversal, and effective last-property semantics. A
+binding is ignored when it is declared after the reference, exported,
+reassigned or updated, declared with `let` or `var`, nested inside a function,
+cyclic, escaped, substitution-bearing, or beyond the configured limits.
+
+Implemented safeguards:
+
+- maximum recursion depth of 16;
+- maximum 64 string-expression visits per string lookup and 1,024 structural
+  visits per requested property traversal;
 - cycle detection for bindings;
 - no getters, calls, imports, computed runtime properties, or proxy behavior;
 - deterministic `Unknown` propagation;
 - no filesystem or environment access.
+
+Concatenation, destructuring, imported values, calls, `JSON.stringify`, getters,
+and conditional evaluation remain unsupported until a concrete extractor needs
+them and can define conservative output semantics.
 
 ## Other future uses enabled by Oxc
 
@@ -418,8 +508,8 @@ Add these only when connected to a concrete CSS LSP feature:
 3. **CSS-in-JS improvements**, using AST structure to identify tagged templates and preserve exact ranges more reliably than lexical heuristics.
 4. **Typed token exports**, for example a local `tokens.ts` file exporting proven `--*` strings, when explicitly configured as a token source.
 5. **Known plugin schemas** for PostCSS, Vite, Astro, or framework integrations that generate custom properties.
-6. **Import-aware `defineConfig` recognition**, proving that helpers come from the expected package rather than matching by identifier text.
-7. **Configuration diagnostics**, such as invalid custom-property names, only after false-positive behavior is well understood.
+6. **Configuration diagnostics**, beyond silently rejecting invalid
+   custom-property names, only after false-positive behavior is well understood.
 
 Avoid turning the server into a general-purpose JavaScript indexer. Every extractor must declare recognized paths, syntax roots, output semantics, and acceptance tests.
 
@@ -440,7 +530,7 @@ Avoid turning the server into a general-purpose JavaScript indexer. Every extrac
 | License | MIT | Apache-2.0 | Both are compatible; neither decides the choice |
 | Current latest metadata | `oxc_parser 0.144.0`, Rust 1.95 | `swc_ecma_parser 44.0.0`, MSRV not declared in crate metadata | Oxc forces an explicit MSRV decision |
 
-### Why not choose SWC initially
+### Why Oxc was chosen before SWC
 
 1. The project does not need SWC transformations, code generation, hygiene, or compiler pipeline features.
 2. Oxc's parse-and-discard arena model maps naturally to extracting a few owned definitions from small config files.
@@ -450,7 +540,7 @@ Avoid turning the server into a general-purpose JavaScript indexer. Every extrac
 
 ### Reasons we might still choose SWC
 
-Switch to SWC if the prototype demonstrates any of the following:
+Reconsider SWC if future production evidence demonstrates any of the following:
 
 - materially better recovery on the incomplete configurations users actually edit;
 - substantially lower supported MSRV requirements;
@@ -460,19 +550,21 @@ Switch to SWC if the prototype demonstrates any of the following:
 - unsupported release targets;
 - an existing SWC-based dependency enters the project, making reuse cheaper than adding Oxc.
 
-The final dependency decision must be based on the Phase 0 measurements, not only published parser benchmarks.
+The dependency decision is based on the completed Phase 0 measurements and
+acceptance tests, not only published parser benchmarks.
 
 ## Performance and resource controls
 
 - Discover only recognized configuration basenames.
 - Skip ignored directories using existing workspace ignore globs.
-- Apply a configurable or internal maximum source size.
-- Parse once per document version or disk content hash.
+- Apply a 1 MiB maximum source size before parsing.
 - Do not retain ASTs.
-- Avoid reparsing unchanged config files during overlapping workspace scans.
 - Track parse count, elapsed time, and ignored-oversize files under debug tracing.
-- Consider a small content-hash cache of owned extraction results only after profiling.
+- Replace variables and usages together so no partial config state is visible.
 - Preserve `max_documents` behavior for generated-definition sources.
+
+A content-hash cache or `spawn_blocking` boundary remains a profiling-driven
+optimization, not part of the current contract.
 
 ## Security model
 
@@ -488,14 +580,18 @@ The final dependency decision must be based on the Phase 0 measurements, not onl
 ## Failure handling
 
 - Unsupported dynamic syntax produces no definition, not a guessed definition.
-- A parser error must not clear previously valid state until replacement semantics are defined. For open documents, prefer replacing with the successfully extracted subset from the current version. For catastrophic parse failure, decide whether stale state or empty state is less surprising and cover that choice with tests.
+- A recoverable parser error atomically replaces stale state with definitions
+  and usages extracted from Oxc's safe current AST.
+- A catastrophic parse, empty recovered program, or oversized file retains the
+  last valid analysis until the file becomes parseable, is removed, or leaves
+  the workspace.
 - One malformed config must not abort workspace scanning.
 - Duplicate declarations in one config should preserve separate source locations while completion deduplicates names through existing behavior.
 - Definitions from multiple workspace roots remain isolated by URI and workspace lifecycle.
 
 ## Packaging and compatibility gates
 
-Before merging Oxc:
+Completed gates:
 
 1. Add and document `rust-version` in `Cargo.toml`.
 2. Add an MSRV CI job.
@@ -505,37 +601,67 @@ Before merging Oxc:
 6. Build release binaries for all supported targets.
 7. Compare release asset sizes against the prior release.
 8. Record clean and incremental build-time changes.
-9. Run `cargo deny` or the project's chosen license/advisory check if introduced.
-10. Confirm crates.io packaging includes required license attribution and no fixtures unintentionally inflate the package.
+9. No dependency security command was introduced because neither `cargo-deny`
+   nor `cargo-audit` is part of this repository's toolchain. Oxc remains pinned
+   exactly and is covered by lockfile review and normal dependency updates.
+10. The crate package contains 54 intentional files after adding the canonical
+    GPL-3.0 license text and Oxc's MIT notice; `.pi/`, logs, fixtures, and build
+    output are excluded. Release archives include both `LICENSE` and
+    `THIRD_PARTY_NOTICES.md` alongside the binary.
 
 ## Rollout strategy
 
-1. Merge the framework and Astro extractor behind normal behavior only after all Astro acceptance tests pass.
-2. Do not add a user-facing feature flag unless binary/MSRV risk or false positives justify one.
-3. Emit debug logs for recognized configs, extraction counts, dynamic candidates skipped, and parse failures.
-4. Observe issue reports before enabling broader Vite or token-file extraction.
-5. Add each new framework schema in a separate change with its own fixtures and public-interface tests.
+1. The framework, Astro extractor, Vite extractor, static resolver, and
+   hardening are delivered as stacked pull requests with red-first tests.
+2. No user-facing feature flag is required. Exact discovery and conservative
+   `Unknown` propagation bound the false-positive surface.
+3. Debug logs report parse counts, extraction counts, diagnostics, elapsed
+   parsing time, catastrophic recovery, and oversized skips without source text.
+4. Broader Vite, token-file, Tailwind, plugin, and CSS-in-JS extraction remains
+   gated on concrete issue reports and defined LSP output semantics.
+5. Every future schema must be a separate change with analyzer and real LSP
+   acceptance tests.
 
-## Proposed commits
+## Validation evidence
 
-1. `docs: plan Oxc configuration analysis`
-2. `build: spike minimal Oxc parser dependencies`
-3. `feat(config): add static configuration analysis framework`
-4. `feat(astro): index generated font CSS variables`
-5. `test(astro): cover config lifecycle through LSP`
-6. Later, use-case-specific Vite or token extractor commits.
+Final branch evidence on macOS aarch64:
 
-The dependency spike may be discarded or squashed after measurements. Do not combine the dependency experiment and Astro behavior into one unreviewable change.
+- stable and Rust 1.95: formatting, strict Clippy, all targets, all features,
+  release build, and the complete test suite pass;
+- real LSP tests cover Astro and Vite initialization, diagnostics, completion,
+  hover, document and workspace symbols, goto-definition, rename, edits, and
+  malformed recovery. Workspace-level tests cover deleted or newly ignored
+  config files and workspace rescans;
+- 194 library tests, 5 binary tests, 30 diagnostics integration tests, 14
+  workflow integration tests, 4 Issue #16 guards, and 9 issue proof tests pass;
+- release binary: 8,229,136 bytes, approximately 14.7% above `master`;
+- clean release build: 51.59 seconds; incremental release build: 0.22 seconds;
+- parser averages: 0.0040 ms at 512 bytes, 0.2782 ms at 64 KiB, and
+  4.4222 ms at 1,048,575 bytes;
+- ten public workspace scans over 64 configs averaged 12.117 ms per scan,
+  produced exactly 64 definitions, and reported 7,847,936 bytes maximum RSS;
+- `cargo package` contains 54 files and is 715.4 KiB uncompressed and
+  153.2 KiB compressed after including `LICENSE` and `THIRD_PARTY_NOTICES.md`;
+- the release workflow covers Linux, macOS, and Windows on x86_64 and aarch64;
+- an external scratch crate compiles a pre-existing public `CssVariable` struct
+  literal, confirming the provenance UI did not break that source interface.
 
-## Open questions
+Performance values are development-machine observations rather than hard service
+level objectives. They establish the baseline to compare future Oxc upgrades.
 
-1. What MSRV does the project intend to support?
-2. What release binary-size increase is acceptable?
-3. Should generated definitions require provenance fields in `CssVariable`, or should the manager store a broader definition enum?
-4. Should no-substitution template literals be accepted in the first Astro version?
-5. When an open config becomes temporarily unparsable, should the server retain the last valid definitions or replace them with the current recoverable subset?
-6. Which concrete Vite-generated CSS-variable workflow should be the first Vite extractor?
-7. Should users be able to configure additional static token source files and schemas?
+## Resolved decisions
+
+1. The MSRV is Rust 1.95 and is enforced in CI.
+2. The measured 14.7% macOS aarch64 binary increase is accepted.
+3. Generated provenance stays internal and is rendered from exact config URIs;
+   the public `CssVariable` struct is unchanged.
+4. Unescaped no-substitution template literals are accepted.
+5. Recoverable ASTs replace stale state; catastrophic and oversized inputs
+   retain the last valid state.
+6. Static SCSS `additionalData` is the first Vite workflow because it injects
+   real CSS with existing LSP semantics.
+7. Additional token sources and schemas are not generic configuration options.
+   They require a separate, concrete feature request and reviewed syntax contract.
 
 ## References
 

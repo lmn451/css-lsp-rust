@@ -34,6 +34,9 @@ pub struct CssVariableManager {
 
     /// Set of tracked document URIs (for counting unique documents)
     tracked_documents: Arc<RwLock<HashSet<Uri>>>,
+
+    /// Latest accepted LSP version for each open document.
+    document_versions: Arc<RwLock<HashMap<Uri, i64>>>,
 }
 
 impl CssVariableManager {
@@ -46,7 +49,33 @@ impl CssVariableManager {
             config: Arc::new(RwLock::new(config)),
             dom_trees: Arc::new(RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(RwLock::new(HashSet::new())),
+            document_versions: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Record a document version if it is newer than the last accepted version.
+    ///
+    /// Returning `false` for equal or older versions lets LSP notification handlers
+    /// discard duplicate and stale changes before mutating their text snapshots.
+    pub async fn accept_document_version(&self, uri: &Uri, version: i64) -> bool {
+        let mut versions = self.document_versions.write().await;
+        if versions.get(uri).is_some_and(|current| version <= *current) {
+            return false;
+        }
+        versions.insert(uri.clone(), version);
+        true
+    }
+
+    /// Forget the version associated with a document that is no longer open.
+    pub async fn clear_document_version(&self, uri: &Uri) {
+        let mut versions = self.document_versions.write().await;
+        versions.remove(uri);
+    }
+
+    /// Return the latest accepted version for an open document.
+    pub async fn get_document_version(&self, uri: &Uri) -> Option<i64> {
+        let versions = self.document_versions.read().await;
+        versions.get(uri).copied()
     }
 
     /// Add a variable definition
@@ -115,11 +144,101 @@ impl CssVariableManager {
             tracked.remove(uri);
         } else {
             tracked.insert(uri.clone());
-            for variable in variables {
-                vars.entry(variable.name.clone())
-                    .or_default()
-                    .push(variable);
-            }
+        }
+        for variable in variables {
+            vars.entry(variable.name.clone())
+                .or_default()
+                .push(variable);
+        }
+
+        Ok(())
+    }
+
+    /// Atomically replace variable definitions and usages owned by one document.
+    pub async fn replace_document_analysis(
+        &self,
+        uri: &Uri,
+        variables: Vec<CssVariable>,
+        usages: Vec<CssVariableUsage>,
+    ) -> Result<(), String> {
+        self.replace_document_analysis_inner(uri, variables, usages)
+            .await
+    }
+
+    /// Replace one document's analysis only if its version is still current.
+    ///
+    /// The version lock is held for the complete tracked/variables/usages
+    /// replacement, so a newer accepted version cannot make this parse obsolete
+    /// between the check and the commit.
+    pub async fn replace_document_analysis_at_version(
+        &self,
+        uri: &Uri,
+        version: i64,
+        variables: Vec<CssVariable>,
+        usages: Vec<CssVariableUsage>,
+    ) -> Result<bool, String> {
+        let versions = self.document_versions.write().await;
+        if versions.get(uri).copied() != Some(version) {
+            return Ok(false);
+        }
+
+        self.replace_document_analysis_inner(uri, variables, usages)
+            .await?;
+        Ok(true)
+    }
+
+    async fn replace_document_analysis_inner(
+        &self,
+        uri: &Uri,
+        variables: Vec<CssVariable>,
+        usages: Vec<CssVariableUsage>,
+    ) -> Result<(), String> {
+        if variables.iter().any(|variable| &variable.uri != uri)
+            || usages.iter().any(|usage| &usage.uri != uri)
+        {
+            return Err("Replacement analysis must belong to the target document".to_string());
+        }
+
+        let max_documents = self.config.read().await.max_documents;
+        let mut tracked = self.tracked_documents.write().await;
+        let has_analysis = !variables.is_empty() || !usages.is_empty();
+        let introduces_document = has_analysis && !tracked.contains(uri);
+        if max_documents > 0 && introduces_document && tracked.len() >= max_documents {
+            return Err(format!(
+                "Maximum document limit ({max_documents}) reached. Cannot add more documents."
+            ));
+        }
+
+        // Keep the same tracked -> variables -> usages order as document removal.
+        let mut vars = self.variables.write().await;
+        let mut stored_usages = self.usages.write().await;
+
+        for definitions in vars.values_mut() {
+            definitions.retain(|variable| &variable.uri != uri);
+        }
+        vars.retain(|_, definitions| !definitions.is_empty());
+
+        for document_usages in stored_usages.values_mut() {
+            document_usages.retain(|usage| &usage.uri != uri);
+        }
+        stored_usages.retain(|_, document_usages| !document_usages.is_empty());
+
+        if !has_analysis {
+            tracked.remove(uri);
+        } else {
+            tracked.insert(uri.clone());
+        }
+        for variable in variables {
+            vars.entry(variable.name.clone())
+                .or_default()
+                .push(variable);
+        }
+
+        for usage in usages {
+            stored_usages
+                .entry(usage.name.clone())
+                .or_default()
+                .push(usage);
         }
 
         Ok(())
@@ -127,6 +246,15 @@ impl CssVariableManager {
 
     /// Add a variable usage
     pub async fn add_usage(&self, usage: CssVariableUsage) {
+        let max_documents = self.config.read().await.max_documents;
+        let mut tracked = self.tracked_documents.write().await;
+        if !tracked.contains(&usage.uri) {
+            if max_documents > 0 && tracked.len() >= max_documents {
+                return;
+            }
+            tracked.insert(usage.uri.clone());
+        }
+
         let mut usages = self.usages.write().await;
         usages
             .entry(usage.name.clone())
@@ -590,6 +718,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replace_document_analysis_replaces_definitions_and_usages_together() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///vite.config.ts").unwrap();
+
+        manager
+            .replace_document_analysis(
+                &uri,
+                vec![create_test_variable("--old", "red", ":root", uri.as_str())],
+                vec![create_test_usage("--old-dependency", ":root", uri.as_str())],
+            )
+            .await
+            .unwrap();
+
+        manager
+            .replace_document_analysis(
+                &uri,
+                vec![create_test_variable("--new", "blue", ":root", uri.as_str())],
+                vec![create_test_usage("--new-dependency", ":root", uri.as_str())],
+            )
+            .await
+            .unwrap();
+
+        assert!(manager.get_variables("--old").await.is_empty());
+        assert!(manager.get_usages("--old-dependency").await.is_empty());
+        assert_eq!(manager.get_variables("--new").await.len(), 1);
+        assert_eq!(manager.get_usages("--new-dependency").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn versioned_analysis_rejects_obsolete_replacements() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///vite.config.ts").unwrap();
+
+        assert!(manager.accept_document_version(&uri, 1).await);
+        assert_eq!(manager.get_document_version(&uri).await, Some(1));
+        assert!(manager
+            .replace_document_analysis_at_version(
+                &uri,
+                1,
+                vec![create_test_variable("--old", "red", ":root", uri.as_str())],
+                vec![create_test_usage("--old-use", ":root", uri.as_str())],
+            )
+            .await
+            .unwrap());
+
+        assert!(manager.accept_document_version(&uri, 2).await);
+        assert!(!manager.accept_document_version(&uri, 2).await);
+        assert!(!manager.accept_document_version(&uri, 1).await);
+
+        assert!(!manager
+            .replace_document_analysis_at_version(
+                &uri,
+                1,
+                vec![create_test_variable(
+                    "--stale",
+                    "blue",
+                    ":root",
+                    uri.as_str()
+                )],
+                vec![create_test_usage("--stale-use", ":root", uri.as_str())],
+            )
+            .await
+            .unwrap());
+        assert_eq!(manager.get_variables("--old").await.len(), 1);
+        assert!(manager.get_variables("--stale").await.is_empty());
+        assert_eq!(manager.get_usages("--old-use").await.len(), 1);
+
+        assert!(manager
+            .replace_document_analysis_at_version(
+                &uri,
+                2,
+                vec![create_test_variable("--new", "blue", ":root", uri.as_str())],
+                vec![create_test_usage("--new-use", ":root", uri.as_str())],
+            )
+            .await
+            .unwrap());
+        assert!(manager.get_variables("--old").await.is_empty());
+        assert_eq!(manager.get_variables("--new").await.len(), 1);
+        assert!(manager.get_usages("--old-use").await.is_empty());
+        assert_eq!(manager.get_usages("--new-use").await.len(), 1);
+
+        manager.clear_document_version(&uri).await;
+        assert_eq!(manager.get_document_version(&uri).await, None);
+    }
+
+    #[tokio::test]
+    async fn usage_only_analysis_is_tracked_and_respects_document_limits() {
+        let manager = CssVariableManager::new(Config {
+            max_documents: 1,
+            ..Config::default()
+        });
+        let usage_uri = Uri::from_str("file:///vite.config.ts").unwrap();
+        let blocked_uri = Uri::from_str("file:///blocked.css").unwrap();
+
+        manager
+            .replace_document_analysis(
+                &usage_uri,
+                Vec::new(),
+                vec![create_test_usage(
+                    "--dependency",
+                    ":root",
+                    usage_uri.as_str(),
+                )],
+            )
+            .await
+            .unwrap();
+
+        assert!(manager.get_document_uris().await.contains(&usage_uri));
+        let error = manager
+            .replace_document_analysis(
+                &blocked_uri,
+                vec![create_test_variable(
+                    "--blocked",
+                    "red",
+                    ":root",
+                    blocked_uri.as_str(),
+                )],
+                Vec::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("Maximum document limit"));
+        assert_eq!(manager.get_usages("--dependency").await.len(), 1);
+        assert!(manager.get_variables("--blocked").await.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_manager_add_and_get_usages() {
         let manager = CssVariableManager::new(Config::default());
         let usage = create_test_usage("--primary", ".button", "file:///test.css");
@@ -600,6 +855,35 @@ mod tests {
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].name, "--primary");
         assert_eq!(usages[0].usage_context, ".button");
+    }
+
+    #[tokio::test]
+    async fn incremental_usage_insertion_respects_document_limits() {
+        let manager = CssVariableManager::new(Config {
+            max_documents: 1,
+            ..Config::default()
+        });
+        let first_uri = Uri::from_str("file:///first.css").unwrap();
+        let blocked_uri = Uri::from_str("file:///blocked.css").unwrap();
+
+        manager
+            .add_usage(create_test_usage(
+                "--first-dependency",
+                ".first",
+                first_uri.as_str(),
+            ))
+            .await;
+        manager
+            .add_usage(create_test_usage(
+                "--blocked-dependency",
+                ".blocked",
+                blocked_uri.as_str(),
+            ))
+            .await;
+
+        assert!(manager.get_document_uris().await.contains(&first_uri));
+        assert_eq!(manager.get_usages("--first-dependency").await.len(), 1);
+        assert!(manager.get_usages("--blocked-dependency").await.is_empty());
     }
 
     #[tokio::test]

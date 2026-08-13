@@ -3,7 +3,7 @@
 A fast, **Rust**-based [Language Server Protocol][lsp] implementation focused on
 **CSS custom properties** (`--variables`) and the **`var()`** function. It is a
 ground-up rewrite of the original TypeScript `css-variable-lsp`, designed to
-ship as a single static binary that any LSP-aware editor (Zed, VS Code,
+ship as a standalone native executable that any LSP-aware editor (Zed, VS Code,
 Neovim, Helix, …) can launch with no Node.js runtime in sight.
 
 [lsp]: https://microsoft.github.io/language-server-protocol/
@@ -38,15 +38,15 @@ Neovim, Helix, …) can launch with no Node.js runtime in sight.
 
 |                    | TypeScript `css-variable-lsp` | This crate            |
 | ------------------ | ----------------------------- | --------------------- |
-| Runtime            | Node.js + npm dependencies    | **None** — static bin |
-| Binary size        | ~50–100 MB                    | **~6 MB**             |
+| Runtime            | Node.js + npm dependencies    | **Native, no Node.js** |
+| Binary size        | ~50–100 MB                    | **~8.2 MB** (macOS aarch64) |
 | Cold start         | ~500 ms                       | **~10 ms**            |
 | Baseline memory    | 50–100 MB                     | **10–20 MB**          |
 | Parse time (typ.)  | Fast (`css-tree`)             | **Very fast** (regex) |
 | Distribution       | npm package                   | `cargo install`, GitHub Releases, crates.io |
 
-A single-binary, zero-dependency server is dramatically easier to embed in
-editor extensions and CI sandboxes.
+A standalone executable with no Node.js or npm runtime dependency is
+dramatically easier to embed in editor extensions and CI sandboxes.
 
 ---
 
@@ -64,8 +64,19 @@ editor extensions and CI sandboxes.
   `emotion`, etc.), correctly handling template expressions.
 - **Astro font variables** are statically indexed from
   `astro.config.{js,mjs,cjs,ts,mts,cts}` using Oxc. Configuration code is
-  parsed but never executed, and only literal `fonts[].cssVariable` values are
-  registered.
+  parsed but never executed. `fonts[].cssVariable` accepts direct literals,
+  bounded immutable `const` aliases, static object and array aliases, and known
+  spreads. Proven ESM and CommonJS `defineConfig` helpers are supported.
+- **Vite injected CSS variables** are indexed from static
+  `css.preprocessorOptions.scss.additionalData` strings in
+  `vite.config.{js,mjs,cjs,ts,mts,cts}`. Direct literals, immutable aliases,
+  static structures and spreads, and simple unconditional function returns are
+  accepted. Dynamic values, unrelated Vite options, unknown computed
+  properties, and SCSS control-flow directives are ignored.
+- **Safe config lifecycle** atomically updates definitions and usages. Oxc's
+  recoverable AST replaces stale state, while catastrophic syntax errors and
+  files over 1 MiB retain the last valid analysis. Completion, hover, and
+  document symbols identify whether a definition came from Astro or Vite.
 - **Cascade sorting** and **CSS specificity calculation** including
   `:is()`, `:not()`, `:where()`, attribute selectors, pseudo-classes, and
   pseudo-elements.
@@ -104,8 +115,9 @@ editor extensions and CI sandboxes.
 
 All of these are configurable via the `--lookup-files` flag.
 
-Recognized `astro.config.*` files are discovered independently of
-`--lookup-files` so users do not need to scan every JavaScript file eagerly.
+Recognized `astro.config.*` and `vite.config.*` files are discovered
+independently of `--lookup-files` so users do not need to scan every JavaScript
+file eagerly.
 
 ---
 
@@ -443,8 +455,8 @@ for post-release validation.
 
 | Feature               | TypeScript                           | Rust                       |
 | --------------------- | ------------------------------------ | -------------------------- |
-| Runtime               | Node + npm packages                  | **None**                   |
-| Binary size           | 50–100 MB                            | **6 MB**                   |
+| Runtime               | Node + npm packages                  | **Native, no Node.js**     |
+| Binary size           | 50–100 MB                            | **~8.2 MB** (macOS aarch64) |
 | Cold start            | ~500 ms                              | **~10 ms**                 |
 | Memory at idle        | 50–100 MB                            | **10–20 MB**               |
 | Parser                | `css-tree` (full AST)                | Regex + state machine      |
@@ -464,4 +476,6 @@ under "Known limitations" in `CHANGELOG.md`.
 ## License
 
 [GPL-3.0](LICENSE). Originally derived from the TypeScript
-`css-variable-lsp` by the same author.
+`css-variable-lsp` by the same author. Dependency license notices are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and are included in release
+archives.

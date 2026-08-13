@@ -270,4 +270,74 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn rescans_remove_deleted_vite_configs() {
+        let root = std::env::temp_dir().join(format!(
+            "css-variable-lsp-vite-config-rescan-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("vite.config.ts");
+        std::fs::write(
+            &config_path,
+            r#"
+                export default {
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-scan: red; }",
+                            },
+                        },
+                    },
+                };
+            "#,
+        )
+        .unwrap();
+
+        let manager = CssVariableManager::new(Config::default());
+        let root_uri = Uri::from_file_path(&root).unwrap();
+        scan_workspace(vec![root_uri.clone()], &manager, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(manager.get_variables("--vite-scan").await.len(), 1);
+
+        std::fs::remove_file(&config_path).unwrap();
+        scan_workspace(vec![root_uri], &manager, |_, _| {})
+            .await
+            .unwrap();
+        assert!(manager.get_variables("--vite-scan").await.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rescans_remove_deleted_usage_only_vite_configs() {
+        let root = std::env::temp_dir().join(format!(
+            "css-variable-lsp-vite-usage-rescan-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("vite.config.ts");
+        std::fs::write(
+            &config_path,
+            r#"export default { css: { preprocessorOptions: { scss: { additionalData: ":root { color: var(--external); }" } } } };"#,
+        )
+        .unwrap();
+        let root_uri = Uri::from_file_path(&root).unwrap();
+        let manager = CssVariableManager::new(Config::default());
+
+        scan_workspace(vec![root_uri.clone()], &manager, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(manager.get_usages("--external").await.len(), 1);
+
+        std::fs::remove_file(config_path).unwrap();
+        scan_workspace(vec![root_uri], &manager, |_, _| {})
+            .await
+            .unwrap();
+        assert!(manager.get_usages("--external").await.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
