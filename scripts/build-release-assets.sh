@@ -98,17 +98,35 @@ build_target() {
 
   if [[ "${target}" == *"windows"* ]]; then
     local zip_path="${DIST_DIR}/${asset_base}.zip"
+    local archive_dir="${DIST_DIR}/${asset_base}-archive"
+    rm -rf "${archive_dir}"
+    mkdir -p "${archive_dir}"
+    cp "${bin_path}" "${ROOT_DIR}/LICENSE" "${ROOT_DIR}/THIRD_PARTY_NOTICES.md" "${archive_dir}/"
     if command -v zip >/dev/null 2>&1; then
-      (cd "${ROOT_DIR}/target/${target}/release" && zip -q "${zip_path}" "${bin_name}")
+      (cd "${archive_dir}" && zip -q "${zip_path}" "${bin_name}" LICENSE THIRD_PARTY_NOTICES.md)
     elif command -v powershell.exe >/dev/null 2>&1; then
-      powershell.exe -NoProfile -Command "Compress-Archive -Path '${bin_path}' -DestinationPath '${zip_path}'"
+      if ! command -v cygpath >/dev/null 2>&1; then
+        echo "cygpath is required for the PowerShell archive fallback"
+        return 1
+      fi
+      local powershell_archive_dir
+      local powershell_zip_path
+      powershell_archive_dir="$(cygpath -w "${archive_dir}")"
+      powershell_zip_path="$(cygpath -w "${zip_path}")"
+      powershell.exe -NoProfile -Command "Compress-Archive -Path '${powershell_archive_dir}\\*' -DestinationPath '${powershell_zip_path}'"
     else
       echo "zip not found; skipping archive for ${target}"
       return 1
     fi
+    rm -rf "${archive_dir}"
   else
     local tar_path="${DIST_DIR}/${asset_base}.tar.gz"
-    tar -C "${ROOT_DIR}/target/${target}/release" -czf "${tar_path}" "${bin_name}"
+    local archive_dir="${DIST_DIR}/${asset_base}-archive"
+    rm -rf "${archive_dir}"
+    mkdir -p "${archive_dir}"
+    cp "${bin_path}" "${ROOT_DIR}/LICENSE" "${ROOT_DIR}/THIRD_PARTY_NOTICES.md" "${archive_dir}/"
+    tar -C "${archive_dir}" -czf "${tar_path}" "${bin_name}" LICENSE THIRD_PARTY_NOTICES.md
+    rm -rf "${archive_dir}"
   fi
 }
 

@@ -6,15 +6,20 @@ use std::time::Instant;
 use ls_types::{Range, Uri};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrayExpression, ArrayExpressionElement, ArrowFunctionBody, AssignmentExpression,
-    AssignmentTarget, BindingPattern, BlockStatement, CatchClause, Expression, ForInStatement,
-    ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft, ImportDeclaration,
-    ImportDeclarationSpecifier, MemberExpression, ObjectExpression, ObjectPropertyKind, Program,
-    PropertyKey, SimpleAssignmentTarget, Statement, SwitchStatement, UpdateExpression,
-    VariableDeclaration, VariableDeclarator,
+    Argument, ArrayExpression, ArrayExpressionElement, ArrowFunctionBody, ArrowFunctionExpression,
+    AssignmentExpression, AssignmentTarget, BindingPattern, BlockStatement, CatchClause,
+    Expression, ForInStatement, ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft,
+    FormalParameters, ImportDeclaration, ImportDeclarationSpecifier, MemberExpression,
+    ModuleExportName, ObjectExpression, ObjectPropertyKind, Program, PropertyKey,
+    SimpleAssignmentTarget, Statement, SwitchStatement, UpdateExpression, VariableDeclaration,
+    VariableDeclarator,
 };
+use oxc_ast::AstKind;
 use oxc_ast_visit::{
-    walk::{walk_assignment_expression, walk_block_statement, walk_update_expression},
+    walk::{
+        walk_assignment_expression, walk_block_statement, walk_formal_parameters,
+        walk_update_expression,
+    },
     Visit,
 };
 use oxc_parser::Parser;
@@ -98,12 +103,31 @@ pub(crate) fn config_variable_source(uri: &Uri) -> Option<ConfigVariableSource> 
         ConfigKind::Vite => Some(ConfigVariableSource::ViteScssAdditionalData),
     }
 }
-
 /// Parse a recognized framework configuration file without executing it.
 pub async fn parse_config_document(
     text: &str,
     uri: &Uri,
     manager: &CssVariableManager,
+) -> Result<(), String> {
+    parse_config_document_inner(text, uri, manager, None).await
+}
+
+/// Parse a recognized framework configuration file and commit only if its
+/// version is still current.
+pub(crate) async fn parse_config_document_at_version(
+    text: &str,
+    uri: &Uri,
+    manager: &CssVariableManager,
+    version: i64,
+) -> Result<(), String> {
+    parse_config_document_inner(text, uri, manager, Some(version)).await
+}
+
+async fn parse_config_document_inner(
+    text: &str,
+    uri: &Uri,
+    manager: &CssVariableManager,
+    version: Option<i64>,
 ) -> Result<(), String> {
     let path = Path::new(uri.path().as_str());
     if config_kind(path).is_none() {
@@ -162,9 +186,16 @@ pub async fn parse_config_document(
         usages.extend(snippet_manager.get_document_usages(uri).await);
     }
 
-    manager
-        .replace_document_analysis(uri, variables, usages)
-        .await
+    if let Some(version) = version {
+        manager
+            .replace_document_analysis_at_version(uri, version, variables, usages)
+            .await?;
+    } else {
+        manager
+            .replace_document_analysis(uri, variables, usages)
+            .await?;
+    }
+    Ok(())
 }
 
 fn extract_config_variables(
@@ -295,11 +326,17 @@ struct ResolvedStaticString {
     available_after: u32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
+struct StaticScope {
+    span: Span,
+    names: HashSet<String>,
+}
+
 struct StaticExpressionResolver<'a> {
     strings: &'a HashMap<String, ResolvedStaticString>,
     bindings: &'a HashMap<String, &'a Expression<'a>>,
     assigned_names: &'a HashSet<String>,
+    scopes: &'a [StaticScope],
 }
 
 enum ResolvedProperty<'a> {
@@ -316,7 +353,16 @@ impl<'a> StaticExpressionResolver<'a> {
             strings: &static_strings.resolved_strings,
             bindings: &static_strings.bindings,
             assigned_names: &static_strings.assigned_names,
+            scopes: &static_strings.scopes,
         }
+    }
+
+    fn is_shadowed(&self, name: &str, span: Span) -> bool {
+        self.scopes.iter().any(|scope| {
+            scope.names.contains(name)
+                && scope.span.start <= span.start
+                && span.end <= scope.span.end
+        })
     }
 
     fn resolve_expression(
@@ -335,7 +381,10 @@ impl<'a> StaticExpressionResolver<'a> {
             return Some(expression);
         };
         let name = identifier.name.as_str();
-        if self.assigned_names.contains(name) || !resolving.insert(name.to_string()) {
+        if self.is_shadowed(name, identifier.span)
+            || self.assigned_names.contains(name)
+            || !resolving.insert(name.to_string())
+        {
             return None;
         }
         let init = self.bindings.get(name)?;
@@ -484,11 +533,44 @@ impl<'a> Visit<'a> for BindingNameCollector {
 
     fn visit_expression(&mut self, _expression: &Expression<'a>) {}
 }
+#[derive(Default)]
+struct FunctionScopedVarCollector {
+    nested_function_depth: usize,
+    names: HashSet<String>,
+}
+
+impl<'a> Visit<'a> for FunctionScopedVarCollector {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        if matches!(
+            kind,
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+        ) {
+            self.nested_function_depth += 1;
+        }
+    }
+
+    fn leave_node(&mut self, kind: AstKind<'a>) {
+        if matches!(
+            kind,
+            AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+        ) {
+            self.nested_function_depth = self.nested_function_depth.saturating_sub(1);
+        }
+    }
+
+    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+        if self.nested_function_depth == 0 && declaration.kind.is_var() {
+            self.names
+                .extend(AssignedBindingCollector::declaration_names(declaration));
+        }
+    }
+}
 
 struct AssignedBindingCollector {
     tracked_names: HashSet<String>,
     names: HashSet<String>,
     shadowed_scopes: Vec<HashSet<String>>,
+    pending_function_scopes: Vec<HashSet<String>>,
     tracked_member_property: Option<&'static str>,
 }
 
@@ -498,6 +580,7 @@ impl AssignedBindingCollector {
             tracked_names,
             names: HashSet::new(),
             shadowed_scopes: Vec::new(),
+            pending_function_scopes: Vec::new(),
             tracked_member_property: None,
         }
     }
@@ -525,24 +608,82 @@ impl AssignedBindingCollector {
         collector.visit_assignment_target(target);
         self.record_names(collector.names);
 
-        let Some(property) = self.tracked_member_property else {
-            return;
-        };
         let Some(member) = target.as_member_expression() else {
             return;
         };
-        if member.static_property_name() != Some(property) {
-            return;
-        }
-        if let Expression::Identifier(identifier) = unwrap_expression(member.object()) {
-            self.record_names(HashSet::from([identifier.name.as_str().to_string()]));
-        }
+        self.record_member_assignment(member);
     }
 
     fn record_simple_assignment_target<'a>(&mut self, target: &SimpleAssignmentTarget<'a>) {
         let mut collector = AssignmentTargetNameCollector::default();
         collector.visit_simple_assignment_target(target);
         self.record_names(collector.names);
+        if let Some(member) = target.as_member_expression() {
+            self.record_member_assignment(member);
+        }
+    }
+
+    fn record_member_root(&mut self, expression: &Expression<'_>) {
+        let mut object = expression;
+        loop {
+            match unwrap_expression(object) {
+                Expression::Identifier(identifier) => {
+                    self.record_names(HashSet::from([identifier.name.as_str().to_string()]));
+                    return;
+                }
+                expression => {
+                    let Some(parent) = expression.as_member_expression() else {
+                        return;
+                    };
+                    object = parent.object();
+                }
+            }
+        }
+    }
+
+    fn record_member_assignment(&mut self, member: &MemberExpression<'_>) {
+        if self
+            .tracked_member_property
+            .is_some_and(|property| member.static_property_name() != Some(property))
+        {
+            return;
+        }
+        self.record_member_root(member.object());
+    }
+
+    fn record_mutating_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
+        const MUTATORS: &[&str] = &[
+            "pop",
+            "push",
+            "splice",
+            "shift",
+            "unshift",
+            "sort",
+            "reverse",
+            "fill",
+            "copyWithin",
+        ];
+        let callee = unwrap_expression(&call.callee);
+        if let Some(member) = callee.as_member_expression() {
+            if member
+                .static_property_name()
+                .is_some_and(|name| MUTATORS.contains(&name))
+            {
+                self.record_member_root(member.object());
+                return;
+            }
+
+            if member.static_property_name() == Some("assign")
+                && matches!(
+                    unwrap_expression(member.object()),
+                    Expression::Identifier(identifier) if identifier.name.as_str() == "Object"
+                )
+            {
+                if let Some(argument) = call.arguments.first().and_then(Argument::as_expression) {
+                    self.record_member_root(argument);
+                }
+            }
+        }
     }
 
     fn record_for_statement_left<'a>(&mut self, left: &ForStatementLeft<'a>) {
@@ -568,11 +709,26 @@ impl AssignedBindingCollector {
     }
 
     fn block_shadow_names(block: &BlockStatement<'_>) -> HashSet<String> {
+        Self::statement_shadow_names(&block.body, true)
+    }
+
+    fn function_body_shadow_names(body: &oxc_ast::ast::FunctionBody<'_>) -> HashSet<String> {
+        let mut names = Self::statement_shadow_names(&body.statements, false);
+        let mut vars = FunctionScopedVarCollector::default();
+        vars.visit_function_body(body);
+        names.extend(vars.names);
+        names
+    }
+    fn statement_shadow_names(statements: &[Statement<'_>], lexical_only: bool) -> HashSet<String> {
         let mut names = HashSet::new();
-        for statement in &block.body {
+        for statement in statements {
             match statement {
                 Statement::VariableDeclaration(declaration) => {
-                    names.extend(Self::lexical_declaration_names(declaration));
+                    if lexical_only {
+                        names.extend(Self::lexical_declaration_names(declaration));
+                    } else {
+                        names.extend(Self::declaration_names(declaration));
+                    }
                 }
                 Statement::FunctionDeclaration(function) => {
                     if let Some(identifier) = &function.id {
@@ -623,9 +779,24 @@ impl AssignedBindingCollector {
 }
 
 impl<'a> Visit<'a> for AssignedBindingCollector {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        if let AstKind::Function(function) = kind {
+            let mut names = HashSet::new();
+            if let Some(identifier) = &function.id {
+                names.insert(identifier.name.as_str().to_string());
+            }
+            self.pending_function_scopes.push(names);
+        }
+    }
+
     fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
         self.record_assignment_target(&expression.left);
         walk_assignment_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, expression: &oxc_ast::ast::CallExpression<'a>) {
+        self.record_mutating_call(expression);
+        oxc_ast_visit::walk::walk_call_expression(self, expression);
     }
 
     fn visit_update_expression(&mut self, expression: &UpdateExpression<'a>) {
@@ -633,7 +804,38 @@ impl<'a> Visit<'a> for AssignedBindingCollector {
         walk_update_expression(self, expression);
     }
 
-    fn visit_function_body(&mut self, _body: &oxc_ast::ast::FunctionBody<'a>) {}
+    fn visit_formal_parameters(&mut self, parameters: &FormalParameters<'a>) {
+        let mut names = self.pending_function_scopes.pop().unwrap_or_default();
+        let mut parameter_names = BindingNameCollector::default();
+        parameter_names.visit_formal_parameters(parameters);
+        names.extend(parameter_names.names);
+        self.pending_function_scopes.push(names.clone());
+        self.with_shadowed_scope(names, |collector| {
+            walk_formal_parameters(collector, parameters);
+        });
+    }
+
+    fn visit_function_body(&mut self, body: &oxc_ast::ast::FunctionBody<'a>) {
+        let mut names = self.pending_function_scopes.pop().unwrap_or_default();
+        names.extend(Self::function_body_shadow_names(body));
+        self.with_shadowed_scope(names, |collector| {
+            oxc_ast_visit::walk::walk_function_body(collector, body);
+        });
+    }
+
+    fn visit_arrow_function_expression(&mut self, expression: &ArrowFunctionExpression<'a>) {
+        let mut names = BindingNameCollector::default();
+        names.visit_formal_parameters(&expression.params);
+        let has_block_body = matches!(&expression.body, ArrowFunctionBody::FunctionBody(_));
+        self.pending_function_scopes.push(names.names.clone());
+        self.with_shadowed_scope(names.names, |collector| {
+            walk_formal_parameters(collector, &expression.params);
+            collector.visit_arrow_function_body(&expression.body);
+        });
+        if !has_block_body {
+            self.pending_function_scopes.pop();
+        }
+    }
 
     fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
         let names = Self::block_shadow_names(block);
@@ -719,12 +921,178 @@ impl<'a> Visit<'a> for AssignedBindingCollector {
         });
     }
 }
+#[derive(Default)]
+struct StaticScopeCollector {
+    scopes: Vec<StaticScope>,
+}
+
+impl StaticScopeCollector {
+    fn function_scope_names(function: &oxc_ast::ast::Function<'_>) -> HashSet<String> {
+        let mut names = HashSet::new();
+        if let Some(identifier) = &function.id {
+            names.insert(identifier.name.as_str().to_string());
+        }
+        let mut parameters = BindingNameCollector::default();
+        parameters.visit_formal_parameters(&function.params);
+        names.extend(parameters.names);
+        if let Some(body) = function.body.as_deref() {
+            names.extend(AssignedBindingCollector::function_body_shadow_names(body));
+        }
+        names
+    }
+
+    fn arrow_scope_names(function: &ArrowFunctionExpression<'_>) -> HashSet<String> {
+        let mut names = BindingNameCollector::default();
+        names.visit_formal_parameters(&function.params);
+        let mut result = names.names;
+        if let ArrowFunctionBody::FunctionBody(body) = &function.body {
+            result.extend(AssignedBindingCollector::function_body_shadow_names(body));
+        }
+        result
+    }
+
+    fn push_scope(&mut self, span: Span, names: HashSet<String>) {
+        self.scopes.push(StaticScope { span, names });
+    }
+}
+
+impl<'a> Visit<'a> for StaticScopeCollector {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        match kind {
+            AstKind::Function(function) => {
+                self.push_scope(function.span, Self::function_scope_names(function));
+            }
+            AstKind::ArrowFunctionExpression(function) => {
+                self.push_scope(function.span, Self::arrow_scope_names(function));
+            }
+            AstKind::BlockStatement(block) => {
+                self.push_scope(
+                    block.span,
+                    AssignedBindingCollector::block_shadow_names(block),
+                );
+            }
+            AstKind::CatchClause(clause) => {
+                let mut names = BindingNameCollector::default();
+                if let Some(parameter) = &clause.param {
+                    names.visit_binding_pattern(&parameter.pattern);
+                }
+                self.push_scope(clause.span, names.names);
+            }
+            AstKind::SwitchStatement(statement) => {
+                self.push_scope(
+                    statement.span,
+                    AssignedBindingCollector::switch_shadow_names(statement),
+                );
+            }
+            AstKind::ForStatement(statement) => {
+                let names = statement
+                    .init
+                    .as_ref()
+                    .and_then(|init| match init {
+                        ForStatementInit::VariableDeclaration(declaration) => Some(
+                            AssignedBindingCollector::lexical_declaration_names(declaration),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                self.push_scope(statement.span, names);
+            }
+            AstKind::ForInStatement(statement) => {
+                let names = match &statement.left {
+                    ForStatementLeft::VariableDeclaration(declaration) => {
+                        AssignedBindingCollector::lexical_declaration_names(declaration)
+                    }
+                    _ => HashSet::new(),
+                };
+                self.push_scope(statement.span, names);
+            }
+            AstKind::ForOfStatement(statement) => {
+                let names = match &statement.left {
+                    ForStatementLeft::VariableDeclaration(declaration) => {
+                        AssignedBindingCollector::lexical_declaration_names(declaration)
+                    }
+                    _ => HashSet::new(),
+                };
+                self.push_scope(statement.span, names);
+            }
+            _ => {}
+        }
+    }
+
+    fn leave_node(&mut self, kind: AstKind<'a>) {
+        if matches!(
+            kind,
+            AstKind::Function(_)
+                | AstKind::ArrowFunctionExpression(_)
+                | AstKind::BlockStatement(_)
+                | AstKind::CatchClause(_)
+                | AstKind::SwitchStatement(_)
+                | AstKind::ForStatement(_)
+                | AstKind::ForInStatement(_)
+                | AstKind::ForOfStatement(_)
+        ) {
+            self.scopes.pop();
+        }
+    }
+}
 
 struct StaticStringResolver<'a, 's> {
     source: &'s str,
     bindings: HashMap<String, &'a Expression<'a>>,
     resolved_strings: HashMap<String, ResolvedStaticString>,
     assigned_names: HashSet<String>,
+    scopes: Vec<StaticScope>,
+}
+
+fn collect_exported_aliases(program: &Program<'_>, source: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for statement in &program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(declaration)
+                if !declaration.export_kind.is_type() =>
+            {
+                for specifier in &declaration.specifiers {
+                    match &specifier.local {
+                        ModuleExportName::IdentifierReference(identifier) => {
+                            names.insert(identifier.name.as_str().to_string());
+                        }
+                        ModuleExportName::IdentifierName(identifier) => {
+                            names.insert(identifier.name.as_str().to_string());
+                        }
+                        ModuleExportName::StringLiteral(_) => {}
+                    }
+                }
+            }
+            Statement::ExpressionStatement(statement) => {
+                let Expression::AssignmentExpression(assignment) =
+                    unwrap_expression(&statement.expression)
+                else {
+                    continue;
+                };
+                if !assignment.operator.is_assign() {
+                    continue;
+                }
+                let Some(target) = source.get(
+                    assignment.left.span().start as usize..assignment.left.span().end as usize,
+                ) else {
+                    continue;
+                };
+                let target = target.trim();
+                if !(target.starts_with("exports.")
+                    || target.starts_with("exports[")
+                    || target.starts_with("module.exports.")
+                    || target.starts_with("module.exports["))
+                {
+                    continue;
+                }
+                if let Expression::Identifier(identifier) = unwrap_expression(&assignment.right) {
+                    names.insert(identifier.name.as_str().to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 impl<'a, 's> StaticStringResolver<'a, 's> {
@@ -760,12 +1128,19 @@ impl<'a, 's> StaticStringResolver<'a, 's> {
 
         let mut assignments = AssignedBindingCollector::new(bindings.keys().cloned().collect());
         assignments.visit_program(program);
+        assignments
+            .names
+            .extend(collect_exported_aliases(program, source));
+
+        let mut scopes = StaticScopeCollector::default();
+        scopes.visit_program(program);
 
         Self {
             source,
             bindings,
             resolved_strings: HashMap::new(),
             assigned_names: assignments.names,
+            scopes: scopes.scopes,
         }
     }
 
@@ -813,7 +1188,13 @@ impl<'a, 's> StaticStringResolver<'a, 's> {
             return None;
         };
         let name = identifier.name.as_str();
-        if self.assigned_names.contains(name) || !resolving.insert(name.to_string()) {
+        if self.scopes.iter().any(|scope| {
+            scope.names.contains(name)
+                && scope.span.start <= identifier.span.start
+                && identifier.span.end <= scope.span.end
+        }) || self.assigned_names.contains(name)
+            || !resolving.insert(name.to_string())
+        {
             return None;
         }
 
@@ -837,7 +1218,6 @@ fn collect_static_resolver<'a, 's>(
     resolver.resolve_all();
     resolver
 }
-
 struct DefineConfigImportCollector<'s> {
     module_source: &'s str,
     define_config_bindings: HashSet<String>,
@@ -858,9 +1238,6 @@ impl<'s> DefineConfigImportCollector<'s> {
             let Statement::VariableDeclaration(declaration) = statement else {
                 continue;
             };
-            if !declaration.kind.is_const() {
-                continue;
-            }
             for declarator in &declaration.declarations {
                 self.collect_commonjs_declarator(declarator);
             }
@@ -1084,7 +1461,7 @@ impl<'a, 's> AstroFontExtractor<'a, 's> {
                 continue;
             };
             let Some((name, name_span)) =
-                static_string_value(value, self.source, self.expression_resolver.strings)
+                static_string_value(value, self.source, &self.expression_resolver)
             else {
                 continue;
             };
@@ -1189,16 +1566,15 @@ impl<'a, 's> ViteAdditionalDataExtractor<'a, 's> {
         else {
             return;
         };
-        let Some((text, content_span)) = static_string_value(
-            additional_data,
-            self.source,
-            self.expression_resolver.strings,
-        ) else {
+        let Some((text, content_span)) =
+            static_string_value(additional_data, self.source, &self.expression_resolver)
+        else {
             return;
         };
         if contains_unsupported_scss_control_flow(&text) {
             return;
         }
+        let text = mask_scss_comments_for_parser(&text);
         self.css_snippets
             .push(ExtractedCssSnippet { text, content_span });
     }
@@ -1276,6 +1652,9 @@ fn commonjs_config_object<'a>(
     define_config_namespaces: &HashSet<String>,
     resolver: &StaticExpressionResolver<'a>,
 ) -> Option<&'a ObjectExpression<'a>> {
+    let mut assignments = ModuleExportsAssignmentCollector::new(source);
+    assignments.visit_program(program);
+
     for statement in program.body.iter().rev() {
         let Statement::ExpressionStatement(statement) = statement else {
             continue;
@@ -1285,6 +1664,13 @@ fn commonjs_config_object<'a>(
             continue;
         };
         if is_module_exports_assignment(assignment, source) {
+            if assignments
+                .spans
+                .iter()
+                .any(|span| span.start > assignment.span.start)
+            {
+                return None;
+            }
             return config_object_from_expression(
                 &assignment.right,
                 define_config_bindings,
@@ -1294,6 +1680,31 @@ fn commonjs_config_object<'a>(
         }
     }
     None
+}
+
+struct ModuleExportsAssignmentCollector<'s> {
+    source: &'s str,
+    spans: Vec<Span>,
+}
+
+impl<'s> ModuleExportsAssignmentCollector<'s> {
+    fn new(source: &'s str) -> Self {
+        Self {
+            source,
+            spans: Vec::new(),
+        }
+    }
+}
+
+impl<'a> Visit<'a> for ModuleExportsAssignmentCollector<'_> {
+    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
+        if is_module_exports_assignment(assignment, self.source) {
+            self.spans.push(assignment.span);
+        }
+        walk_assignment_expression(self, assignment);
+    }
+
+    fn visit_function_body(&mut self, _body: &oxc_ast::ast::FunctionBody<'a>) {}
 }
 
 fn is_require_expression(expression: &Expression<'_>, module_source: &str) -> bool {
@@ -1405,7 +1816,7 @@ fn literal_static_string_span(expression: &Expression<'_>, source: &str) -> Opti
 fn static_string_value(
     expression: &Expression<'_>,
     source: &str,
-    static_strings: &HashMap<String, ResolvedStaticString>,
+    resolver: &StaticExpressionResolver<'_>,
 ) -> Option<(String, Span)> {
     let expression = unwrap_expression(expression);
     let content_span = if let Some(span) = literal_static_string_span(expression, source) {
@@ -1414,7 +1825,10 @@ fn static_string_value(
         let Expression::Identifier(identifier) = expression else {
             return None;
         };
-        let value = static_strings.get(identifier.name.as_str())?;
+        if resolver.is_shadowed(identifier.name.as_str(), identifier.span) {
+            return None;
+        }
+        let value = resolver.strings.get(identifier.name.as_str())?;
         if value.available_after > identifier.span.start {
             return None;
         }
@@ -1424,13 +1838,88 @@ fn static_string_value(
     Some((value.to_string(), content_span))
 }
 
+fn mask_scss_lexical(source: &str, mask_strings: bool) -> String {
+    let mut bytes = source.as_bytes().to_vec();
+    let mut index = 0;
+    let mut quote = None;
+
+    let blank = |bytes: &mut [u8], start: usize, end: usize| {
+        for byte in &mut bytes[start..end] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+    };
+
+    while index < bytes.len() {
+        if let Some(delimiter) = quote {
+            if bytes[index] == b'\\' {
+                if mask_strings {
+                    let end = (index + 2).min(bytes.len());
+                    blank(&mut bytes, index, end);
+                }
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            let closed = bytes[index] == delimiter;
+            if mask_strings {
+                blank(&mut bytes, index, index + 1);
+            }
+            index += 1;
+            if closed {
+                quote = None;
+            }
+            continue;
+        }
+
+        if bytes[index] == b'\'' || bytes[index] == b'"' {
+            quote = Some(bytes[index]);
+            if mask_strings {
+                blank(&mut bytes, index, index + 1);
+            }
+            index += 1;
+            continue;
+        }
+
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            let start = index;
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            blank(&mut bytes, start, index);
+            continue;
+        }
+
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            let start = index;
+            index += 2;
+            while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                index += 1;
+            }
+            blank(&mut bytes, start, index);
+            continue;
+        }
+
+        index += 1;
+    }
+
+    String::from_utf8(bytes).unwrap_or_else(|_| source.to_string())
+}
+
+fn mask_scss_comments_for_parser(source: &str) -> String {
+    mask_scss_lexical(source, false)
+}
+
 fn contains_unsupported_scss_control_flow(source: &str) -> bool {
     const UNSUPPORTED_AT_RULES: &[&str] = &[
         "if", "else", "for", "each", "while", "mixin", "include", "content", "function", "return",
         "extend", "at-root",
     ];
 
-    let bytes = source.as_bytes();
+    let masked = mask_scss_lexical(source, true);
+    let bytes = masked.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] != b'@' {
@@ -1444,7 +1933,7 @@ fn contains_unsupported_scss_control_flow(source: &str) -> bool {
             end += 1;
         }
         if end > start {
-            let name = &source[start..end];
+            let name = &masked[start..end];
             if UNSUPPORTED_AT_RULES
                 .iter()
                 .any(|candidate| name.eq_ignore_ascii_case(candidate))
@@ -1457,7 +1946,6 @@ fn contains_unsupported_scss_control_flow(source: &str) -> bool {
 
     false
 }
-
 fn span_to_range(text: &str, span: Span) -> Range {
     Range::new(
         offset_to_position(text, span.start as usize),
@@ -1903,6 +2391,34 @@ mod tests {
         .unwrap();
         assert!(computed_manager
             .get_variables("--vite-before-computed")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn static_structure_resolution_rejects_direct_member_mutation() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                const CONFIG = {
+                    fonts: [{ cssVariable: "--font-before-member-write" }],
+                };
+                CONFIG.fonts = [{ cssVariable: "--font-after-member-write" }];
+                export default CONFIG;
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--font-before-member-write")
+            .await
+            .is_empty());
+        assert!(manager
+            .get_variables("--font-after-member-write")
             .await
             .is_empty());
     }
@@ -2503,6 +3019,92 @@ mod tests {
 
         assert!(manager.get_variables("--font-nested").await.is_empty());
         assert!(manager.get_variables("--font-conditional").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn commonjs_exports_reject_later_conditional_overrides() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.cjs");
+
+        parse_config_document(
+            r#"
+                module.exports = {
+                    fonts: [{ cssVariable: "--font-before-conditional-override" }],
+                };
+                if (process.env.USE_OTHER_CONFIG) {
+                    module.exports = { fonts: [] };
+                }
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--font-before-conditional-override")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn define_config_helpers_mutated_inside_functions_are_rejected() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.cjs");
+
+        parse_config_document(
+            r#"
+                const vite = require("vite");
+                (() => { vite.defineConfig = (value) => value; })();
+                module.exports = vite.defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-mutated-in-iife: red; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager
+            .get_variables("--vite-mutated-in-iife")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn function_parameter_shadowing_does_not_mutate_define_config_helpers() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.cjs");
+
+        parse_config_document(
+            r#"
+                const vite = require("vite");
+                ((vite) => { vite.defineConfig = (value) => value; })({});
+                (function (vite) { vite.defineConfig = (value) => value; })({});
+                module.exports = vite.defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-outer-helper: red; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--vite-outer-helper").await.len(), 1);
     }
 
     #[tokio::test]

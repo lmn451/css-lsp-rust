@@ -1385,6 +1385,46 @@ async fn test_initialize_indexes_astro_font_css_variables() {
 }
 
 #[tokio::test]
+async fn test_ignore_glob_configuration_changes_remove_generated_variables() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-ignore-config-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("astro.config.mjs"),
+        r#"export default { fonts: [{ cssVariable: "--font-ignore-change" }] };"#,
+    )
+    .unwrap();
+
+    let root_uri = Uri::from_file_path(&root).unwrap();
+    let mut service = setup_scan_service(None, None).await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+    assert_eq!(
+        workspace_symbols(&mut service, "--font-ignore-change")
+            .await
+            .len(),
+        1
+    );
+
+    send_notification(
+        &mut service,
+        "workspace/didChangeConfiguration",
+        DidChangeConfigurationParams {
+            settings: serde_json::json!({
+                "cssVariableLsp": {"ignoreGlobs": ["astro.config.mjs"]}
+            }),
+        },
+    )
+    .await;
+
+    assert!(workspace_symbols(&mut service, "--font-ignore-change")
+        .await
+        .is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn test_initialize_indexes_vite_preprocessor_additional_data() {
     let root = std::env::temp_dir().join(format!(
         "css-variable-lsp-vite-additional-data-{}",

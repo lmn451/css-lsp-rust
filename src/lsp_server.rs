@@ -22,7 +22,7 @@ use ls_types::{
     WorkspaceServerCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use regex::Regex;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::color::{generate_color_presentations, parse_color, NormalizedColorKey};
@@ -35,6 +35,7 @@ use crate::completion_context::{
 };
 use crate::config_analysis::{
     config_variable_source, is_supported_config_path, parse_config_document,
+    parse_config_document_at_version,
 };
 use crate::document_kind::{
     apply_config_patch, build_lookup_extension_map, resolve_document_kind, ClientConfigPatch,
@@ -243,6 +244,8 @@ pub struct CssVariableLsp {
     client: Client,
     manager: Arc<CssVariableManager>,
     document_map: Arc<RwLock<HashMap<Uri, String>>>,
+    /// Serializes version acceptance with text-map mutation and parsing.
+    document_lifecycle_lock: Arc<Mutex<()>>,
     runtime_config: RuntimeConfig,
     workspace_folder_paths: Arc<RwLock<Vec<PathBuf>>>,
     root_folder_path: Arc<RwLock<Option<PathBuf>>>,
@@ -270,6 +273,7 @@ impl CssVariableLsp {
             manager: Arc::new(CssVariableManager::new(config)),
             document_map: Arc::new(RwLock::new(HashMap::new())),
             runtime_config,
+            document_lifecycle_lock: Arc::new(Mutex::new(())),
             workspace_folder_paths: Arc::new(RwLock::new(Vec::new())),
             root_folder_path: Arc::new(RwLock::new(None)),
             root_folder_uri: Arc::new(RwLock::new(None)),
@@ -318,10 +322,22 @@ impl CssVariableLsp {
         })
     }
 
-    async fn parse_document_text(&self, uri: &Uri, text: &str, language_id: Option<&str>) {
+    async fn parse_document_text(
+        &self,
+        uri: &Uri,
+        text: &str,
+        language_id: Option<&str>,
+        version: Option<i64>,
+    ) {
         let path = uri.path().as_str();
         if is_supported_config_path(std::path::Path::new(path)) {
-            if let Err(e) = parse_config_document(text, uri, &self.manager).await {
+            let result = match version {
+                Some(version) => {
+                    parse_config_document_at_version(text, uri, &self.manager, version).await
+                }
+                None => parse_config_document(text, uri, &self.manager).await,
+            };
+            if let Err(e) = result {
                 self.client
                     .log_message(
                         MessageType::ERROR,
@@ -471,7 +487,7 @@ impl CssVariableLsp {
 
         match tokio::fs::read_to_string(&path).await {
             Ok(text) => {
-                self.parse_document_text(uri, &text, None).await;
+                self.parse_document_text(uri, &text, None, None).await;
             }
             Err(_) => {
                 self.manager.remove_document(uri).await;
@@ -682,20 +698,12 @@ impl LanguageServer for CssVariableLsp {
         // We accept either:
         // - a flat object matching Config fields
         // - or a namespaced object { "cssVariableLsp": { ... } }
-        let patch =
-            serde_json::from_value::<ClientConfigPatch>(params.settings.clone()).or_else(|_| {
-                params
-                    .settings
-                    .get("cssVariableLsp")
-                    .cloned()
-                    .ok_or_else(|| {
-                        serde_json::Error::io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "missing cssVariableLsp key",
-                        ))
-                    })
-                    .and_then(serde_json::from_value::<ClientConfigPatch>)
-            });
+        let settings = params
+            .settings
+            .get("cssVariableLsp")
+            .cloned()
+            .unwrap_or(params.settings);
+        let patch = serde_json::from_value::<ClientConfigPatch>(settings);
 
         let patch = match patch {
             Ok(patch) => patch,
@@ -712,6 +720,7 @@ impl LanguageServer for CssVariableLsp {
 
         let mut config = self.live_config.read().await.clone();
         let prev_lookup_files = config.lookup_files.clone();
+        let prev_ignore_globs = config.ignore_globs.clone();
         config = apply_config_patch(config, patch);
 
         {
@@ -726,8 +735,11 @@ impl LanguageServer for CssVariableLsp {
             let new_map = build_lookup_extension_map(&config.lookup_files);
             let mut stored = self.lookup_extension_map.write().await;
             *stored = new_map;
+        }
 
-            // Patterns changed => rescan workspace folders.
+        // Discovery or ignore patterns changed => rescan workspace folders. The scan wrapper
+        // restores open-document text after reading disk so unsaved buffers stay authoritative.
+        if config.lookup_files != prev_lookup_files || config.ignore_globs != prev_ignore_globs {
             if let Some(folders) = self.workspace_folders_for_scan().await {
                 self.scan_workspace_folders(folders).await;
             }
@@ -738,9 +750,15 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let version = i64::from(params.text_document.version);
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         let language_id = params.text_document.language_id;
+
+        if !self.manager.accept_document_version(&uri, version).await {
+            return;
+        }
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
         let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
@@ -753,7 +771,7 @@ impl LanguageServer for CssVariableLsp {
             let mut langs = self.document_language_map.write().await;
             langs.insert(uri.clone(), language_id.clone());
         }
-        self.parse_document_text(&uri, &text, Some(&language_id))
+        self.parse_document_text(&uri, &text, Some(&language_id), Some(version))
             .await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
@@ -773,8 +791,15 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let version = i64::from(params.text_document.version);
         let uri = params.text_document.uri;
         let changes = params.content_changes;
+
+        // Reject stale/duplicate notifications before touching the in-memory text.
+        if !self.manager.accept_document_version(&uri, version).await {
+            return;
+        }
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
         let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
@@ -787,7 +812,7 @@ impl LanguageServer for CssVariableLsp {
             let langs = self.document_language_map.read().await;
             langs.get(&uri).cloned()
         };
-        self.parse_document_text(&uri, &updated_text, language_id.as_deref())
+        self.parse_document_text(&uri, &updated_text, language_id.as_deref(), Some(version))
             .await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
@@ -823,6 +848,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
         let uri = params.text_document.uri;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
@@ -853,6 +879,7 @@ impl LanguageServer for CssVariableLsp {
             }
         }
 
+        self.manager.clear_document_version(&uri).await;
         self.update_document_from_disk(&uri).await;
 
         let new_names = self.manager.get_document_variable_names(&uri).await;
@@ -1699,6 +1726,7 @@ impl CssVariableLsp {
 
         // A disk scan can encounter an open document. Restore its in-memory text so
         // unsaved editor contents remain authoritative after any initial or repeat scan.
+        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
         let open_documents = {
             let documents = self.document_map.read().await;
             let languages = self.document_language_map.read().await;
@@ -1708,7 +1736,12 @@ impl CssVariableLsp {
                 .collect::<Vec<_>>()
         };
         for (uri, text, language_id) in open_documents {
-            self.parse_document_text(&uri, &text, language_id.as_deref())
+            let version = if is_supported_config_path(std::path::Path::new(uri.path().as_str())) {
+                self.manager.get_document_version(&uri).await
+            } else {
+                None
+            };
+            self.parse_document_text(&uri, &text, language_id.as_deref(), version)
                 .await;
         }
 

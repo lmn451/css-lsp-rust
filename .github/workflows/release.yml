@@ -89,12 +89,16 @@ jobs:
       - name: Create archive (Unix)
         if: runner.os != 'Windows'
         run: |
-          tar czf ${{ matrix.asset_name }}.tar.gz -C target/${{ matrix.target }}/release ${{ matrix.artifact_name }}
+          mkdir -p release-archive
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} LICENSE THIRD_PARTY_NOTICES.md release-archive/
+          tar czf ${{ matrix.asset_name }}.tar.gz -C release-archive ${{ matrix.artifact_name }} LICENSE THIRD_PARTY_NOTICES.md
 
       - name: Create archive (Windows)
         if: runner.os == 'Windows'
         run: |
-          Compress-Archive -Path target\${{ matrix.target }}\release\${{ matrix.artifact_name }} -DestinationPath ${{ matrix.asset_name }}.zip
+          New-Item -ItemType Directory -Force -Path release-archive
+          Copy-Item target\${{ matrix.target }}\release\${{ matrix.artifact_name }}, LICENSE, THIRD_PARTY_NOTICES.md -Destination release-archive
+          Compress-Archive -Path release-archive\* -DestinationPath ${{ matrix.asset_name }}.zip
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
