@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use ls_types::{Range, Uri};
 use oxc_allocator::Allocator;
@@ -43,11 +45,28 @@ const VITE_PREPROCESSOR: &str = "scss";
 const MAX_STATIC_STRING_DEPTH: usize = 16;
 const MAX_STATIC_STRING_VISITS: usize = 64;
 const MAX_STATIC_STRUCTURE_VISITS: usize = 1024;
+static CONFIG_PARSE_COUNT: AtomicU64 = AtomicU64::new(0);
+static OVERSIZED_CONFIG_SKIP_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 enum ConfigKind {
     Astro,
     Vite,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ConfigVariableSource {
+    AstroFont,
+    ViteScssAdditionalData,
+}
+
+impl ConfigVariableSource {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::AstroFont => "Astro font configuration",
+            Self::ViteScssAdditionalData => "Vite SCSS additionalData",
+        }
+    }
 }
 
 fn config_kind(path: &Path) -> Option<ConfigKind> {
@@ -73,21 +92,33 @@ pub fn is_supported_config_path(path: &Path) -> bool {
     config_kind(path).is_some()
 }
 
+pub(crate) fn config_variable_source(uri: &Uri) -> Option<ConfigVariableSource> {
+    match config_kind(Path::new(uri.path().as_str()))? {
+        ConfigKind::Astro => Some(ConfigVariableSource::AstroFont),
+        ConfigKind::Vite => Some(ConfigVariableSource::ViteScssAdditionalData),
+    }
+}
+
 /// Parse a recognized framework configuration file without executing it.
 pub async fn parse_config_document(
     text: &str,
     uri: &Uri,
     manager: &CssVariableManager,
 ) -> Result<(), String> {
-    if text.len() > MAX_CONFIG_BYTES {
-        return Err(format!(
-            "Configuration file exceeds the {} byte analysis limit",
-            MAX_CONFIG_BYTES
-        ));
-    }
-
     let path = Path::new(uri.path().as_str());
     if config_kind(path).is_none() {
+        return Ok(());
+    }
+
+    if text.len() > MAX_CONFIG_BYTES {
+        let skip_count = OVERSIZED_CONFIG_SKIP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::debug!(
+            uri = ?uri,
+            bytes = text.len(),
+            limit = MAX_CONFIG_BYTES,
+            skip_count,
+            "configuration analysis retained the last valid state for an oversized source"
+        );
         return Ok(());
     }
 
@@ -99,7 +130,7 @@ pub async fn parse_config_document(
         .into_iter()
         .map(|extracted| CssVariable {
             name: extracted.name,
-            value: "Astro generated font".to_string(),
+            value: String::new(),
             uri: uri.clone(),
             range: span_to_range(text, extracted.declaration_span),
             name_range: Some(span_to_range(text, extracted.name_span)),
@@ -141,6 +172,8 @@ fn extract_config_variables(
     path: &Path,
     uri: &Uri,
 ) -> Result<Option<ConfigExtraction>, String> {
+    let started = Instant::now();
+    let parse_count = CONFIG_PARSE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let kind = config_kind(path)
         .ok_or_else(|| format!("Unsupported configuration source: {}", path.display()))?;
     let source_type = SourceType::from_path(path)
@@ -148,13 +181,24 @@ fn extract_config_variables(
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, text, source_type).parse();
 
-    if !parsed.diagnostics.is_empty() {
+    let diagnostic_count = parsed.diagnostics.len();
+    if diagnostic_count > 0 && (parsed.panicked || parsed.program.body.is_empty()) {
         tracing::debug!(
             uri = ?uri,
-            errors = parsed.diagnostics.len(),
-            "configuration analysis skipped a malformed source"
+            errors = diagnostic_count,
+            parse_count,
+            elapsed_micros = started.elapsed().as_micros(),
+            "configuration analysis retained the last valid state after a catastrophic parse"
         );
         return Ok(None);
+    }
+    if diagnostic_count > 0 {
+        tracing::debug!(
+            uri = ?uri,
+            errors = diagnostic_count,
+            parse_count,
+            "configuration analysis is using Oxc's recoverable AST"
+        );
     }
 
     let module_source = match kind {
@@ -216,6 +260,15 @@ fn extract_config_variables(
             }
         }
     };
+    tracing::debug!(
+        uri = ?uri,
+        parse_count,
+        diagnostic_count,
+        variables = extracted.variables.len(),
+        css_snippets = extracted.css_snippets.len(),
+        elapsed_micros = started.elapsed().as_micros(),
+        "configuration analysis completed"
+    );
     Ok(Some(extracted))
 }
 
@@ -2351,6 +2404,57 @@ mod tests {
         .await
         .unwrap();
         assert!(manager.get_variables("--font-phantom").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_source_replaces_stale_state_with_safe_recovered_prefix() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"export default { fonts: [{ cssVariable: "--font-stale" }] };"#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        parse_config_document(
+            r#"
+                export default {
+                    fonts: [{ cssVariable: "--font-safe-prefix" }],
+                }; /*
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--font-stale").await.is_empty());
+        assert_eq!(manager.get_variables("--font-safe-prefix").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_config_preserves_the_last_valid_analysis() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"export default { fonts: [{ cssVariable: "--font-before-oversize" }] };"#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        let oversized = " ".repeat(MAX_CONFIG_BYTES + 1);
+        parse_config_document(&oversized, &uri, &manager)
+            .await
+            .expect("oversized recognized configs should be skipped without an LSP error");
+
+        assert_eq!(
+            manager.get_variables("--font-before-oversize").await.len(),
+            1
+        );
     }
 
     #[tokio::test]
