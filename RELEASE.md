@@ -17,6 +17,21 @@ The **Zed extension** (`zed-css-variables`) expects assets with these **exact na
 
 > [!CAUTION] > **Do not change these names.** The extension's `asset_name_for_platform()` function expects this exact convention. Any changes require a coordinated update in both repos.
 
+## Archive Content Validation
+
+Run `./scripts/validate-asset-names.sh` to check the workflow and build-script
+asset-name contracts and their notice-source references. When expected
+archives are present under `dist/`, the validator also opens each `.tar.gz` or
+`.zip` and requires the matching binary, `LICENSE`, and
+`THIRD_PARTY_NOTICES.md` entries. An unreadable or malformed archive, or an
+archive missing any required entry, fails validation.
+
+On a clean checkout with no generated archives, the source checks still run
+and the validator explicitly reports that archive content checks were skipped
+until assets are built. Build local assets first when those contents need to
+be checked.
+
+
 ## Supported Targets
 
 | Target Triple               | Runner         | Notes                             |
@@ -38,9 +53,10 @@ The **Zed extension** (`zed-css-variables`) expects assets with these **exact na
 - [ ] Update version in `Cargo.toml`
 - [ ] Update `CHANGELOG.md` with release notes
 - [ ] Ensure all tests pass: `cargo test`
-- [ ] Verify release archives include `LICENSE` and `THIRD_PARTY_NOTICES.md`:
-      `./scripts/validate-asset-names.sh`
 - [ ] (Optional) Build locally: `./scripts/build-release-assets.sh`
+- [ ] Run source-contract and archive-content validation:
+      `./scripts/validate-asset-names.sh`
+      (with no expected archives under `dist/`, archive checks report skipped)
 - [ ] (Optional) Smoke test local assets: `./scripts/smoke-test-release.sh --local`
 
 ### Create Release

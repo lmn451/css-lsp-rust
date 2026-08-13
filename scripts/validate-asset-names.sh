@@ -23,6 +23,18 @@ declare -a EXPECTED_ASSETS=(
   "css-variable-lsp-windows-aarch64.exe"
   "css-variable-lsp-windows-x86_64.exe"
 )
+# Expected generated archive names and the binary each archive must contain.
+# Unix targets use tar.gz; Windows targets retain the .exe in the asset name
+# and use zip archives.
+declare -a EXPECTED_ARCHIVES=(
+  "css-variable-lsp-macos-aarch64.tar.gz|css-variable-lsp"
+  "css-variable-lsp-macos-x86_64.tar.gz|css-variable-lsp"
+  "css-variable-lsp-linux-aarch64.tar.gz|css-variable-lsp"
+  "css-variable-lsp-linux-x86_64.tar.gz|css-variable-lsp"
+  "css-variable-lsp-windows-aarch64.exe.zip|css-variable-lsp.exe"
+  "css-variable-lsp-windows-x86_64.exe.zip|css-variable-lsp.exe"
+)
+
 
 echo -e "${YELLOW}Validating asset names in release workflow...${NC}"
 
@@ -98,6 +110,102 @@ if [[ -f "${BUILD_SCRIPT}" ]]; then
     exit 1
   fi
   echo -e "${GREEN}✓ Windows PowerShell fallback converts archive paths${NC}"
+fi
+
+validate_archive_contents() {
+  local archive_path="$1"
+  local archive_name="$2"
+  local expected_binary="$3"
+  local archive_entries
+  local entry
+  local missing_entries=()
+
+  if [[ ! -r "${archive_path}" ]]; then
+    echo -e "${RED}Cannot inspect ${archive_name}: archive is not readable${NC}"
+    return 1
+  fi
+
+  case "${archive_name}" in
+    *.tar.gz)
+      if ! archive_entries="$(tar -tzf "${archive_path}" 2>&1)"; then
+        echo -e "${RED}Cannot inspect ${archive_name}: unreadable or malformed tar.gz archive${NC}"
+        [[ -z "${archive_entries}" ]] || printf '  tar: %s\n' "${archive_entries}"
+        return 1
+      fi
+      ;;
+    *.zip)
+      if ! command -v unzip >/dev/null 2>&1; then
+        echo -e "${RED}Cannot inspect ${archive_name}: unzip is required to validate zip archives${NC}"
+        return 1
+      fi
+      if ! archive_entries="$(unzip -Z1 "${archive_path}" 2>&1)"; then
+        echo -e "${RED}Cannot inspect ${archive_name}: unreadable or malformed zip archive${NC}"
+        [[ -z "${archive_entries}" ]] || printf '  unzip: %s\n' "${archive_entries}"
+        return 1
+      fi
+      ;;
+    *)
+      echo -e "${RED}Cannot inspect ${archive_name}: unsupported archive format${NC}"
+      return 1
+      ;;
+  esac
+
+  for entry in "${expected_binary}" "LICENSE" "THIRD_PARTY_NOTICES.md"; do
+    if ! grep -Fqx -- "${entry}" <<<"${archive_entries}"; then
+      missing_entries+=("${entry}")
+    fi
+  done
+
+  if [[ ${#missing_entries[@]} -gt 0 ]]; then
+    echo -e "${RED}Archive ${archive_name} is missing required entries:${NC}"
+    for entry in "${missing_entries[@]}"; do
+      echo -e "  ${RED}✗ ${entry}${NC}"
+    done
+    return 1
+  fi
+
+  echo -e "${GREEN}✓ ${archive_name} contains ${expected_binary}, LICENSE, and THIRD_PARTY_NOTICES.md${NC}"
+}
+
+DIST_DIR="${ROOT_DIR}/dist"
+archive_checks=0
+archive_validation_failed=0
+
+if [[ -d "${DIST_DIR}" ]]; then
+  shopt -s nullglob
+  present_archives=("${DIST_DIR}"/*.tar.gz "${DIST_DIR}"/*.zip)
+  shopt -u nullglob
+
+  for archive_path in "${present_archives[@]}"; do
+    archive_name="${archive_path##*/}"
+    expected_binary=""
+    for archive_spec in "${EXPECTED_ARCHIVES[@]}"; do
+      IFS='|' read -r expected_archive expected_archive_binary <<<"${archive_spec}"
+      if [[ "${archive_name}" == "${expected_archive}" ]]; then
+        expected_binary="${expected_archive_binary}"
+        break
+      fi
+    done
+
+    archive_checks=$((archive_checks + 1))
+    if [[ -z "${expected_binary}" ]]; then
+      echo -e "${RED}Unexpected archive under dist/: ${archive_name}${NC}"
+      archive_validation_failed=1
+      continue
+    fi
+
+    if ! validate_archive_contents "${archive_path}" "${archive_name}" "${expected_binary}"; then
+      archive_validation_failed=1
+    fi
+  done
+fi
+
+if [[ ${archive_checks} -eq 0 ]]; then
+  echo -e "${YELLOW}No generated archives found under dist/; archive content checks were skipped until assets are built.${NC}"
+elif [[ ${archive_validation_failed} -ne 0 ]]; then
+  exit 1
+else
+  echo -e "${GREEN}✓ Generated archive content validation passed${NC}"
 fi
 
 echo -e "\n${GREEN}Asset naming validation passed!${NC}"
