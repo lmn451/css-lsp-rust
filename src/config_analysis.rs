@@ -2407,6 +2407,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typescript_wrappers_and_unrelated_decorators_preserve_extraction() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"
+                @sealed
+                class ConfigMarker {}
+
+                const CONFIG = {
+                    fonts: [{ cssVariable: "--font-satisfies" }],
+                } satisfies Record<string, unknown>;
+
+                export default CONFIG;
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--font-satisfies").await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn malformed_source_replaces_stale_state_with_safe_recovered_prefix() {
         let manager = CssVariableManager::new(Config::default());
         let uri = test_uri("astro.config.ts");
