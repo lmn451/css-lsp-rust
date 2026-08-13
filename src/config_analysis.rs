@@ -13,6 +13,7 @@ use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 
 use crate::manager::CssVariableManager;
+use crate::parsers::css::{parse_css_snippet, CssParseContext};
 use crate::types::{offset_to_position, CssVariable};
 
 pub(crate) const MAX_CONFIG_BYTES: usize = 1024 * 1024;
@@ -24,6 +25,32 @@ const ASTRO_CONFIG_NAMES: &[&str] = &[
     "astro.config.mts",
     "astro.config.cts",
 ];
+const VITE_CONFIG_NAMES: &[&str] = &[
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.cjs",
+    "vite.config.ts",
+    "vite.config.mts",
+    "vite.config.cts",
+];
+const VITE_PREPROCESSOR: &str = "scss";
+
+#[derive(Clone, Copy)]
+enum ConfigKind {
+    Astro,
+    Vite,
+}
+
+fn config_kind(path: &Path) -> Option<ConfigKind> {
+    let name = path.file_name()?.to_str()?;
+    if ASTRO_CONFIG_NAMES.contains(&name) {
+        Some(ConfigKind::Astro)
+    } else if VITE_CONFIG_NAMES.contains(&name) {
+        Some(ConfigKind::Vite)
+    } else {
+        None
+    }
+}
 
 fn supports_commonjs(path: &Path) -> bool {
     matches!(
@@ -34,10 +61,7 @@ fn supports_commonjs(path: &Path) -> bool {
 
 /// Return whether a path is a supported framework configuration source.
 pub fn is_supported_config_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    ASTRO_CONFIG_NAMES.contains(&name)
+    config_kind(path).is_some()
 }
 
 /// Parse a recognized framework configuration file without executing it.
@@ -54,14 +78,15 @@ pub async fn parse_config_document(
     }
 
     let path = Path::new(uri.path().as_str());
-    if !is_supported_config_path(path) {
+    if config_kind(path).is_none() {
         return Ok(());
     }
 
-    let Some(extracted_variables) = extract_config_variables(text, path, uri)? else {
+    let Some(extracted) = extract_config_variables(text, path, uri)? else {
         return Ok(());
     };
-    let variables = extracted_variables
+    let mut variables: Vec<_> = extracted
+        .variables
         .into_iter()
         .map(|extracted| CssVariable {
             name: extracted.name,
@@ -76,14 +101,39 @@ pub async fn parse_config_document(
             source_position: extracted.declaration_span.start as usize,
         })
         .collect();
-    manager.replace_document_variables(uri, variables).await
+
+    let mut usages = Vec::new();
+    if !extracted.css_snippets.is_empty() {
+        let snippet_manager = CssVariableManager::new(manager.get_config().await);
+        for snippet in extracted.css_snippets {
+            parse_css_snippet(CssParseContext {
+                css_text: &snippet.text,
+                full_text: text,
+                uri,
+                manager: &snippet_manager,
+                base_offset: snippet.content_span.start as usize,
+                inline: false,
+                usage_context_override: None,
+                dom_node: None,
+            })
+            .await?;
+        }
+        variables.extend(snippet_manager.get_document_variables(uri).await);
+        usages.extend(snippet_manager.get_document_usages(uri).await);
+    }
+
+    manager
+        .replace_document_analysis(uri, variables, usages)
+        .await
 }
 
 fn extract_config_variables(
     text: &str,
     path: &Path,
     uri: &Uri,
-) -> Result<Option<Vec<ExtractedVariable>>, String> {
+) -> Result<Option<ConfigExtraction>, String> {
+    let kind = config_kind(path)
+        .ok_or_else(|| format!("Unsupported configuration source: {}", path.display()))?;
     let source_type = SourceType::from_path(path)
         .map_err(|_| format!("Unsupported configuration source type: {}", path.display()))?;
     let allocator = Allocator::default();
@@ -98,22 +148,60 @@ fn extract_config_variables(
         return Ok(None);
     }
 
-    let mut imports = AstroImportCollector::default();
+    let module_source = match kind {
+        ConfigKind::Astro => "astro/config",
+        ConfigKind::Vite => "vite",
+    };
+    let mut imports = DefineConfigImportCollector::new(module_source);
     imports.visit_program(&parsed.program);
     if supports_commonjs(path) {
         imports.collect_commonjs_program(&parsed.program);
     }
 
-    let mut extractor = AstroFontExtractor {
-        source: text,
-        define_config_bindings: imports.define_config_bindings,
-        variables: Vec::new(),
+    let has_esm_default = parsed
+        .program
+        .body
+        .iter()
+        .any(|statement| matches!(statement, Statement::ExportDefaultDeclaration(_)));
+    let extracted = match kind {
+        ConfigKind::Astro => {
+            let mut extractor = AstroFontExtractor {
+                source: text,
+                define_config_bindings: imports.define_config_bindings,
+                variables: Vec::new(),
+            };
+            extractor.visit_program(&parsed.program);
+            if supports_commonjs(path) && !has_esm_default {
+                extractor.extract_commonjs_program(&parsed.program);
+            }
+            ConfigExtraction {
+                variables: extractor.variables,
+                css_snippets: Vec::new(),
+            }
+        }
+        ConfigKind::Vite => {
+            let mut extractor = ViteAdditionalDataExtractor {
+                source: text,
+                define_config_bindings: imports.define_config_bindings,
+                css_snippets: Vec::new(),
+            };
+            extractor.visit_program(&parsed.program);
+            if supports_commonjs(path) && !has_esm_default {
+                extractor.extract_commonjs_program(&parsed.program);
+            }
+            ConfigExtraction {
+                variables: Vec::new(),
+                css_snippets: extractor.css_snippets,
+            }
+        }
     };
-    extractor.visit_program(&parsed.program);
-    if supports_commonjs(path) {
-        extractor.extract_commonjs_program(&parsed.program);
-    }
-    Ok(Some(extractor.variables))
+    Ok(Some(extracted))
+}
+
+#[derive(Default)]
+struct ConfigExtraction {
+    variables: Vec<ExtractedVariable>,
+    css_snippets: Vec<ExtractedCssSnippet>,
 }
 
 struct ExtractedVariable {
@@ -122,12 +210,24 @@ struct ExtractedVariable {
     name_span: Span,
 }
 
-#[derive(Default)]
-struct AstroImportCollector {
+struct ExtractedCssSnippet {
+    text: String,
+    content_span: Span,
+}
+
+struct DefineConfigImportCollector<'s> {
+    module_source: &'s str,
     define_config_bindings: HashSet<String>,
 }
 
-impl AstroImportCollector {
+impl<'s> DefineConfigImportCollector<'s> {
+    fn new(module_source: &'s str) -> Self {
+        Self {
+            module_source,
+            define_config_bindings: HashSet::new(),
+        }
+    }
+
     fn collect_commonjs_program(&mut self, program: &Program<'_>) {
         for statement in &program.body {
             let Statement::VariableDeclaration(declaration) = statement else {
@@ -148,7 +248,8 @@ impl AstroImportCollector {
         if !call.is_require_call()
             || !matches!(
                 call.arguments.first(),
-                Some(Argument::StringLiteral(source)) if source.value.as_str() == "astro/config"
+                Some(Argument::StringLiteral(source))
+                    if source.value.as_str() == self.module_source
             )
         {
             return;
@@ -169,9 +270,11 @@ impl AstroImportCollector {
     }
 }
 
-impl<'a> Visit<'a> for AstroImportCollector {
+impl<'a> Visit<'a> for DefineConfigImportCollector<'_> {
     fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
-        if declaration.source.value.as_str() != "astro/config" {
+        if declaration.import_kind.is_type()
+            || declaration.source.value.as_str() != self.module_source
+        {
             return;
         }
         let Some(specifiers) = declaration.specifiers.as_ref() else {
@@ -182,7 +285,9 @@ impl<'a> Visit<'a> for AstroImportCollector {
             let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
                 continue;
             };
-            if specifier.imported.name().as_str() == "defineConfig" {
+            if specifier.import_kind.is_value()
+                && specifier.imported.name().as_str() == "defineConfig"
+            {
                 self.define_config_bindings
                     .insert(specifier.local.name.as_str().to_string());
             }
@@ -197,46 +302,19 @@ struct AstroFontExtractor<'s> {
 }
 
 impl AstroFontExtractor<'_> {
-    fn is_define_config_call(&self, expression: &Expression<'_>) -> bool {
-        matches!(
-            expression,
-            Expression::Identifier(identifier)
-                if self.define_config_bindings.contains(identifier.name.as_str())
-        )
-    }
-
     fn extract_default_expression<'a>(&mut self, expression: &'a Expression<'a>) {
-        let expression = unwrap_expression(expression);
-        let config = match expression {
-            Expression::ObjectExpression(object) => Some(object.as_ref()),
-            Expression::CallExpression(call) if self.is_define_config_call(&call.callee) => call
-                .arguments
-                .first()
-                .and_then(|argument| argument.as_expression())
-                .map(unwrap_expression)
-                .and_then(as_object_expression),
-            _ => None,
-        };
-
-        if let Some(config) = config {
+        if let Some(config) =
+            config_object_from_expression(expression, &self.define_config_bindings)
+        {
             self.extract_astro_config(config);
         }
     }
 
     fn extract_commonjs_program<'a>(&mut self, program: &'a Program<'a>) {
-        for statement in program.body.iter().rev() {
-            let Statement::ExpressionStatement(statement) = statement else {
-                continue;
-            };
-            let Expression::AssignmentExpression(assignment) =
-                unwrap_expression(&statement.expression)
-            else {
-                continue;
-            };
-            if is_module_exports_assignment(assignment, self.source) {
-                self.extract_default_expression(&assignment.right);
-                break;
-            }
+        if let Some(config) =
+            commonjs_config_object(program, self.source, &self.define_config_bindings)
+        {
+            self.extract_astro_config(config);
         }
     }
 
@@ -290,6 +368,111 @@ impl<'a> Visit<'a> for AstroFontExtractor<'_> {
             self.extract_default_expression(expression);
         }
     }
+}
+
+struct ViteAdditionalDataExtractor<'s> {
+    source: &'s str,
+    define_config_bindings: HashSet<String>,
+    css_snippets: Vec<ExtractedCssSnippet>,
+}
+
+impl ViteAdditionalDataExtractor<'_> {
+    fn extract_default_expression<'a>(&mut self, expression: &'a Expression<'a>) {
+        if let Some(config) =
+            config_object_from_expression(expression, &self.define_config_bindings)
+        {
+            self.extract_vite_config(config);
+        }
+    }
+
+    fn extract_commonjs_program<'a>(&mut self, program: &'a Program<'a>) {
+        if let Some(config) =
+            commonjs_config_object(program, self.source, &self.define_config_bindings)
+        {
+            self.extract_vite_config(config);
+        }
+    }
+
+    fn extract_vite_config<'a>(&mut self, config: &'a ObjectExpression<'a>) {
+        let Some(preprocessor_options) = object_property(config, "css")
+            .map(unwrap_expression)
+            .and_then(as_object_expression)
+            .and_then(|css| object_property(css, "preprocessorOptions"))
+            .map(unwrap_expression)
+            .and_then(as_object_expression)
+        else {
+            return;
+        };
+
+        let Some(options) = object_property(preprocessor_options, VITE_PREPROCESSOR)
+            .map(unwrap_expression)
+            .and_then(as_object_expression)
+        else {
+            return;
+        };
+        let Some(additional_data) = object_property(options, "additionalData") else {
+            return;
+        };
+        let Some((text, content_span)) = static_string_value(additional_data, self.source) else {
+            return;
+        };
+        if contains_unsupported_scss_control_flow(&text) {
+            return;
+        }
+        self.css_snippets
+            .push(ExtractedCssSnippet { text, content_span });
+    }
+}
+
+impl<'a> Visit<'a> for ViteAdditionalDataExtractor<'_> {
+    fn visit_export_default_declaration(&mut self, declaration: &ExportDefaultDeclaration<'a>) {
+        if let Some(expression) = declaration.declaration.as_expression() {
+            self.extract_default_expression(expression);
+        }
+    }
+}
+
+fn config_object_from_expression<'a>(
+    expression: &'a Expression<'a>,
+    define_config_bindings: &HashSet<String>,
+) -> Option<&'a ObjectExpression<'a>> {
+    match unwrap_expression(expression) {
+        Expression::ObjectExpression(object) => Some(object.as_ref()),
+        Expression::CallExpression(call)
+            if matches!(
+                &call.callee,
+                Expression::Identifier(identifier)
+                    if define_config_bindings.contains(identifier.name.as_str())
+            ) =>
+        {
+            call.arguments
+                .first()
+                .and_then(|argument| argument.as_expression())
+                .map(unwrap_expression)
+                .and_then(as_object_expression)
+        }
+        _ => None,
+    }
+}
+
+fn commonjs_config_object<'a>(
+    program: &'a Program<'a>,
+    source: &str,
+    define_config_bindings: &HashSet<String>,
+) -> Option<&'a ObjectExpression<'a>> {
+    for statement in program.body.iter().rev() {
+        let Statement::ExpressionStatement(statement) = statement else {
+            continue;
+        };
+        let Expression::AssignmentExpression(assignment) = unwrap_expression(&statement.expression)
+        else {
+            continue;
+        };
+        if is_module_exports_assignment(assignment, source) {
+            return config_object_from_expression(&assignment.right, define_config_bindings);
+        }
+    }
+    None
 }
 
 fn is_module_exports_assignment(assignment: &AssignmentExpression<'_>, source: &str) -> bool {
@@ -389,20 +572,46 @@ fn static_string_value(expression: &Expression<'_>, source: &str) -> Option<(Str
         Expression::TemplateLiteral(template)
             if template.expressions.is_empty() && template.quasis.len() == 1 =>
         {
-            let quasi = &template.quasis[0];
-            let value = quasi
-                .value
-                .cooked
-                .as_ref()
-                .unwrap_or(&quasi.value.raw)
-                .as_str()
-                .to_string();
             let span = literal_content_span(template.span);
             let raw = source.get(span.start as usize..span.end as usize)?;
-            (raw == value).then_some((value, span))
+            (!raw.contains('\\')).then_some((raw.to_string(), span))
         }
         _ => None,
     }
+}
+
+fn contains_unsupported_scss_control_flow(source: &str) -> bool {
+    const UNSUPPORTED_AT_RULES: &[&str] = &[
+        "if", "else", "for", "each", "while", "mixin", "include", "content", "function", "return",
+        "extend", "at-root",
+    ];
+
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'@' {
+            index += 1;
+            continue;
+        }
+
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-') {
+            end += 1;
+        }
+        if end > start {
+            let name = &source[start..end];
+            if UNSUPPORTED_AT_RULES
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            {
+                return true;
+            }
+        }
+        index = end.max(index + 1);
+    }
+
+    false
 }
 
 fn span_to_range(text: &str, span: Span) -> Range {
@@ -422,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_supported_astro_config_names() {
+    fn recognizes_supported_astro_config_names() {
         assert!(is_supported_config_path(Path::new("astro.config.mjs")));
         assert!(is_supported_config_path(Path::new(
             "/workspace/astro.config.ts"
@@ -430,6 +639,245 @@ mod tests {
         assert!(!is_supported_config_path(Path::new("astro.config.json")));
         assert!(!is_supported_config_path(Path::new("astro.config.foo.ts")));
         assert!(!is_supported_config_path(Path::new("src/config.ts")));
+    }
+
+    #[test]
+    fn recognizes_supported_vite_config_names() {
+        for name in [
+            "vite.config.js",
+            "vite.config.mjs",
+            "vite.config.cjs",
+            "vite.config.ts",
+            "vite.config.mts",
+            "vite.config.cts",
+        ] {
+            assert!(is_supported_config_path(Path::new(name)), "{name}");
+        }
+        assert!(!is_supported_config_path(Path::new("vite.config.json")));
+        assert!(!is_supported_config_path(Path::new("src/vite.ts")));
+    }
+
+    #[tokio::test]
+    async fn extracts_vite_preprocessor_additional_data_variables() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        let text = r#"
+            import { defineConfig as configure } from "vite";
+
+            export default configure({
+                css: {
+                    preprocessorOptions: {
+                        scss: {
+                            additionalData: `:root {
+                                --vite-brand: #123456;
+                                --vite-derived: var(--base-color);
+                            }`,
+                        },
+                        less: {
+                            additionalData: ".theme { --vite-less: rebeccapurple; }",
+                        },
+                    },
+                },
+            });
+        "#;
+
+        parse_config_document(text, &uri, &manager).await.unwrap();
+
+        let brand = manager.get_variables("--vite-brand").await;
+        assert_eq!(brand.len(), 1);
+        assert_eq!(brand[0].value, "#123456");
+        assert_eq!(brand[0].selector, ":root");
+        let brand_range = brand[0].name_range.expect("name range");
+        let brand_start = text.find("--vite-brand").unwrap();
+        assert_eq!(
+            brand_range,
+            Range::new(
+                offset_to_position(text, brand_start),
+                offset_to_position(text, brand_start + "--vite-brand".len()),
+            )
+        );
+
+        assert_eq!(manager.get_variables("--vite-derived").await.len(), 1);
+        assert_eq!(manager.get_usages("--base-color").await.len(), 1);
+        assert!(manager.get_variables("--vite-less").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_accepts_commonjs_and_rejects_dynamic_or_unrelated_values() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.cjs");
+        parse_config_document(
+            r#"
+                const { defineConfig: configure } = require("vite");
+                module.exports = configure({
+                    define: {
+                        __BRAND_VARIABLE__: JSON.stringify("--vite-define"),
+                    },
+                    additionalData: ":root { --wrong-level: red; }",
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: () => ":root { --dynamic: red; }",
+                            },
+                            scss: {
+                                additionalData: ":root { --vite-cjs: blue; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--vite-cjs").await.len(), 1);
+        assert!(manager.get_variables("--vite-define").await.is_empty());
+        assert!(manager.get_variables("--wrong-level").await.is_empty());
+        assert!(manager.get_variables("--dynamic").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_requires_a_proven_define_config_binding() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                const defineConfig = (value) => value;
+                export default defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --unproven-vite: red; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--unproven-vite").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_rejects_type_only_define_config_imports() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                import type { defineConfig } from "vite";
+                export default defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --type-only-vite: red; }",
+                            },
+                        },
+                    },
+                });
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--type-only-vite").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_prefers_esm_over_commonjs_in_ambiguous_sources() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                import { defineConfig } from "vite";
+                export default defineConfig({
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-esm: red; }",
+                            },
+                        },
+                    },
+                });
+                module.exports = {
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: ":root { --vite-cjs-shadow: blue; }",
+                            },
+                        },
+                    },
+                };
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--vite-esm").await.len(), 1);
+        assert!(manager.get_variables("--vite-cjs-shadow").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_preserves_crlf_template_ranges() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        let text = "import { defineConfig } from \"vite\";\r\nexport default defineConfig({ css: { preprocessorOptions: { scss: { additionalData: `:root {\r\n  --vite-crlf: red;\r\n}` } } } });\r\n";
+
+        parse_config_document(text, &uri, &manager).await.unwrap();
+
+        let variable = manager.get_variables("--vite-crlf").await;
+        assert_eq!(variable.len(), 1);
+        let start = text.find("--vite-crlf").unwrap();
+        assert_eq!(
+            variable[0].name_range,
+            Some(Range::new(
+                offset_to_position(text, start),
+                offset_to_position(text, start + "--vite-crlf".len()),
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn vite_extraction_rejects_scss_control_flow_conservatively() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("vite.config.ts");
+        parse_config_document(
+            r#"
+                export default {
+                    css: {
+                        preprocessorOptions: {
+                            scss: {
+                                additionalData: `
+                                    @if false {
+                                        :root { --vite-phantom: red; }
+                                    }
+                                    :root { --vite-after-conditional: blue; }
+                                `,
+                            },
+                        },
+                    },
+                };
+            "#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+
+        assert!(manager.get_variables("--vite-phantom").await.is_empty());
+        assert!(manager
+            .get_variables("--vite-after-conditional")
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
