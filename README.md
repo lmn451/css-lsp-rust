@@ -64,9 +64,10 @@ dramatically easier to embed in editor extensions and CI sandboxes.
   `emotion`, etc.), correctly handling template expressions.
 - **Astro font variables** are statically indexed from
   `astro.config.{js,mjs,cjs,ts,mts,cts}` using Oxc. Configuration code is
-  parsed but never executed. `fonts[].cssVariable` accepts direct literals,
-  bounded immutable `const` aliases, static object and array aliases, and known
-  spreads. Proven ESM and CommonJS `defineConfig` helpers are supported.
+  parsed but never executed. `fonts[].cssVariable` and legacy
+  `experimental.fonts[].cssVariable` accept direct literals, bounded immutable
+  `const` aliases, static object and array aliases, and known spreads. Proven
+  ESM and CommonJS `defineConfig` helpers are supported.
 - **Vite injected CSS variables** are indexed from static
   `css.preprocessorOptions.scss.additionalData` strings in
   `vite.config.{js,mjs,cjs,ts,mts,cts}`. Direct literals, immutable aliases,
