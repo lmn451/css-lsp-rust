@@ -1468,6 +1468,82 @@ async fn test_initialize_indexes_vite_preprocessor_additional_data() {
 }
 
 #[tokio::test]
+async fn test_initialize_indexes_static_config_structures_and_vite_function_configs() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-static-config-structures-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let astro_text = r#"
+        import { defineConfig } from "astro/config";
+        const FONT = { cssVariable: "--font-from-structure" };
+        const FONTS = [FONT];
+        const BASE = { fonts: FONTS };
+        const CONFIG = { ...BASE };
+        export default defineConfig(CONFIG);
+    "#;
+    std::fs::write(root.join("astro.config.ts"), astro_text).unwrap();
+
+    let vite_text = r#"
+        import { defineConfig } from "vite";
+        const SOURCE = `:root { --vite-from-function: #123456; }`;
+        const SCSS = { additionalData: SOURCE };
+        const PREPROCESSORS = { scss: SCSS };
+        const CSS = { preprocessorOptions: PREPROCESSORS };
+        const BASE = { css: CSS };
+        export default defineConfig(() => ({ ...BASE }));
+    "#;
+    std::fs::write(root.join("vite.config.ts"), vite_text).unwrap();
+
+    let root_uri = Uri::from_file_path(&root).unwrap();
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+
+    let astro_symbols = workspace_symbols(&mut service, "--font-from-structure").await;
+    assert_eq!(astro_symbols.len(), 1);
+    let astro_start = astro_text.find("cssVariable").unwrap();
+    let astro_end =
+        astro_text.find("\"--font-from-structure\"").unwrap() + "\"--font-from-structure\"".len();
+    assert_eq!(
+        astro_symbols[0].location.range,
+        Range::new(
+            css_variable_lsp::types::offset_to_position(astro_text, astro_start),
+            css_variable_lsp::types::offset_to_position(astro_text, astro_end),
+        )
+    );
+
+    let vite_symbols = workspace_symbols(&mut service, "--vite-from-function").await;
+    assert_eq!(vite_symbols.len(), 1);
+    let vite_start = vite_text.find("--vite-from-function").unwrap();
+    let vite_end = vite_start
+        + vite_text[vite_start..]
+            .find(';')
+            .expect("Vite declaration should end with a semicolon");
+    assert_eq!(
+        vite_symbols[0].location.range,
+        Range::new(
+            css_variable_lsp::types::offset_to_position(vite_text, vite_start),
+            css_variable_lsp::types::offset_to_position(vite_text, vite_end),
+        )
+    );
+
+    let consumer_uri = Uri::from_file_path(root.join("consumer.css")).unwrap();
+    open_document(
+        &mut service,
+        consumer_uri.clone(),
+        "css",
+        ".card { color: var(--vite-from-function); font-family: var(--font-from-structure); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn test_initialize_scans_legacy_root_path() {
     let (root, _root_uri) = workspace_fixture("root-path", "--legacy-color");
     let mut service = setup_scan_service(None, None).await;
