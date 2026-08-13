@@ -2,6 +2,7 @@
 name = "css-variable-lsp"
 version = "0.3.5"
 edition = "2021"
+rust-version = "1.95"
 authors = ["lmn451"]
 description = "A fast, Rust-based Language Server Protocol implementation for CSS Variables"
 license = "GPL-3.0"
@@ -59,6 +60,11 @@ url = "2.5"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 regex = "1.10"
+oxc_allocator = "=0.144.0"
+oxc_ast = "=0.144.0"
+oxc_ast_visit = "=0.144.0"
+oxc_parser = "=0.144.0"
+oxc_span = "=0.144.0"
 
 [dev-dependencies]
 futures = "0.3"

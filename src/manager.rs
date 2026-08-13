@@ -51,23 +51,76 @@ impl CssVariableManager {
 
     /// Add a variable definition
     pub async fn add_variable(&self, variable: CssVariable) -> Result<(), String> {
+        self.add_variables(vec![variable]).await
+    }
+
+    /// Add variable definitions atomically under one variables lock.
+    pub async fn add_variables(&self, variables: Vec<CssVariable>) -> Result<(), String> {
+        if variables.is_empty() {
+            return Ok(());
+        }
+
         let max_documents = self.config.read().await.max_documents;
         let mut tracked = self.tracked_documents.write().await;
 
-        // Check document limit
-        if max_documents > 0 && !tracked.contains(&variable.uri) && tracked.len() >= max_documents {
+        let new_documents: HashSet<_> = variables
+            .iter()
+            .map(|variable| variable.uri.clone())
+            .filter(|uri| !tracked.contains(uri))
+            .collect();
+        if max_documents > 0 && tracked.len() + new_documents.len() > max_documents {
             return Err(format!(
-                "Maximum document limit ({}) reached. Cannot add more documents.",
-                max_documents
+                "Maximum document limit ({max_documents}) reached. Cannot add more documents."
             ));
         }
-        tracked.insert(variable.uri.clone());
+        tracked.extend(new_documents);
 
         // Keep the tracked-documents -> variables lock order consistent with removals.
         let mut vars = self.variables.write().await;
-        vars.entry(variable.name.clone())
-            .or_insert_with(Vec::new)
-            .push(variable);
+        for variable in variables {
+            vars.entry(variable.name.clone())
+                .or_default()
+                .push(variable);
+        }
+
+        Ok(())
+    }
+
+    /// Atomically replace all variable definitions owned by one document.
+    pub async fn replace_document_variables(
+        &self,
+        uri: &Uri,
+        variables: Vec<CssVariable>,
+    ) -> Result<(), String> {
+        if variables.iter().any(|variable| &variable.uri != uri) {
+            return Err("Replacement variables must belong to the target document".to_string());
+        }
+
+        let max_documents = self.config.read().await.max_documents;
+        let mut tracked = self.tracked_documents.write().await;
+        let introduces_document = !variables.is_empty() && !tracked.contains(uri);
+        if max_documents > 0 && introduces_document && tracked.len() >= max_documents {
+            return Err(format!(
+                "Maximum document limit ({max_documents}) reached. Cannot add more documents."
+            ));
+        }
+
+        let mut vars = self.variables.write().await;
+        for definitions in vars.values_mut() {
+            definitions.retain(|variable| &variable.uri != uri);
+        }
+        vars.retain(|_, definitions| !definitions.is_empty());
+
+        if variables.is_empty() {
+            tracked.remove(uri);
+        } else {
+            tracked.insert(uri.clone());
+            for variable in variables {
+                vars.entry(variable.name.clone())
+                    .or_default()
+                    .push(variable);
+            }
+        }
 
         Ok(())
     }
@@ -481,6 +534,59 @@ mod tests {
 
         let variables = manager.get_variables("--color").await;
         assert_eq!(variables.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn replace_document_variables_is_atomic_and_respects_limits() {
+        let manager = CssVariableManager::new(Config {
+            max_documents: 1,
+            ..Config::default()
+        });
+        let first_uri = Uri::from_str("file:///first.css").unwrap();
+        let second_uri = Uri::from_str("file:///second.css").unwrap();
+
+        manager
+            .replace_document_variables(
+                &first_uri,
+                vec![create_test_variable(
+                    "--old",
+                    "red",
+                    ":root",
+                    first_uri.as_str(),
+                )],
+            )
+            .await
+            .unwrap();
+
+        let error = manager
+            .replace_document_variables(
+                &second_uri,
+                vec![create_test_variable(
+                    "--blocked",
+                    "blue",
+                    ":root",
+                    second_uri.as_str(),
+                )],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("Maximum document limit"));
+        assert_eq!(manager.get_variables("--old").await.len(), 1);
+        assert!(manager.get_variables("--blocked").await.is_empty());
+
+        manager
+            .replace_document_variables(
+                &first_uri,
+                vec![
+                    create_test_variable("--new-a", "red", ":root", first_uri.as_str()),
+                    create_test_variable("--new-b", "blue", ":root", first_uri.as_str()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(manager.get_variables("--old").await.is_empty());
+        assert_eq!(manager.get_variables("--new-a").await.len(), 1);
+        assert_eq!(manager.get_variables("--new-b").await.len(), 1);
     }
 
     #[tokio::test]

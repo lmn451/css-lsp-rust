@@ -226,6 +226,55 @@ async fn test_diagnostics_revalidate_on_definition_add() {
 }
 
 #[tokio::test]
+async fn test_astro_font_config_changes_revalidate_consumers() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let consumer_uri = Uri::from_str("file:///index.css").unwrap();
+    let config_uri = Uri::from_str("file:///astro.config.ts").unwrap();
+    let consumer = ".card { font-family: var(--font-roboto); }";
+
+    open_document(&mut service, consumer_uri.clone(), "css", consumer, 1).await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+
+    open_document(
+        &mut service,
+        config_uri.clone(),
+        "typescript",
+        r#"import { defineConfig } from "astro/config";
+export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] });"#,
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
+
+    change_document(
+        &mut service,
+        config_uri.clone(),
+        2,
+        r#"export default defineConfig({ fonts: [{ cssVariable: "--font-roboto" }] )"#,
+    )
+    .await;
+    assert_eq!(
+        workspace_symbols(&mut service, "--font-roboto").await.len(),
+        1,
+        "a malformed in-progress edit must not discard the last valid config state"
+    );
+
+    change_document(
+        &mut service,
+        config_uri,
+        3,
+        r#"export default defineConfig({ fonts: [{ cssVariable: dynamicName }] });"#,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+}
+
+#[tokio::test]
 async fn test_diagnostics_accept_variables_after_nested_media_inside_root() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
@@ -1096,6 +1145,111 @@ async fn test_initialize_scans_root_uri_without_workspace_folders() {
     )
     .await;
     assert!(labels.contains(&"--root-color".to_string()));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn test_initialize_indexes_astro_font_css_variables() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-astro-fonts-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("astro.config.mjs"),
+        r#"
+            import { defineConfig, fontProviders } from "astro/config";
+
+            export default defineConfig({
+                fonts: [
+                    {
+                        provider: fontProviders.google(),
+                        name: "Roboto",
+                        cssVariable: "--font-roboto",
+                    },
+                    {
+                        provider: fontProviders.google(),
+                        name: "Inter",
+                        cssVariable: "--font-inter",
+                    },
+                ],
+            });
+        "#,
+    )
+    .unwrap();
+
+    let root_uri = Uri::from_file_path(&root).unwrap();
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+
+    let roboto = workspace_symbols(&mut service, "--font-roboto").await;
+    assert_eq!(roboto.len(), 1);
+    assert_eq!(
+        roboto[0].location.uri,
+        Uri::from_file_path(root.join("astro.config.mjs")).unwrap()
+    );
+    assert_eq!(
+        workspace_symbols(&mut service, "--font-inter").await.len(),
+        1
+    );
+
+    let diagnostic_uri = Uri::from_file_path(root.join("diagnostic.css")).unwrap();
+    open_document(
+        &mut service,
+        diagnostic_uri.clone(),
+        "css",
+        ".card { font-family: var(--font-roboto); }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &diagnostic_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
+
+    let consumer_uri = Uri::from_file_path(root.join("consumer.css")).unwrap();
+    let consumer_text = ".card { font-family: var(--";
+    open_document(&mut service, consumer_uri.clone(), "css", consumer_text, 1).await;
+    let labels = completion_labels(
+        &mut service,
+        consumer_uri,
+        ls_types::Position::new(0, consumer_text.len() as u32),
+    )
+    .await;
+    assert!(labels.contains(&"--font-roboto".to_string()));
+    assert!(labels.contains(&"--font-inter".to_string()));
+
+    let definition_consumer_uri = Uri::from_file_path(root.join("definition.css")).unwrap();
+    let definition_consumer_text = ".card { font-family: var(--font-roboto); }";
+    open_document(
+        &mut service,
+        definition_consumer_uri.clone(),
+        "css",
+        definition_consumer_text,
+        1,
+    )
+    .await;
+    let definition_request = Request::build("textDocument/definition")
+        .id(44)
+        .params(serde_json::json!({
+            "textDocument": { "uri": definition_consumer_uri },
+            "position": position_of(definition_consumer_text, "--font-roboto")
+        }))
+        .finish();
+    let definition = send_request_for_result(&mut service, definition_request)
+        .await
+        .expect("definition should resolve");
+    let definition: ls_types::GotoDefinitionResponse = serde_json::from_value(definition).unwrap();
+    let ls_types::GotoDefinitionResponse::Scalar(location) = definition else {
+        panic!("expected a scalar definition location");
+    };
+    assert_eq!(
+        location.uri,
+        Uri::from_file_path(root.join("astro.config.mjs")).unwrap()
+    );
+    assert_eq!(
+        location.range, roboto[0].location.range,
+        "workspace symbols and goto definition must expose the same declaration range"
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }

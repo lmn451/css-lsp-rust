@@ -5,6 +5,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod color;
 pub mod completion_context;
+pub mod config_analysis;
 pub mod document_kind;
 pub mod dom_tree;
 pub mod flags;

@@ -62,6 +62,10 @@ editor extensions and CI sandboxes.
 - **JS / TS / JSX / TSX** support via CSS-in-JS extraction from
   string literals and tagged template literals (`styled-components`,
   `emotion`, etc.), correctly handling template expressions.
+- **Astro font variables** are statically indexed from
+  `astro.config.{js,mjs,cjs,ts,mts,cts}` using Oxc. Configuration code is
+  parsed but never executed, and only literal `fonts[].cssVariable` values are
+  registered.
 - **Cascade sorting** and **CSS specificity calculation** including
   `:is()`, `:not()`, `:where()`, attribute selectors, pseudo-classes, and
   pseudo-elements.
@@ -100,12 +104,16 @@ editor extensions and CI sandboxes.
 
 All of these are configurable via the `--lookup-files` flag.
 
+Recognized `astro.config.*` files are discovered independently of
+`--lookup-files` so users do not need to scan every JavaScript file eagerly.
+
 ---
 
 ## Quick start
 
 ```bash
 # Install from crates.io
+# Building from source requires Rust 1.95 or newer.
 cargo install css-variable-lsp
 
 # …or download a release binary for your platform
