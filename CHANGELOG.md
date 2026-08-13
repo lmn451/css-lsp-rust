@@ -5,6 +5,20 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6] - 2026-08-13
+
+### Added
+- Astro config analysis now indexes configured font `cssVariable` values, and Vite config analysis indexes SCSS `additionalData` values.
+
+### Changed
+- Configuration extraction remains conservative static analysis of supported literal and bounded structures; ordinary CSS, HTML, JavaScript, and TypeScript support is unchanged.
+
+### Fixed
+- Hardened configuration-analysis lifecycle, generated-document provenance, and stale-state cleanup across workspace changes and parser recovery.
+
+### Maintenance
+- Added release packaging notices and validation metadata for distributable assets.
+
 ## [0.3.4] - 2026-08-12
 
 ### Fixed
