@@ -897,6 +897,10 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        // Serialize disk-backed updates with didOpen/didChange/didClose. This
+        // keeps a rapid save or rename sequence from racing an editor update
+        // and leaving the indexes at different document versions.
+        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
         for change in params.changes {
             match change.typ {
                 FileChangeType::DELETED => {
@@ -915,6 +919,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_create_files(&self, params: CreateFilesParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
         for file in params.files {
             let uri = match Uri::from_str(&file.uri) {
                 Ok(uri) => uri,
@@ -928,6 +933,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_rename_files(&self, params: RenameFilesParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
         for file in params.files {
             let old_uri = match Uri::from_str(&file.old_uri) {
                 Ok(uri) => uri,
@@ -950,6 +956,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_delete_files(&self, params: DeleteFilesParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
         for file in params.files {
             let uri = match Uri::from_str(&file.uri) {
                 Ok(uri) => uri,

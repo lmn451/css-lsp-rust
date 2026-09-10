@@ -95,6 +95,91 @@ async fn test_css_variable_full_workflow() {
     assert_eq!(header_after_removal.len(), 1);
 }
 
+/// Case-sensitive file systems may contain both `Foo.css` and `foo.css`.
+/// Every per-document index must retain those documents independently.
+#[tokio::test]
+async fn test_case_sensitive_uri_documents_remain_isolated() {
+    let manager = CssVariableManager::new(Config::default());
+    let upper_css = Uri::from_str("file:///tmp/Foo.css").unwrap();
+    let lower_css = Uri::from_str("file:///tmp/foo.css").unwrap();
+
+    parse_css_document(
+        ":root { --upper: #f00; color: var(--upper); }",
+        &upper_css,
+        &manager,
+    )
+    .await
+    .unwrap();
+    parse_css_document(
+        ":root { --lower: #00f; color: var(--lower); }",
+        &lower_css,
+        &manager,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(manager.get_document_variables(&upper_css).await.len(), 1);
+    assert_eq!(manager.get_document_variables(&lower_css).await.len(), 1);
+    assert_eq!(manager.get_document_usages(&upper_css).await.len(), 1);
+    assert_eq!(manager.get_document_usages(&lower_css).await.len(), 1);
+    assert_eq!(
+        manager.get_document_literal_colors(&upper_css).await.len(),
+        1
+    );
+    assert_eq!(
+        manager.get_document_literal_colors(&lower_css).await.len(),
+        1
+    );
+
+    manager.remove_document(&upper_css).await;
+    assert!(manager.get_variables("--upper").await.is_empty());
+    assert!(manager.get_document_usages(&upper_css).await.is_empty());
+    assert!(manager
+        .get_document_literal_colors(&upper_css)
+        .await
+        .is_empty());
+    assert_eq!(manager.get_variables("--lower").await.len(), 1);
+    assert_eq!(manager.get_document_usages(&lower_css).await.len(), 1);
+    assert_eq!(
+        manager.get_document_literal_colors(&lower_css).await.len(),
+        1
+    );
+
+    // Re-parsing the evicted URI must not affect the lower-case document.
+    parse_css_document(":root { --upper-new: #0f0; }", &upper_css, &manager)
+        .await
+        .unwrap();
+    assert!(manager.get_variables("--upper").await.is_empty());
+    assert_eq!(manager.get_variables("--upper-new").await.len(), 1);
+    assert_eq!(manager.get_variables("--lower").await.len(), 1);
+
+    let upper_html = Uri::from_str("file:///tmp/Foo.html").unwrap();
+    let lower_html = Uri::from_str("file:///tmp/foo.html").unwrap();
+    parse_html_document(
+        r#"<div style="--upper-dom: red; color: var(--upper-dom)"></div>"#,
+        &upper_html,
+        &manager,
+    )
+    .await
+    .unwrap();
+    parse_html_document(
+        r#"<div style="--lower-dom: blue; color: var(--lower-dom)"></div>"#,
+        &lower_html,
+        &manager,
+    )
+    .await
+    .unwrap();
+
+    assert!(manager.get_dom_tree(&upper_html).await.is_some());
+    assert!(manager.get_dom_tree(&lower_html).await.is_some());
+    manager.remove_document(&upper_html).await;
+    assert!(manager.get_dom_tree(&upper_html).await.is_none());
+    assert!(manager.get_document_usages(&upper_html).await.is_empty());
+    assert!(manager.get_dom_tree(&lower_html).await.is_some());
+    assert_eq!(manager.get_variables("--lower-dom").await.len(), 1);
+    assert_eq!(manager.get_usages("--lower-dom").await.len(), 1);
+}
+
 /// Integration test: CSS specificity and cascade ordering
 #[tokio::test]
 async fn test_cascade_ordering() {

@@ -340,4 +340,50 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn discovers_all_astro_config_extensions_and_skips_ignored_dirs() {
+        let root = std::env::temp_dir().join(format!(
+            "css-variable-lsp-astro-config-extensions-{}",
+            std::process::id()
+        ));
+        let ignored = root.join("node_modules");
+        std::fs::create_dir_all(&ignored).unwrap();
+
+        let extensions = ["js", "mjs", "cjs", "ts", "mts", "cts"];
+        for (index, extension) in extensions.iter().enumerate() {
+            std::fs::write(
+                root.join(format!("astro.config.{extension}")),
+                format!(
+                    "export default {{ fonts: [{{ cssVariable: \"--font-extension-{index}\" }}] }};"
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            ignored.join("astro.config.ts"),
+            "export default { fonts: [{ cssVariable: \"--font-ignored\" }] };",
+        )
+        .unwrap();
+
+        let manager = CssVariableManager::new(Config::default());
+        let root_uri = Uri::from_file_path(&root).unwrap();
+        scan_workspace(vec![root_uri], &manager, |_, _| {})
+            .await
+            .unwrap();
+
+        for index in 0..extensions.len() {
+            assert_eq!(
+                manager
+                    .get_variables(&format!("--font-extension-{index}"))
+                    .await
+                    .len(),
+                1,
+                "astro.config extension should be discovered"
+            );
+        }
+        assert!(manager.get_variables("--font-ignored").await.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
