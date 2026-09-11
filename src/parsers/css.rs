@@ -60,6 +60,19 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
+/// Return whether a byte can continue a CSS identifier at a token boundary.
+///
+/// The scanner below works on bytes for speed, so it cannot decode arbitrary
+/// CSS identifier code points here. Treating non-ASCII bytes and escape starts
+/// as continuations keeps it from indexing a valid-looking prefix of a
+/// malformed hash or function token such as `#abcé` or `#abc\\g`.
+#[inline]
+fn is_css_identifier_continuation(bytes: &[u8], index: usize) -> bool {
+    bytes
+        .get(index)
+        .is_some_and(|&b| is_ident_char(b) || b >= 0x80 || b == b'\\')
+}
+
 /// Returns true if this at-rule blocks custom property extraction.
 /// Case-insensitive matching.
 fn should_block_variables(at_rule: &str) -> bool {
@@ -846,12 +859,14 @@ fn extract_literal_colors_from_value(
         }
 
         if bytes[i] == b'#' {
+            let starts_at_token_boundary = i == 0 || !is_css_identifier_continuation(bytes, i - 1);
             let mut end = i + 1;
             while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
                 end += 1;
             }
+            let ends_at_token_boundary = !is_css_identifier_continuation(bytes, end);
             let len = end - i;
-            if matches!(len, 3..=9) {
+            if starts_at_token_boundary && ends_at_token_boundary && matches!(len, 3..=9) {
                 if let Some(color) = normalized_color_key(&value[i..end]) {
                     colors.push((i, end, color));
                 }
@@ -876,8 +891,12 @@ fn extract_literal_colors_from_value(
                 let ident = value[start..end].to_ascii_lowercase();
                 if matches!(ident.as_str(), "rgb" | "rgba" | "hsl" | "hsla") {
                     if let Some(func_end) = find_balanced_call_end(value, j) {
-                        if let Some(color) = normalized_color_key(&value[start..func_end]) {
-                            colors.push((start, func_end, color));
+                        let ends_at_token_boundary =
+                            !is_css_identifier_continuation(bytes, func_end);
+                        if ends_at_token_boundary {
+                            if let Some(color) = normalized_color_key(&value[start..func_end]) {
+                                colors.push((start, func_end, color));
+                            }
                         }
                         i = func_end;
                         continue;
@@ -1196,6 +1215,42 @@ mod tests {
         assert!(!literals.contains("#fff"));
         assert!(!literals.contains("red"));
         assert!(literals.contains("blue"));
+    }
+
+    #[tokio::test]
+    async fn parse_css_document_ignores_malformed_color_token_prefixes() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///malformed-colors.css").unwrap();
+        let text = r#"
+            .card {
+                color: #112233g;
+                background: #abcé;
+                border: #abc\\g;
+                background: rgb(255, 0, 0)trailing;
+                border-color: #aabbcc;
+                outline-color: rgb(0, 0, 0);
+            }
+        "#;
+
+        parse_css_document(text, &uri, &manager).await.unwrap();
+
+        let occurrences = manager.get_document_literal_colors(&uri).await;
+        let literals: HashSet<String> = occurrences
+            .into_iter()
+            .map(|occurrence| occurrence.text)
+            .collect();
+        assert!(!literals.contains("#112233g"));
+        assert!(
+            !literals.contains("#112233"),
+            "invalid hex prefixes must not be indexed"
+        );
+        assert!(
+            !literals.contains("#abc"),
+            "non-ASCII and escaped hash continuations must not be indexed"
+        );
+        assert!(literals.contains("#aabbcc"));
+        assert!(!literals.contains("rgb(255, 0, 0)"));
+        assert!(literals.contains("rgb(0, 0, 0)"));
     }
 }
 

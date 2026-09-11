@@ -36,13 +36,80 @@ pub fn color_from_key(key: NormalizedColorKey) -> Color {
     }
 }
 
+fn strip_ascii_suffix_case_insensitive<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
+    let start = value.len().checked_sub(suffix.len())?;
+    value
+        .get(start..)
+        .filter(|tail| tail.eq_ignore_ascii_case(suffix))
+        .map(|_| &value[..start])
+}
+
+fn contains_nonfinite_numeric_token(value: &str) -> bool {
+    for raw_token in value.split(|character: char| {
+        character == '('
+            || character == ')'
+            || character == ','
+            || character == '/'
+            || character.is_ascii_whitespace()
+    }) {
+        let token = raw_token.trim();
+        if token.is_empty() {
+            continue;
+        }
+
+        // CSS color channels can carry a percentage or angle unit. Strip the
+        // unit before checking the number so values such as `infdeg` and
+        // `NaN%` cannot be accepted after the dependency clamps them.
+        let numeric = strip_ascii_suffix_case_insensitive(token, "%")
+            .or_else(|| strip_ascii_suffix_case_insensitive(token, "deg"))
+            .or_else(|| strip_ascii_suffix_case_insensitive(token, "grad"))
+            .or_else(|| strip_ascii_suffix_case_insensitive(token, "rad"))
+            .or_else(|| strip_ascii_suffix_case_insensitive(token, "turn"))
+            .unwrap_or(token);
+
+        let unsigned = numeric
+            .strip_prefix('+')
+            .or_else(|| numeric.strip_prefix('-'))
+            .unwrap_or(numeric);
+        if unsigned.eq_ignore_ascii_case("nan")
+            || unsigned.eq_ignore_ascii_case("inf")
+            || unsigned.eq_ignore_ascii_case("infinity")
+        {
+            return true;
+        }
+
+        if let Ok(number) = numeric.parse::<f64>() {
+            if !number.is_finite() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn parse_csscolorparser(value: &str) -> Option<Color> {
+    if contains_nonfinite_numeric_token(value) {
+        return None;
+    }
+
     let parsed: CssColor = value.parse().ok()?;
+
+    // csscolorparser accepts any value that `f64::parse` accepts for numeric
+    // channels, including `NaN` and infinities. It also leaves HWB alpha
+    // outside the nominal range untouched. Never let either case cross the
+    // LSP boundary: JSON has no representation for non-finite numbers and
+    // LSP Color channels are defined in the inclusive [0, 1] range.
+    let channels = [parsed.r, parsed.g, parsed.b, parsed.a];
+    if channels.iter().any(|channel| !channel.is_finite()) {
+        return None;
+    }
+
     Some(Color {
-        red: parsed.r as f32,
-        green: parsed.g as f32,
-        blue: parsed.b as f32,
-        alpha: parsed.a as f32,
+        red: parsed.r.clamp(0.0, 1.0) as f32,
+        green: parsed.g.clamp(0.0, 1.0) as f32,
+        blue: parsed.b.clamp(0.0, 1.0) as f32,
+        alpha: parsed.a.clamp(0.0, 1.0) as f32,
     })
 }
 
@@ -351,6 +418,32 @@ mod tests {
         // Transparent keyword
         let color = parse_color("transparent").expect("transparent");
         assert!(approx_eq(color.alpha, 0.0));
+    }
+
+    #[test]
+    fn parse_color_rejects_nonfinite_channels_and_clamps_alpha() {
+        for value in [
+            "#gggggg",
+            "rgb(NaN, 0, 0)",
+            "rgb(inf, 0, 0)",
+            "rgb(infinity, 0, 0)",
+            "rgb(1e999, 0, 0)",
+            "hsl(0, NaN%, 50%)",
+            "hsl(infdeg, 50%, 50%)",
+            "hsl(infDEG, 50%, 50%)",
+            "hsl(1e999TURN, 50%, 50%)",
+            "hwb(0 0% 0% / NaN)",
+            "hwb(0 0% 0% / InFiNiTy)",
+        ] {
+            assert!(parse_color(value).is_none(), "{value}");
+        }
+
+        let color = parse_color("hwb(0 0% 0% / 2)").expect("finite HWB color");
+        assert!(approx_eq(color.alpha, 1.0));
+        for channel in [color.red, color.green, color.blue, color.alpha] {
+            assert!(channel.is_finite());
+            assert!((0.0..=1.0).contains(&channel));
+        }
     }
 
     #[test]

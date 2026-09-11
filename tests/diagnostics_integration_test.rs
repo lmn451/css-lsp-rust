@@ -234,6 +234,62 @@ async fn test_diagnostics_revalidate_on_definition_add() {
 }
 
 #[tokio::test]
+async fn test_document_color_omits_malformed_color_tokens() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Uri::from_str("file:///colors.css").unwrap();
+    let text = r#":root {
+        --invalid-hex: #gggggg;
+        --partial-rgb: rgb(12, 3,);
+        --invalid-inf: rgb(inf, 0, 0);
+        --invalid-hsl: hsl(infdeg, 50%, 50%);
+        --invalid-hex-trailing: #112233g;
+        --invalid-rgb-trailing: rgb(1, 2, 3)trailing;
+        --valid: #123456;
+    }
+    .card { color: var(--invalid-hex); background: var(--valid); }"#;
+    open_document(&mut service, uri.clone(), "css", text, 1).await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+
+    let request = Request::build("textDocument/documentColor")
+        .id(44)
+        .params(serde_json::json!({ "textDocument": { "uri": uri } }))
+        .finish();
+    let result = send_request_for_result(&mut service, request)
+        .await
+        .expect("documentColor should return a result");
+    let colors: Vec<ls_types::ColorInformation> = serde_json::from_value(result).unwrap();
+
+    assert_eq!(
+        colors.len(),
+        2,
+        "only the valid definition and usage are colors"
+    );
+    assert!(colors.iter().all(|info| {
+        [
+            info.color.red,
+            info.color.green,
+            info.color.blue,
+            info.color.alpha,
+        ]
+        .into_iter()
+        .all(|channel| channel.is_finite() && (0.0..=1.0).contains(&channel))
+    }));
+    let valid_line = text[..text.find("#123456").unwrap()]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count() as u32;
+    let usage_line = text[..text.find("var(--valid)").unwrap()]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count() as u32;
+    assert!(colors.iter().all(|info| {
+        info.range.start.line == valid_line || info.range.start.line == usage_line
+    }));
+}
+
+#[tokio::test]
 async fn test_astro_font_config_changes_revalidate_consumers() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
@@ -316,6 +372,269 @@ export default defineConfig({ fonts: [{ cssVariable: FONT_NAME }] }); /*"#,
     assert!(workspace_symbols(&mut service, "--font-inter")
         .await
         .is_empty());
+}
+
+#[tokio::test]
+async fn test_diagnostics_revalidate_when_definition_is_removed_or_renamed() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let consumer_uri = Uri::from_str("file:///consumer.scss").unwrap();
+    let definitions_uri = Uri::from_str("file:///definitions.scss").unwrap();
+    let consumer = ".card { color: var(--accent); }";
+
+    open_document(&mut service, consumer_uri.clone(), "scss", consumer, 1).await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+
+    open_document(
+        &mut service,
+        definitions_uri.clone(),
+        "scss",
+        ":root { --accent: red; }",
+        1,
+    )
+    .await;
+    assert!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .is_empty()
+    );
+
+    // Removing the definition must find the old name in the dependent index.
+    change_document(&mut service, definitions_uri.clone(), 2, ":root { }").await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+
+    // Restore the old definition, then rename it in one edit. This exercises
+    // the union of names before and after each edit.
+    change_document(
+        &mut service,
+        definitions_uri.clone(),
+        3,
+        ":root { --accent: red; }",
+    )
+    .await;
+    assert!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .is_empty()
+    );
+
+    change_document(
+        &mut service,
+        definitions_uri,
+        4,
+        ":root { --primary: blue; }",
+    )
+    .await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_watched_definition_changes_refresh_dependents() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let consumer_uri = Uri::from_str("file:///watched-consumer.scss").unwrap();
+    let watched_path = std::env::temp_dir().join(format!(
+        "css-variable-lsp-issue-22-watched-{}.css",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&watched_path);
+    let watched_uri = Uri::from_file_path(&watched_path).expect("temporary path should be a URI");
+
+    open_document(
+        &mut service,
+        consumer_uri.clone(),
+        "scss",
+        ".card { color: var(--watched); }",
+        1,
+    )
+    .await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+
+    std::fs::write(&watched_path, ":root { --watched: red; }").unwrap();
+    send_notification(
+        &mut service,
+        "workspace/didChangeWatchedFiles",
+        ls_types::DidChangeWatchedFilesParams {
+            changes: vec![ls_types::FileEvent::new(
+                watched_uri.clone(),
+                ls_types::FileChangeType::CHANGED,
+            )],
+        },
+    )
+    .await;
+    assert!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .is_empty()
+    );
+
+    // A rapid subsequent disk change must evict the old definition and
+    // publish the dependent's newly undefined-variable diagnostic.
+    std::fs::write(&watched_path, ":root { }").unwrap();
+    send_notification(
+        &mut service,
+        "workspace/didChangeWatchedFiles",
+        ls_types::DidChangeWatchedFilesParams {
+            changes: vec![ls_types::FileEvent::new(
+                watched_uri.clone(),
+                ls_types::FileChangeType::CHANGED,
+            )],
+        },
+    )
+    .await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+
+    std::fs::remove_file(&watched_path).unwrap();
+    send_notification(
+        &mut service,
+        "workspace/didChangeWatchedFiles",
+        ls_types::DidChangeWatchedFilesParams {
+            changes: vec![ls_types::FileEvent::new(
+                watched_uri,
+                ls_types::FileChangeType::DELETED,
+            )],
+        },
+    )
+    .await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_watched_astro_config_changes_refresh_font_dependents() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let consumer_uri = Uri::from_str("file:///watched-astro-consumer.scss").unwrap();
+    let config_root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-issue-24-watched-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&config_root).unwrap();
+    let config_path = config_root.join("astro.config.mjs");
+    let _ = std::fs::remove_file(&config_path);
+    let config_uri = Uri::from_file_path(&config_path).expect("temporary path should be a URI");
+
+    open_document(
+        &mut service,
+        consumer_uri.clone(),
+        "scss",
+        ".heading { font-family: var(--font-watched); }",
+        1,
+    )
+    .await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+
+    std::fs::write(
+        &config_path,
+        r#"export default { fonts: [{ cssVariable: "--font-watched" }] };"#,
+    )
+    .unwrap();
+    send_notification(
+        &mut service,
+        "workspace/didChangeWatchedFiles",
+        ls_types::DidChangeWatchedFilesParams {
+            changes: vec![ls_types::FileEvent::new(
+                config_uri.clone(),
+                ls_types::FileChangeType::CREATED,
+            )],
+        },
+    )
+    .await;
+    assert!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .is_empty()
+    );
+
+    std::fs::write(&config_path, "export default { fonts: [] };").unwrap();
+    send_notification(
+        &mut service,
+        "workspace/didChangeWatchedFiles",
+        ls_types::DidChangeWatchedFilesParams {
+            changes: vec![ls_types::FileEvent::new(
+                config_uri.clone(),
+                ls_types::FileChangeType::CHANGED,
+            )],
+        },
+    )
+    .await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+
+    std::fs::remove_file(&config_path).unwrap();
+    send_notification(
+        &mut service,
+        "workspace/didChangeWatchedFiles",
+        ls_types::DidChangeWatchedFilesParams {
+            changes: vec![ls_types::FileEvent::new(
+                config_uri,
+                ls_types::FileChangeType::DELETED,
+            )],
+        },
+    )
+    .await;
+    assert_eq!(
+        next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri)
+            .await
+            .diagnostics
+            .len(),
+        1
+    );
+
+    std::fs::remove_dir_all(config_root).unwrap();
 }
 
 #[tokio::test]
