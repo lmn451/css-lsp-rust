@@ -408,8 +408,10 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = Config::default();
-        config.lookup_files = vec!["**/*.ts".to_string()];
+        let config = Config {
+            lookup_files: vec!["**/*.ts".to_string()],
+            ..Config::default()
+        };
         let manager = CssVariableManager::new(config);
         let root_uri = Uri::from_file_path(&root).unwrap();
 
@@ -436,8 +438,10 @@ mod tests {
             .unwrap();
         }
 
-        let mut config = Config::default();
-        config.eager_js = true;
+        let config = Config {
+            eager_js: true,
+            ..Config::default()
+        };
         let manager = CssVariableManager::new(config);
         let root_uri = Uri::from_file_path(&root).unwrap();
         scan_workspace(vec![root_uri], &manager, |_, _| {})
