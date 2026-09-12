@@ -113,7 +113,7 @@ pub async fn scan_workspace(
             };
             scanned_folder_paths
                 .iter()
-                .any(|folder| path.starts_with(folder))
+                .any(|folder| path.strip_prefix(folder).is_ok())
                 && !discovered_uris.contains(uri)
         })
         .collect();
@@ -236,6 +236,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(manager.get_variables("--primary").await.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rescans_do_not_remove_documents_from_sibling_workspace_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "css-variable-lsp-sibling-workspace-scan-{}",
+            std::process::id()
+        ));
+        let workspace = root.join("app");
+        let sibling = root.join("app-old");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("variables.css"), ":root { --sibling: red; }").unwrap();
+
+        let manager = CssVariableManager::new(Config::default());
+        scan_workspace(
+            vec![Uri::from_file_path(&sibling).unwrap()],
+            &manager,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        scan_workspace(
+            vec![Uri::from_file_path(&workspace).unwrap()],
+            &manager,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(manager.get_variables("--sibling").await.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
