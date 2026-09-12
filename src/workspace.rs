@@ -5,15 +5,18 @@ use tokio::fs;
 use walkdir::WalkDir;
 
 use crate::config_analysis::{is_supported_config_path, parse_config_document, MAX_CONFIG_BYTES};
+use crate::document_kind::{is_js_like_extension, normalize_extension};
 use crate::manager::CssVariableManager;
-use crate::parsers::{parse_css_document, parse_html_document};
+use crate::parsers::{parse_css_document, parse_html_document, parse_js_document};
 
-/// Scan workspace folders for CSS and HTML files.
+/// Scan workspace folders for CSS, HTML, and optionally JavaScript files.
 ///
 /// Uses the configured `lookup_files` glob patterns to discover files and the
-/// `ignore_globs` patterns to exclude them. Document kind is resolved via
-/// `document_kind::resolve_document_kind` so that workspace scanning stays in
-/// sync with completion / hover / goto-definition behavior.
+/// `ignore_globs` patterns to exclude them. When `eager_js` is enabled, all
+/// supported JavaScript/TypeScript extensions are also discovered for CSS-in-JS
+/// extraction. Document kind is resolved via `document_kind::resolve_document_kind`
+/// so that workspace scanning stays in sync with completion / hover /
+/// goto-definition behavior.
 pub async fn scan_workspace(
     folders: Vec<Uri>,
     manager: &CssVariableManager,
@@ -80,9 +83,16 @@ pub async fn scan_workspace(
                 continue;
             }
 
-            // Framework configuration sources are discovered by exact basename instead of
-            // requiring users to eagerly scan every JavaScript or TypeScript file.
-            if lookup_set.is_match(&*path_str) || is_supported_config_path(relative) {
+            // Framework configuration sources are discovered by exact basename regardless
+            // of lookup patterns; eager mode additionally selects ordinary JS/TS files.
+            let is_eager_js = config.eager_js
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .and_then(normalize_extension)
+                    .is_some_and(|extension| is_js_like_extension(&extension));
+            if lookup_set.is_match(&*path_str) || is_supported_config_path(relative) || is_eager_js
+            {
                 all_files.insert(path.to_path_buf());
             }
         }
@@ -92,12 +102,8 @@ pub async fn scan_workspace(
     all_files.sort();
     let total = all_files.len();
 
-    let discovered_config_uris: HashSet<Uri> = all_files
-        .iter()
-        .filter(|path| is_supported_config_path(path))
-        .filter_map(Uri::from_file_path)
-        .collect();
-    let stale_config_uris: HashSet<Uri> = manager
+    let discovered_uris: HashSet<Uri> = all_files.iter().filter_map(Uri::from_file_path).collect();
+    let stale_uris: HashSet<Uri> = manager
         .get_document_uris()
         .await
         .into_iter()
@@ -105,14 +111,15 @@ pub async fn scan_workspace(
             let Some(path) = crate::path_display::to_normalized_fs_path(uri) else {
                 return false;
             };
-            is_supported_config_path(&path)
-                && scanned_folder_paths
-                    .iter()
-                    .any(|folder| path.starts_with(folder))
-                && !discovered_config_uris.contains(uri)
+            scanned_folder_paths
+                .iter()
+                .any(|folder| path.starts_with(folder))
+                && !discovered_uris.contains(uri)
         })
         .collect();
-    manager.remove_documents(&stale_config_uris).await;
+    // This also removes stale JS/CSS-in-JS state when eager mode is disabled or
+    // when a lookup/ignore pattern no longer selects a previously indexed file.
+    manager.remove_documents(&stale_uris).await;
 
     // Normal discovered files are cleared as a batch. Configuration sources replace their
     // definitions atomically after successful analysis, preserving the last valid state while
@@ -184,9 +191,11 @@ pub async fn scan_workspace(
             crate::document_kind::DocumentKind::Css => {
                 parse_css_document(&content, &file_uri, manager).await
             }
-            // JS/CSS-in-JS files are not scanned eagerly from disk: their CSS lives
-            // inside string/template literals that we only parse when the editor is
-            // actually showing us the file (did_open/did_change).
+            crate::document_kind::DocumentKind::Js if config.eager_js => {
+                parse_js_document(&content, &file_uri, manager).await
+            }
+            // Without eager mode, CSS-in-JS is parsed only while the editor
+            // is showing the JavaScript/TypeScript document.
             crate::document_kind::DocumentKind::Js => continue,
         };
 
@@ -384,6 +393,83 @@ mod tests {
         }
         assert!(manager.get_variables("--font-ignored").await.is_empty());
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_js_files_are_not_scanned_eagerly() {
+        let root =
+            std::env::temp_dir().join(format!("css-variable-lsp-js-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("styles.ts"),
+            r#"const styles = `--from-js: red;`;"#,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.lookup_files = vec!["**/*.ts".to_string()];
+        let manager = CssVariableManager::new(config);
+        let root_uri = Uri::from_file_path(&root).unwrap();
+
+        scan_workspace(vec![root_uri], &manager, |_, _| {})
+            .await
+            .unwrap();
+
+        assert!(manager.get_variables("--from-js").await.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn eager_js_scan_indexes_css_in_all_supported_js_extensions() {
+        let root =
+            std::env::temp_dir().join(format!("css-variable-lsp-eager-js-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let extensions = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
+        for extension in &extensions {
+            std::fs::write(
+                root.join(format!("styles.{extension}")),
+                format!("const styles = `--eager-{extension}: red;`;"),
+            )
+            .unwrap();
+        }
+
+        let mut config = Config::default();
+        config.eager_js = true;
+        let manager = CssVariableManager::new(config);
+        let root_uri = Uri::from_file_path(&root).unwrap();
+        scan_workspace(vec![root_uri], &manager, |_, _| {})
+            .await
+            .unwrap();
+
+        for extension in &extensions {
+            assert_eq!(
+                manager
+                    .get_variables(&format!("--eager-{extension}"))
+                    .await
+                    .len(),
+                1,
+            );
+        }
+
+        let mut disabled_config = manager.get_config().await;
+        disabled_config.eager_js = false;
+        manager.set_config(disabled_config).await;
+        scan_workspace(
+            vec![Uri::from_file_path(&root).unwrap()],
+            &manager,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        for extension in &extensions {
+            assert!(manager
+                .get_variables(&format!("--eager-{extension}"))
+                .await
+                .is_empty());
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }

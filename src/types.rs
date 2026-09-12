@@ -113,6 +113,10 @@ pub struct Config {
     /// Only show colors on variables (not inline values)
     pub color_only_on_variables: bool,
 
+    /// Eagerly scan JavaScript/TypeScript files for CSS-in-JS snippets
+    #[serde(default)]
+    pub eager_js: bool,
+
     /// Maximum number of documents to track (0 = unlimited)
     pub max_documents: usize,
 }
@@ -141,6 +145,7 @@ impl Default for Config {
             ],
             enable_color_provider: true,
             color_only_on_variables: false,
+            eager_js: false,
             max_documents: 10_000, // Default limit of 10,000 documents
         }
     }
@@ -161,6 +166,7 @@ impl Config {
         }
         config.enable_color_provider = runtime.enable_color_provider;
         config.color_only_on_variables = runtime.color_only_on_variables;
+        config.eager_js = runtime.eager_js;
         config
     }
 }

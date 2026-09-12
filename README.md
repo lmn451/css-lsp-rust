@@ -59,9 +59,10 @@ dramatically easier to embed in editor extensions and CI sandboxes.
   chain resolution through `var()` aliases).
 - **HTML parsing** of `<style>` blocks, `class="…"` / `classname="…"`
   attributes, and inline `style="…"` attributes with full DOM tree tracking.
-- **JS / TS / JSX / TSX** support via CSS-in-JS extraction from
-  string literals and tagged template literals (`styled-components`,
-  `emotion`, etc.), correctly handling template expressions.
+- **JS / TS / JSX / TSX** support via CSS-in-JS extraction from string
+  literals and tagged template literals (`styled-components`, `emotion`, etc.),
+  correctly handling template expressions. Open documents are parsed automatically;
+  pass `--eager-js` to also index unopened JS/TS-family files.
 - **Astro font variables** are statically indexed from
   `astro.config.{js,mjs,cjs,ts,mts,cts}` using Oxc. Configuration code is
   parsed but never executed. `fonts[].cssVariable` and legacy
@@ -108,17 +109,18 @@ dramatically easier to embed in editor extensions and CI sandboxes.
 
 ### File-type coverage
 
-| Kind     | Extensions (default)                                |
+| Kind     | Extensions                                          |
 | -------- | --------------------------------------------------- |
 | CSS      | `.css`, `.scss`, `.sass`, `.less`                   |
 | HTML-ish | `.html`, `.vue`, `.svelte`, `.astro`, `.ripple`     |
 | JS-ish   | `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, `.cts` |
 
-All of these are configurable via the `--lookup-files` flag.
-
+CSS and HTML-ish workspace discovery is configurable via `--lookup-files`.
+Open JS-ish documents are parsed automatically; use `--eager-js` to parse those
+files from disk during workspace scans as well. Standard JS/TS-family extensions
+are included automatically in eager mode, and `ignore_globs` still applies.
 Recognized `astro.config.*` and `vite.config.*` files are discovered
-independently of `--lookup-files` so users do not need to scan every JavaScript
-file eagerly.
+independently of `--lookup-files` and statically analyzed.
 
 ---
 
@@ -228,6 +230,7 @@ over built-in defaults.
 | --------------------------------------- | ------------------------------------------ | ---------------- | -------------------------------------------- |
 | `--no-color-preview`                    | `CSS_LSP_COLOR_PREVIEW=0`                  | enabled          | Disable the LSP color provider               |
 | `--color-only-variables`                 | `CSS_LSP_COLOR_ONLY_VARIABLES=1`           | disabled         | Only highlight colors on `var()` calls       |
+| `--eager-js`                             | `CSS_LSP_EAGER_JS=1`                       | disabled         | Parse unopened JS/TS CSS-in-JS files       |
 | `--lookup-files <globs>`                | `CSS_LSP_LOOKUP_FILES`                     | `*.css, *.html…` | File globs scanned on the workspace          |
 | `--ignore-globs <globs>`                | `CSS_LSP_IGNORE_GLOBS`                     | `node_modules, dist…` | Globs excluded from the scan            |
 | `--path-display <mode[:N]>`             | `CSS_LSP_PATH_DISPLAY`                     | `relative`       | `relative` / `absolute` / `abbreviated[:N]`  |
@@ -250,6 +253,9 @@ css-variable-lsp --no-color-preview
 # Limit scanning to SCSS and Svelte files
 CSS_LSP_LOOKUP_FILES="**/*.scss,**/*.svelte" css-variable-lsp
 
+# Index CSS-in-JS from unopened JS/TS-family files
+css-variable-lsp --eager-js
+
 # Use abbreviated paths of length 2, suppress the "Add fallback" quickfix
 css-variable-lsp --path-display=abbreviated:2 --no-suggest-add-fallback
 
@@ -269,7 +275,8 @@ under `cssVariableLsp`:
     "lookupFiles":         ["**/*.css", "**/*.scss"],
     "ignoreGlobs":         ["**/node_modules/**", "**/dist/**"],
     "enableColorProvider": true,
-    "colorOnlyOnVariables": false
+    "colorOnlyOnVariables": false,
+    "eagerJs": true
   }
 }
 ```

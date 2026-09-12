@@ -5,6 +5,14 @@ All notable changes to the CSS Variable LSP project will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Optional eager workspace scanning for CSS-in-JS in unopened JavaScript and TypeScript files via `--eager-js` or `CSS_LSP_EAGER_JS=1`.
+
+### Fixed
+- Workspace rescans now remove stale indexed documents when lookup or eager-scan settings change.
+
 ## [0.3.7] - 2026-09-11
 
 ### Fixed

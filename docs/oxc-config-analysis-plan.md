@@ -59,7 +59,11 @@ visible during future Oxc upgrades.
 
 ## Motivation
 
-The language server currently understands CSS, HTML-like documents, and CSS-like strings in open JavaScript or TypeScript documents. It does not statically understand framework configuration files that generate CSS custom properties or otherwise affect CSS authoring.
+The language server understands CSS, HTML-like documents, and CSS-like strings in
+JavaScript or TypeScript documents. Open JS/TS documents are parsed automatically;
+the opt-in eager workspace mode also extracts CSS-in-JS snippets from unopened files.
+Framework configuration files that generate CSS custom properties are analyzed by the
+separate bounded Oxc configuration layer.
 
 The immediate case is Astro's font configuration:
 
@@ -118,7 +122,9 @@ This is not a claim that SWC is unsuitable. SWC is mature, heavily tested, suppo
 
 ## Supported files
 
-Framework configuration discovery must be based on exact recognized basenames, not on eagerly parsing every JavaScript file.
+Framework configuration discovery is based on exact recognized basenames, not on
+treating arbitrary JavaScript as framework configuration. Eager JS mode is separate: it
+extracts CSS-in-JS snippets but does not execute or interpret application code as config.
 
 Initial Astro set:
 

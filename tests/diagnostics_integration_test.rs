@@ -1513,6 +1513,43 @@ async fn test_initialize_scans_root_uri_without_workspace_folders() {
 }
 
 #[tokio::test]
+async fn test_did_change_configuration_enables_eager_js_scan() {
+    let root = std::env::temp_dir().join(format!(
+        "css-variable-lsp-eager-js-config-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("styles.ts"),
+        r#"const styles = `--config-eager: red;`;"#,
+    )
+    .unwrap();
+    let root_uri = Uri::from_file_path(&root).unwrap();
+
+    let (mut service, _diagnostics_rx) = setup_service().await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+
+    let initial_symbols = workspace_symbols(&mut service, "--config-eager").await;
+    assert!(initial_symbols.is_empty());
+
+    send_notification(
+        &mut service,
+        "workspace/didChangeConfiguration",
+        DidChangeConfigurationParams {
+            settings: serde_json::json!({ "eagerJs": true }),
+        },
+    )
+    .await;
+
+    let eager_symbols = workspace_symbols(&mut service, "--config-eager").await;
+    assert_eq!(eager_symbols.len(), 1);
+    assert_eq!(eager_symbols[0].name, "--config-eager");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn test_initialize_indexes_astro_font_css_variables() {
     let root = std::env::temp_dir().join(format!(
         "css-variable-lsp-astro-fonts-{}",
