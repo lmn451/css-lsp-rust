@@ -298,6 +298,7 @@ let suggest_new_feature = flag_bool(
 |------|--------------|---------|---------|-------------|
 | Color preview | `--no-color-preview` | `CSS_LSP_COLOR_PREVIEW=0` | true | Enable color picker |
 | Color only variables | `--color-only-variables` | `CSS_LSP_COLOR_ONLY_VARIABLES=1` | false | Colors only on var() |
+| Eager JS | `--eager-js` | `CSS_LSP_EAGER_JS=1` | false | Parse unopened JS/TS CSS-in-JS files |
 | Lookup files | `--lookup-files` | `CSS_LSP_LOOKUP_FILES` | None | File extensions to scan (CLI: also `--lookup-file`) |
 | Ignore globs | `--ignore-globs` | `CSS_LSP_IGNORE_GLOBS` | None | Patterns to exclude (CLI: also `--ignore-glob`) |
 | Path display | `--path-display` | `CSS_LSP_PATH_DISPLAY` | relative | Path format mode |

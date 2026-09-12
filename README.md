@@ -295,8 +295,8 @@ under `cssVariableLsp`:
 | JS / TS    | Inside string literals and template literal text (not in `${}`) | Same as CSS                              |
 
 Completion is also triggered on `-`, `(`, and `:` per the upstream
-TypeScript implementation, and respects the workspace's `lookup_files`
-configuration to decide which file kinds are even parsed.
+TypeScript implementation. Workspace scans follow `lookup_files` for CSS and
+HTML-ish files; eager JS mode additionally parses unopened JS/TS-family files.
 
 ### Hover
 
