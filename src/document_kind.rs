@@ -9,6 +9,7 @@ pub struct ClientConfigPatch {
     pub ignore_globs: Option<Vec<String>>,
     pub enable_color_provider: Option<bool>,
     pub color_only_on_variables: Option<bool>,
+    pub eager_js: Option<bool>,
 }
 
 pub fn apply_config_patch(mut base: Config, patch: ClientConfigPatch) -> Config {
@@ -23,6 +24,9 @@ pub fn apply_config_patch(mut base: Config, patch: ClientConfigPatch) -> Config 
     }
     if let Some(color_only_on_variables) = patch.color_only_on_variables {
         base.color_only_on_variables = color_only_on_variables;
+    }
+    if let Some(eager_js) = patch.eager_js {
+        base.eager_js = eager_js;
     }
     base
 }
@@ -121,4 +125,17 @@ pub fn resolve_document_kind(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_patch_supports_eager_js_setting() {
+        let patch: ClientConfigPatch =
+            serde_json::from_value(serde_json::json!({ "eagerJs": true })).unwrap();
+        let config = apply_config_patch(Config::default(), patch);
+        assert!(config.eager_js);
+    }
 }

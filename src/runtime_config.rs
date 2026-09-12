@@ -24,6 +24,7 @@ pub enum UndefinedVarFallbackMode {
 pub struct RuntimeConfig {
     pub enable_color_provider: bool,
     pub color_only_on_variables: bool,
+    pub eager_js: bool,
     pub lookup_files: Option<Vec<String>>,
     pub ignore_globs: Option<Vec<String>>,
     pub path_display_mode: PathDisplayMode,
@@ -90,6 +91,8 @@ pub fn build_runtime_config_with_env(
         false,
     );
 
+    let eager_js = flag_bool_simple(args, env, "CSS_LSP_EAGER_JS", "--eager-js", false);
+
     let lookup_files = flag_opt(args, env, "lookup-files", "CSS_LSP_LOOKUP_FILES", None);
 
     let ignore_globs = flag_opt(args, env, "ignore-globs", "CSS_LSP_IGNORE_GLOBS", None);
@@ -138,6 +141,7 @@ pub fn build_runtime_config_with_env(
     RuntimeConfig {
         enable_color_provider,
         color_only_on_variables,
+        eager_js,
         lookup_files,
         ignore_globs,
         path_display_mode,
@@ -259,6 +263,24 @@ mod tests {
         let env = HashMap::new();
         let config = build_runtime_config_with_env(&args, &env);
         assert!(config.suggest_add_fallback);
+    }
+
+    #[test]
+    fn runtime_config_eager_js_defaults_to_disabled() {
+        let config = build_runtime_config_with_env(&[], &HashMap::new());
+        assert!(!config.eager_js);
+    }
+
+    #[test]
+    fn runtime_config_eager_js_can_be_enabled_by_cli_or_env() {
+        let cli_config =
+            build_runtime_config_with_env(&["--eager-js".to_string()], &HashMap::new());
+        assert!(cli_config.eager_js);
+
+        let mut env = HashMap::new();
+        env.insert("CSS_LSP_EAGER_JS".to_string(), "1".to_string());
+        let env_config = build_runtime_config_with_env(&[], &env);
+        assert!(env_config.eager_js);
     }
 
     #[test]

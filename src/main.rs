@@ -23,6 +23,7 @@ fn print_help() {
     println!("FEATURE FLAGS (toggle behaviour):");
     println!("  --no-color-preview                       Disable color picker support");
     println!("  --color-only-variables                   Only show colors on var() calls");
+    println!("  --eager-js                               Eagerly scan JS/TS for CSS-in-JS");
     println!("  --no-suggest-add-fallback                Disable \"Add fallback\" quickfix");
     println!("  --no-suggest-exact-color-variables       Disable color replacement suggestions");
     println!();
@@ -40,6 +41,7 @@ fn print_help() {
     println!();
     println!("ENVIRONMENT VARIABLES (equivalent to flags):");
     println!("  CSS_LSP_COLOR_PREVIEW, CSS_LSP_COLOR_ONLY_VARIABLES");
+    println!("  CSS_LSP_EAGER_JS");
     println!("  CSS_LSP_LOOKUP_FILES,  CSS_LSP_IGNORE_GLOBS");
     println!("  CSS_LSP_PATH_DISPLAY,  CSS_LSP_PATH_DISPLAY_LENGTH");
     println!("  CSS_LSP_UNDEFINED_VAR_FALLBACK");
