@@ -250,6 +250,7 @@ pub struct CssVariableLsp {
     workspace_folder_paths: Arc<RwLock<Vec<PathBuf>>>,
     root_folder_path: Arc<RwLock<Option<PathBuf>>>,
     root_folder_uri: Arc<RwLock<Option<Uri>>>,
+    has_watched_files_registration: Arc<RwLock<bool>>,
     has_workspace_folder_capability: Arc<RwLock<bool>>,
     has_diagnostic_related_information: Arc<RwLock<bool>>,
     usage_regex: Regex,
@@ -277,6 +278,7 @@ impl CssVariableLsp {
             workspace_folder_paths: Arc::new(RwLock::new(Vec::new())),
             root_folder_path: Arc::new(RwLock::new(None)),
             root_folder_uri: Arc::new(RwLock::new(None)),
+            has_watched_files_registration: Arc::new(RwLock::new(false)),
             has_workspace_folder_capability: Arc::new(RwLock::new(false)),
             has_diagnostic_related_information: Arc::new(RwLock::new(false)),
             usage_regex: Regex::new(r"var\((--[\w-]+)(?:\s*,\s*([^)]+))?\)").unwrap(),
@@ -477,6 +479,9 @@ impl CssVariableLsp {
     }
 
     async fn update_document_from_disk(&self, uri: &Uri) {
+        if self.is_document_open(uri).await {
+            return;
+        }
         let path = match to_normalized_fs_path(uri) {
             Some(path) => path,
             None => {
@@ -484,6 +489,38 @@ impl CssVariableLsp {
                 return;
             }
         };
+
+        let config = self.live_config.read().await.clone();
+        let matcher = match crate::workspace::WorkspaceFileMatcher::new(&config) {
+            Ok(matcher) => matcher,
+            Err(error) => {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Invalid workspace file patterns: {error}"),
+                    )
+                    .await;
+                return;
+            }
+        };
+        let mut roots = self.workspace_folder_paths.read().await.clone();
+        if roots.is_empty() {
+            if let Some(root) = self.root_folder_path.read().await.clone() {
+                roots.push(root);
+            }
+        }
+        let eligible = if roots.is_empty() {
+            matcher.matches(&path)
+        } else {
+            roots
+                .iter()
+                .filter_map(|root| path.strip_prefix(root).ok())
+                .any(|relative| matcher.matches(relative))
+        };
+        if !eligible {
+            self.manager.remove_document(uri).await;
+            return;
+        }
 
         match tokio::fs::read_to_string(&path).await {
             Ok(text) => {
@@ -581,6 +618,13 @@ impl LanguageServer for CssVariableLsp {
             .workspace
             .as_ref()
             .and_then(|w| w.workspace_folders)
+            .unwrap_or(false);
+        *self.has_watched_files_registration.write().await = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+            .and_then(|watching| watching.dynamic_registration)
             .unwrap_or(false);
         let has_related_info = params
             .capabilities
@@ -682,6 +726,25 @@ impl LanguageServer for CssVariableLsp {
                 &format!("CSS Variable LSP (Rust) v{} initialized!", VERSION),
             )
             .await;
+
+        if *self.has_watched_files_registration.read().await {
+            let registration = ls_types::Registration {
+                id: "css-variable-lsp-workspace-watch".to_string(),
+                method: "workspace/didChangeWatchedFiles".to_string(),
+                // A stable broad subscription also covers later lookup/eager configuration changes.
+                register_options: Some(serde_json::json!({
+                    "watchers": [{ "globPattern": "**/*", "kind": 7 }]
+                })),
+            };
+            if let Err(error) = self.client.register_capability(vec![registration]).await {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Failed to register workspace file watching: {error}"),
+                    )
+                    .await;
+            }
+        }
 
         if let Some(folders) = self.workspace_folders_for_scan().await {
             self.update_workspace_folder_paths(Some(folders.clone()))
@@ -907,7 +970,7 @@ impl LanguageServer for CssVariableLsp {
         let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
         for change in params.changes {
             match change.typ {
-                FileChangeType::DELETED => {
+                FileChangeType::DELETED if !self.is_document_open(&change.uri).await => {
                     self.manager.remove_document(&change.uri).await;
                 }
                 FileChangeType::CREATED | FileChangeType::CHANGED
@@ -948,8 +1011,10 @@ impl LanguageServer for CssVariableLsp {
                 Err(_) => continue,
             };
 
-            // Remove old document data
-            self.manager.remove_document(&old_uri).await;
+            // An open buffer remains authoritative until the client closes it.
+            if !self.is_document_open(&old_uri).await {
+                self.manager.remove_document(&old_uri).await;
+            }
 
             // If the new URI is not open, load it from disk.
             if !self.is_document_open(&new_uri).await {
@@ -966,7 +1031,9 @@ impl LanguageServer for CssVariableLsp {
                 Ok(uri) => uri,
                 Err(_) => continue,
             };
-            self.manager.remove_document(&uri).await;
+            if !self.is_document_open(&uri).await {
+                self.manager.remove_document(&uri).await;
+            }
         }
         self.validate_all_open_documents().await;
     }

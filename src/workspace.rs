@@ -9,6 +9,46 @@ use crate::document_kind::{is_js_like_extension, normalize_extension};
 use crate::manager::CssVariableManager;
 use crate::parsers::{parse_css_document, parse_html_document, parse_js_document};
 
+/// Shared disk-discovery rules for workspace scans and file notifications.
+pub(crate) struct WorkspaceFileMatcher {
+    lookup: globset::GlobSet,
+    ignore: globset::GlobSet,
+    eager_js: bool,
+}
+
+impl WorkspaceFileMatcher {
+    pub(crate) fn new(config: &crate::types::Config) -> Result<Self, String> {
+        fn compile(patterns: &[String]) -> Result<globset::GlobSet, String> {
+            let mut builder = GlobSetBuilder::new();
+            for pattern in patterns {
+                if let Ok(glob) = Glob::new(pattern) {
+                    builder.add(glob);
+                }
+            }
+            builder.build().map_err(|error| error.to_string())
+        }
+        Ok(Self {
+            lookup: compile(&config.lookup_files)?,
+            ignore: compile(&config.ignore_globs)?,
+            eager_js: config.eager_js,
+        })
+    }
+
+    pub(crate) fn matches(&self, path: &std::path::Path) -> bool {
+        if self.ignore.is_match(path) {
+            return false;
+        }
+        let is_js = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(normalize_extension)
+            .is_some_and(|extension| is_js_like_extension(&extension));
+        is_supported_config_path(path)
+            || (is_js && self.eager_js)
+            || (!is_js && self.lookup.is_match(path))
+    }
+}
+
 /// Scan workspace folders for CSS, HTML, and optionally JavaScript files.
 ///
 /// Uses the configured `lookup_files` glob patterns to discover files and the
@@ -24,27 +64,7 @@ pub async fn scan_workspace(
 ) -> Result<(), String> {
     let config = manager.get_config().await;
 
-    // Build glob matchers for lookup patterns
-    let mut lookup_builder = GlobSetBuilder::new();
-    for pattern in &config.lookup_files {
-        if let Ok(glob) = Glob::new(pattern) {
-            lookup_builder.add(glob);
-        }
-    }
-    let lookup_set = lookup_builder
-        .build()
-        .map_err(|e| format!("Failed to build lookup glob set: {}", e))?;
-
-    // Build glob matchers for ignore patterns
-    let mut ignore_builder = GlobSetBuilder::new();
-    for pattern in &config.ignore_globs {
-        if let Ok(glob) = Glob::new(pattern) {
-            ignore_builder.add(glob);
-        }
-    }
-    let ignore_set = ignore_builder
-        .build()
-        .map_err(|e| format!("Failed to build ignore glob set: {}", e))?;
+    let matcher = WorkspaceFileMatcher::new(&config)?;
 
     // Collect all files from all folders
     let mut all_files = HashSet::new();
@@ -75,24 +95,7 @@ pub async fn scan_workspace(
                 Err(_) => continue,
             };
 
-            // Convert to string for glob matching
-            let path_str = relative.to_string_lossy();
-
-            // Skip if matches ignore pattern
-            if ignore_set.is_match(&*path_str) {
-                continue;
-            }
-
-            // Framework configuration sources are discovered by exact basename regardless
-            // of lookup patterns; eager mode additionally selects ordinary JS/TS files.
-            let is_eager_js = config.eager_js
-                && path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .and_then(normalize_extension)
-                    .is_some_and(|extension| is_js_like_extension(&extension));
-            if lookup_set.is_match(&*path_str) || is_supported_config_path(relative) || is_eager_js
-            {
+            if matcher.matches(relative) {
                 all_files.insert(path.to_path_buf());
             }
         }

@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-02
+
 ### Added
 - Optional eager workspace scanning for CSS-in-JS in unopened JavaScript and TypeScript files via `--eager-js` or `CSS_LSP_EAGER_JS=1`.
 
 ### Fixed
 - Workspace rescans now remove stale indexed documents when lookup or eager-scan settings change.
+- Register workspace file watchers when the client supports dynamic registration.
+- Preserve open-buffer analysis during disk deletion and rename notifications.
+- Apply lookup, ignore, and eager-JS settings consistently to disk updates and document close.
+
+### Tests
+- Add regression coverage for watcher registration, open-buffer preservation, and disk-discovery settings.
 
 ## [0.3.7] - 2026-09-11
 
