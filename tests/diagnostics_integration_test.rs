@@ -103,6 +103,169 @@ async fn workspace_symbols(
     serde_json::from_value(result).unwrap()
 }
 
+#[tokio::test]
+async fn review_disk_events_preserve_open_buffers() {
+    for method in [
+        "workspace/didChangeWatchedFiles",
+        "workspace/didDeleteFiles",
+        "workspace/didRenameFiles",
+    ] {
+        let (mut service, _rx) = setup_service().await;
+        initialize(&mut service).await;
+        let uri = Uri::from_str("file:///review-open-buffer.css").unwrap();
+        open_document(
+            &mut service,
+            uri.clone(),
+            "css",
+            ":root { --review-open: red; }",
+            1,
+        )
+        .await;
+        let params = match method {
+            "workspace/didChangeWatchedFiles" => {
+                serde_json::json!({"changes": [{"uri": uri, "type": 3}]})
+            }
+            "workspace/didDeleteFiles" => serde_json::json!({"files": [{"uri": uri}]}),
+            _ => {
+                serde_json::json!({"files": [{"oldUri": uri, "newUri": "file:///review-renamed.css"}]})
+            }
+        };
+        send_notification(&mut service, method, params).await;
+        assert_eq!(
+            workspace_symbols(&mut service, "--review-open").await.len(),
+            1,
+            "{method}"
+        );
+        close_document(&mut service, uri).await;
+        assert!(workspace_symbols(&mut service, "--review-open")
+            .await
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn review_disk_reload_respects_discovery_settings() {
+    for eager in [false, true] {
+        let mut runtime = build_runtime_config_with_env(&[], &HashMap::new());
+        runtime.eager_js = eager;
+        let (mut service, _rx) = setup_service_with_config(runtime).await;
+        let root = std::env::temp_dir().join(format!(
+            "css-review-discovery-{}-{eager}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        let js = root.join("component.js");
+        let ignored = root.join("dist/ignored.css");
+        let excluded = root.join("excluded.scss");
+        let text = "const x = css`:root { --review-js: red; }`;";
+        std::fs::write(&js, text).unwrap();
+        std::fs::write(&ignored, ":root { --review-ignored: blue; }").unwrap();
+        std::fs::write(&excluded, ":root { --review-excluded: green; }").unwrap();
+        initialize_with_root(
+            &mut service,
+            Some(&Uri::from_file_path(&root).unwrap()),
+            None,
+            None,
+            false,
+        )
+        .await;
+        send_notification(
+            &mut service,
+            "workspace/didChangeConfiguration",
+            serde_json::json!({"settings": {"lookupFiles": ["**/*.css"]}}),
+        )
+        .await;
+        let uri = Uri::from_file_path(&js).unwrap();
+        open_document(&mut service, uri.clone(), "javascript", text, 1).await;
+        assert_eq!(
+            workspace_symbols(&mut service, "--review-js").await.len(),
+            1
+        );
+        close_document(&mut service, uri.clone()).await;
+        assert_eq!(
+            workspace_symbols(&mut service, "--review-js").await.len(),
+            usize::from(eager)
+        );
+        for method in [
+            "workspace/didChangeWatchedFiles",
+            "workspace/didCreateFiles",
+            "workspace/didRenameFiles",
+        ] {
+            for path in [&js, &ignored, &excluded] {
+                let uri = Uri::from_file_path(path).unwrap();
+                let params = match method {
+                    "workspace/didChangeWatchedFiles" => {
+                        serde_json::json!({"changes": [{"uri": uri, "type": 2}]})
+                    }
+                    "workspace/didCreateFiles" => serde_json::json!({"files": [{"uri": uri}]}),
+                    _ => {
+                        serde_json::json!({"files": [{"oldUri": "file:///review-missing.css", "newUri": uri}]})
+                    }
+                };
+                send_notification(&mut service, method, params).await;
+            }
+            assert_eq!(
+                workspace_symbols(&mut service, "--review-js").await.len(),
+                usize::from(eager)
+            );
+            assert!(workspace_symbols(&mut service, "--review-ignored")
+                .await
+                .is_empty());
+            assert!(workspace_symbols(&mut service, "--review-excluded")
+                .await
+                .is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn review_registers_watchers_only_with_client_support() {
+    for supported in [false, true] {
+        let runtime = build_runtime_config_with_env(&[], &HashMap::new());
+        let (mut service, socket) = LspService::new(|client| CssVariableLsp::new(client, runtime));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let (mut requests, mut responses) = socket.split();
+            while let Some(request) = requests.next().await {
+                if request.method() == "client/registerCapability" {
+                    tx.send(request.params().cloned().unwrap()).unwrap();
+                    responses
+                        .send(Response::from_ok(
+                            request.id().unwrap().clone(),
+                            serde_json::Value::Null,
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let request = Request::build("initialize").id(1).params(serde_json::json!({"capabilities": {"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": supported}}}})).finish();
+        send_request_for_result(&mut service, request)
+            .await
+            .unwrap();
+        timeout(
+            Duration::from_secs(2),
+            send_notification(&mut service, "initialized", ls_types::InitializedParams {}),
+        )
+        .await
+        .unwrap();
+        if supported {
+            let params = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("watch registration missing")
+                .unwrap();
+            let registration = &params["registrations"][0];
+            assert_eq!(registration["method"], "workspace/didChangeWatchedFiles");
+            assert_eq!(
+                registration["registerOptions"]["watchers"][0]["globPattern"],
+                "**/*"
+            );
+        } else {
+            assert!(rx.try_recv().is_err());
+        }
+    }
+}
 fn position_of(text: &str, needle: &str) -> ls_types::Position {
     let offset = text.find(needle).expect("needle should exist in text");
     css_variable_lsp::types::offset_to_position(text, offset)
@@ -900,7 +1063,12 @@ async fn test_did_delete_files_triggers_revalidation() {
     initialize(&mut service).await;
 
     let index_uri = Uri::from_str("file:///index.scss").unwrap();
-    let vars_uri = Uri::from_str("file:///vars.scss").unwrap();
+    let vars_path = std::env::temp_dir().join(format!(
+        "css-variable-lsp-delete-closed-{}.scss",
+        std::process::id()
+    ));
+    std::fs::write(&vars_path, ":root { --dark: #000; }").unwrap();
+    let vars_uri = Uri::from_file_path(&vars_path).unwrap();
 
     open_document(
         &mut service,
@@ -910,6 +1078,9 @@ async fn test_did_delete_files_triggers_revalidation() {
         1,
     )
     .await;
+
+    // Disk notifications remove closed files; open buffers remain authoritative.
+    close_document(&mut service, vars_uri.clone()).await;
 
     open_document(
         &mut service,
@@ -923,7 +1094,8 @@ async fn test_did_delete_files_triggers_revalidation() {
     let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
     assert_eq!(diagnostics.diagnostics.len(), 0);
 
-    // Simulate deletion of vars file.
+    std::fs::remove_file(&vars_path).unwrap();
+    // Simulate deletion of the closed vars file.
     let params = DeleteFilesParams {
         files: vec![FileDelete {
             uri: vars_uri.to_string(),
