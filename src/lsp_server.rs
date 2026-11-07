@@ -22,7 +22,7 @@ use ls_types::{
     WorkspaceServerCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use regex::Regex;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::color::{generate_color_presentations, parse_color, NormalizedColorKey};
@@ -244,8 +244,8 @@ pub struct CssVariableLsp {
     client: Client,
     manager: Arc<CssVariableManager>,
     document_map: Arc<RwLock<HashMap<Uri, String>>>,
-    /// Serializes version acceptance with text-map mutation and parsing.
-    document_lifecycle_lock: Arc<Mutex<()>>,
+    /// Keeps queries consistent with complete document and workspace updates.
+    document_lifecycle_lock: Arc<RwLock<()>>,
     runtime_config: RuntimeConfig,
     workspace_folder_paths: Arc<RwLock<Vec<PathBuf>>>,
     root_folder_path: Arc<RwLock<Option<PathBuf>>>,
@@ -274,7 +274,7 @@ impl CssVariableLsp {
             manager: Arc::new(CssVariableManager::new(config)),
             document_map: Arc::new(RwLock::new(HashMap::new())),
             runtime_config,
-            document_lifecycle_lock: Arc::new(Mutex::new(())),
+            document_lifecycle_lock: Arc::new(RwLock::new(())),
             workspace_folder_paths: Arc::new(RwLock::new(Vec::new())),
             root_folder_path: Arc::new(RwLock::new(None)),
             root_folder_uri: Arc::new(RwLock::new(None)),
@@ -720,6 +720,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn initialized(&self, _params: ls_types::InitializedParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         self.client
             .log_message(
                 MessageType::INFO,
@@ -749,7 +750,7 @@ impl LanguageServer for CssVariableLsp {
         if let Some(folders) = self.workspace_folders_for_scan().await {
             self.update_workspace_folder_paths(Some(folders.clone()))
                 .await;
-            self.scan_workspace_folders(folders).await;
+            self.scan_workspace_folders_locked(folders).await;
         }
     }
 
@@ -758,6 +759,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         // We accept either:
         // - a flat object matching Config fields
         // - or a namespaced object { "cssVariableLsp": { ... } }
@@ -808,7 +810,7 @@ impl LanguageServer for CssVariableLsp {
             || config.eager_js != prev_eager_js
         {
             if let Some(folders) = self.workspace_folders_for_scan().await {
-                self.scan_workspace_folders(folders).await;
+                self.scan_workspace_folders_locked(folders).await;
             }
         }
 
@@ -817,7 +819,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         let version = i64::from(params.text_document.version);
         let uri = params.text_document.uri;
         let text = params.text_document.text;
@@ -858,7 +860,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         let version = i64::from(params.text_document.version);
         let uri = params.text_document.uri;
         let changes = params.content_changes;
@@ -915,7 +917,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         let uri = params.text_document.uri;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
@@ -967,7 +969,7 @@ impl LanguageServer for CssVariableLsp {
         // Serialize disk-backed updates with didOpen/didChange/didClose. This
         // keeps a rapid save or rename sequence from racing an editor update
         // and leaving the indexes at different document versions.
-        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         for change in params.changes {
             match change.typ {
                 FileChangeType::DELETED if !self.is_document_open(&change.uri).await => {
@@ -986,7 +988,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_create_files(&self, params: CreateFilesParams) {
-        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         for file in params.files {
             let uri = match Uri::from_str(&file.uri) {
                 Ok(uri) => uri,
@@ -1000,7 +1002,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_rename_files(&self, params: RenameFilesParams) {
-        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         for file in params.files {
             let old_uri = match Uri::from_str(&file.old_uri) {
                 Ok(uri) => uri,
@@ -1025,7 +1027,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_delete_files(&self, params: DeleteFilesParams) {
-        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         for file in params.files {
             let uri = match Uri::from_str(&file.uri) {
                 Ok(uri) => uri,
@@ -1039,6 +1041,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         let mut current_paths = {
             let paths = self.workspace_folder_paths.read().await;
             paths.clone()
@@ -1095,7 +1098,7 @@ impl LanguageServer for CssVariableLsp {
         if added_folders.is_empty() {
             self.validate_all_open_documents().await;
         } else {
-            self.scan_workspace_folders(added_folders).await;
+            self.scan_workspace_folders_locked(added_folders).await;
         }
     }
 
@@ -1103,6 +1106,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: CompletionParams,
     ) -> tower_lsp_server::jsonrpc::Result<Option<CompletionResponse>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
@@ -1237,6 +1241,7 @@ impl LanguageServer for CssVariableLsp {
     }
 
     async fn hover(&self, params: HoverParams) -> tower_lsp_server::jsonrpc::Result<Option<Hover>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
@@ -1402,6 +1407,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> tower_lsp_server::jsonrpc::Result<Option<GotoDefinitionResponse>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
@@ -1435,6 +1441,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: CodeActionParams,
     ) -> tower_lsp_server::jsonrpc::Result<Option<CodeActionResponse>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document.uri;
         let text = {
             let docs = self.document_map.read().await;
@@ -1478,6 +1485,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: ReferenceParams,
     ) -> tower_lsp_server::jsonrpc::Result<Option<Vec<Location>>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
@@ -1511,6 +1519,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: DocumentColorParams,
     ) -> tower_lsp_server::jsonrpc::Result<Vec<ColorInformation>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let config = self.manager.get_config().await;
         if !config.enable_color_provider {
             return Ok(Vec::new());
@@ -1601,6 +1610,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: TextDocumentPositionParams,
     ) -> tower_lsp_server::jsonrpc::Result<Option<PrepareRenameResponse>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document.uri;
         let position = params.position;
 
@@ -1625,6 +1635,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: RenameParams,
     ) -> tower_lsp_server::jsonrpc::Result<Option<WorkspaceEdit>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
         let new_name = params.new_name;
@@ -1677,6 +1688,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: DocumentSymbolParams,
     ) -> tower_lsp_server::jsonrpc::Result<Option<DocumentSymbolResponse>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let vars = self
             .manager
             .get_document_variables(&params.text_document.uri)
@@ -1706,6 +1718,7 @@ impl LanguageServer for CssVariableLsp {
         &self,
         params: WorkspaceSymbolParams,
     ) -> tower_lsp_server::jsonrpc::Result<Option<WorkspaceSymbolResponse>> {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let query = params.query.to_lowercase();
         let vars = self.manager.get_all_variables().await;
         let mut symbols = Vec::new();
@@ -1746,6 +1759,13 @@ impl CssVariableLsp {
 
     /// Scan workspace folders for CSS and HTML files
     pub async fn scan_workspace_folders(&self, folders: Vec<WorkspaceFolder>) {
+        let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
+        self.scan_workspace_folders_locked(folders).await;
+    }
+
+    // Callers that already hold the lifecycle write guard use this helper so
+    // scans, open-buffer restoration, and dependent queries share one update.
+    async fn scan_workspace_folders_locked(&self, folders: Vec<WorkspaceFolder>) {
         let folder_uris: Vec<Uri> = folders.iter().map(|f| f.uri.clone()).collect();
 
         self.client
@@ -1804,7 +1824,6 @@ impl CssVariableLsp {
 
         // A disk scan can encounter an open document. Restore its in-memory text so
         // unsaved editor contents remain authoritative after any initial or repeat scan.
-        let _document_lifecycle_guard = self.document_lifecycle_lock.lock().await;
         let open_documents = {
             let documents = self.document_map.read().await;
             let languages = self.document_language_map.read().await;
@@ -2061,7 +2080,167 @@ fn is_var_function_context_slice(before_cursor: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use std::str::FromStr;
+
+    #[tokio::test]
+    async fn queries_wait_for_open_document_analysis() {
+        let runtime_config =
+            crate::runtime_config::build_runtime_config_with_env(&[], &HashMap::new());
+        let (service, mut socket) = tower_lsp_server::LspService::new(|client| {
+            CssVariableLsp::new(client, runtime_config.clone())
+        });
+        let drain = tokio::spawn(async move { while socket.next().await.is_some() {} });
+        let backend = service.inner();
+        let definitions_uri = Uri::from_str("file:///outside-workspace/tokens.css").unwrap();
+        let consumer_uri = Uri::from_str("file:///outside-workspace/consumer.css").unwrap();
+        let definitions = ":root { --fallback: #ff0000; }";
+        let consumer = ".button { color: var(--missing, var(--fallback, red)); }";
+        let open = |uri: Uri, text: &str| DidOpenTextDocumentParams {
+            text_document: ls_types::TextDocumentItem {
+                uri,
+                language_id: "css".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        };
+        backend
+            .did_open(open(definitions_uri.clone(), definitions))
+            .await;
+
+        // Pause didOpen after it publishes the text but before parsing it.
+        // This recreates the incomplete-index window without sleeps or a
+        // dependency on executor timing.
+        let languages = backend.document_language_map.write().await;
+        let opening = backend.did_open(open(consumer_uri.clone(), consumer));
+        tokio::pin!(opening);
+        assert!(futures::poll!(&mut opening).is_pending());
+        assert!(backend
+            .document_map
+            .read()
+            .await
+            .contains_key(&consumer_uri));
+
+        let position =
+            crate::types::offset_to_position(consumer, consumer.find("--fallback").unwrap() + 2);
+        let renaming = backend.rename(RenameParams {
+            text_document_position: TextDocumentPositionParams::new(
+                ls_types::TextDocumentIdentifier::new(consumer_uri.clone()),
+                position,
+            ),
+            new_name: "--renamed".to_string(),
+            work_done_progress_params: Default::default(),
+        });
+        let colors = backend.document_color(DocumentColorParams {
+            text_document: ls_types::TextDocumentIdentifier::new(consumer_uri.clone()),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+        tokio::pin!(renaming, colors);
+        assert!(futures::poll!(&mut renaming).is_pending());
+        assert!(futures::poll!(&mut colors).is_pending());
+
+        // Cancelling one queued query must not block the other readers or
+        // leave the update guard held.
+        let mut cancelled = Box::pin(backend.document_color(DocumentColorParams {
+            text_document: ls_types::TextDocumentIdentifier::new(consumer_uri.clone()),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }));
+        assert!(futures::poll!(&mut cancelled).is_pending());
+        drop(cancelled);
+
+        drop(languages);
+        let (_, edit, colors) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(opening, renaming, colors)
+        })
+        .await
+        .expect("queries should finish after didOpen, including after cancellation");
+        let changes = edit.unwrap().unwrap().changes.unwrap();
+        assert_eq!(changes.len(), 2);
+        for (uri, text) in [(&definitions_uri, definitions), (&consumer_uri, consumer)] {
+            assert_eq!(changes[uri].len(), 1);
+            let edit = &changes[uri][0];
+            let start = text.find("--fallback").unwrap();
+            assert_eq!(edit.new_text, "--renamed");
+            assert_eq!(
+                edit.range,
+                Range::new(
+                    crate::types::offset_to_position(text, start),
+                    crate::types::offset_to_position(text, start + "--fallback".len()),
+                )
+            );
+        }
+        let colors = colors.unwrap();
+        assert_eq!(colors.len(), 1);
+        assert_eq!(colors[0].color.red, 1.0);
+        assert_eq!(colors[0].color.green, 0.0);
+        assert_eq!(colors[0].color.blue, 0.0);
+        drain.abort();
+    }
+
+    #[tokio::test]
+    async fn queries_wait_for_workspace_scan_and_open_buffer_restoration() {
+        let runtime_config =
+            crate::runtime_config::build_runtime_config_with_env(&[], &HashMap::new());
+        let (service, mut socket) = tower_lsp_server::LspService::new(|client| {
+            CssVariableLsp::new(client, runtime_config.clone())
+        });
+        let drain = tokio::spawn(async move { while socket.next().await.is_some() {} });
+        let backend = service.inner();
+        let root = std::env::temp_dir().join(format!(
+            "css-lsp-query-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tokens.css");
+        std::fs::write(&path, ":root { --disk: red; }").unwrap();
+        let uri = Uri::from_file_path(&path).unwrap();
+        backend
+            .did_open(DidOpenTextDocumentParams {
+                text_document: ls_types::TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "css".to_string(),
+                    version: 1,
+                    text: ":root { --unsaved: blue; }".to_string(),
+                },
+            })
+            .await;
+
+        // Queue a scan before the query while an earlier reader is active.
+        // The query must wait for the scan's disk pass AND restoration of the
+        // authoritative unsaved buffer, then see only --unsaved.
+        let earlier_query = backend.document_lifecycle_lock.read().await;
+        let scanning = backend.scan_workspace_folders(vec![WorkspaceFolder {
+            uri: Uri::from_file_path(&root).unwrap(),
+            name: "scan".to_string(),
+        }]);
+        let query = backend.document_symbol(DocumentSymbolParams {
+            text_document: ls_types::TextDocumentIdentifier::new(uri),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+        tokio::pin!(scanning, query);
+        assert!(futures::poll!(&mut scanning).is_pending());
+        assert!(futures::poll!(&mut query).is_pending());
+        drop(earlier_query);
+        let (_, symbols) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(scanning, query)
+        })
+        .await
+        .expect("queries should finish after scan and open-buffer restoration");
+        let Some(DocumentSymbolResponse::Nested(symbols)) = symbols.unwrap() else {
+            panic!("expected document symbols");
+        };
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "--unsaved");
+        std::fs::remove_dir_all(root).unwrap();
+        drain.abort();
+    }
 
     fn test_word_extraction(css: &str, cursor_pos: usize) -> Option<String> {
         use ls_types::Position;
