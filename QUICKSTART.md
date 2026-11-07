@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Rust 1.70+ (2021 edition)
+- Rust 1.97+ (the server uses edition 2021; its Oxc dependencies require Rust 1.97)
 - Cargo
 
 ## Build

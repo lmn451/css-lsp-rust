@@ -1,7 +1,7 @@
 # Third-Party Notices
 
 This project includes software from the Oxc project through the following Rust
-crates at version 0.144.0: `oxc_allocator`, `oxc_ast`, `oxc_ast_visit`,
+crates at version 0.157.0: `oxc_allocator`, `oxc_ast`, `oxc_ast_visit`,
 `oxc_parser`, and `oxc_span`.
 
 ## Oxc

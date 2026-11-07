@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Parse OKLab, OKLCH, relative colors, and sRGB/XYZ `color()` values, including full literal-color ranges in compound CSS values.
+
+### Changed
+- Require Rust 1.97 to build from source after upgrading the coordinated Oxc crates to 0.157.0.
+- Update direct dependencies to current stable releases and align the test service with Tower 0.5.
+
+### Fixed
+- Upgrade Tokio past the AsyncFd safety advisory and remove the old rand/phf build dependency chain.
+- Preserve configuration recovery and exact JavaScript property-name comparisons with Oxc's updated parser and string APIs.
+
 ## [0.3.8] - 2026-11-02
 
 ### Added

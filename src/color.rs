@@ -95,21 +95,20 @@ fn parse_csscolorparser(value: &str) -> Option<Color> {
 
     let parsed: CssColor = value.parse().ok()?;
 
-    // csscolorparser accepts any value that `f64::parse` accepts for numeric
-    // channels, including `NaN` and infinities. It also leaves HWB alpha
-    // outside the nominal range untouched. Never let either case cross the
-    // LSP boundary: JSON has no representation for non-finite numbers and
-    // LSP Color channels are defined in the inclusive [0, 1] range.
+    // Keep this check before clamping: csscolorparser 0.9's Color::clamp
+    // converts NaN to zero, which would hide invalid channels. Converted
+    // colors may also lie outside the sRGB gamut. LSP requires finite
+    // channels in the inclusive [0, 1] range.
     let channels = [parsed.r, parsed.g, parsed.b, parsed.a];
     if channels.iter().any(|channel| !channel.is_finite()) {
         return None;
     }
 
     Some(Color {
-        red: parsed.r.clamp(0.0, 1.0) as f32,
-        green: parsed.g.clamp(0.0, 1.0) as f32,
-        blue: parsed.b.clamp(0.0, 1.0) as f32,
-        alpha: parsed.a.clamp(0.0, 1.0) as f32,
+        red: parsed.r.clamp(0.0, 1.0),
+        green: parsed.g.clamp(0.0, 1.0),
+        blue: parsed.b.clamp(0.0, 1.0),
+        alpha: parsed.a.clamp(0.0, 1.0),
     })
 }
 
@@ -421,6 +420,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_modern_colors_and_relative_colors() {
+        for value in [
+            "oklab(0.627955 0.224863 0.125846)",
+            "oklch(0.627955 0.257683 29.2339)",
+            "color(srgb 1 0 0)",
+            "color(srgb-linear 1 0 0)",
+            "color(xyz-d65 0.412391 0.212639 0.019331)",
+            "color(xyz-d50 0.436066 0.222493 0.013924)",
+            "rgb(from red r g b)",
+            "color(from red srgb r g b)",
+        ] {
+            let color = parse_color(value).unwrap_or_else(|| panic!("{value}"));
+            assert!((color.red - 1.0).abs() < 0.002, "{value}: {color:?}");
+            assert!(color.green < 0.002, "{value}: {color:?}");
+            assert!(color.blue < 0.002, "{value}: {color:?}");
+            assert!(approx_eq(color.alpha, 1.0), "{value}");
+        }
+
+        let color = parse_color("color(srgb 2 -1 0.5 / 2)").unwrap();
+        assert_eq!(
+            color,
+            Color {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.5,
+                alpha: 1.0
+            }
+        );
+    }
+
+    #[test]
     fn parse_color_rejects_nonfinite_channels_and_clamps_alpha() {
         for value in [
             "#gggggg",
@@ -434,6 +464,11 @@ mod tests {
             "hsl(1e999TURN, 50%, 50%)",
             "hwb(0 0% 0% / NaN)",
             "hwb(0 0% 0% / InFiNiTy)",
+            "color(srgb NaN 0 0)",
+            "color(srgb 1e40 0 0)",
+            "oklch(inf 0 0)",
+            "#0+0",
+            "rgb(from red calc(r / 0) g b)",
         ] {
             assert!(parse_color(value).is_none(), "{value}");
         }
