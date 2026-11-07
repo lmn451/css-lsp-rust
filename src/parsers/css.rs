@@ -889,7 +889,19 @@ fn extract_literal_colors_from_value(
 
             if j < bytes.len() && bytes[j] == b'(' {
                 let ident = value[start..end].to_ascii_lowercase();
-                if matches!(ident.as_str(), "rgb" | "rgba" | "hsl" | "hsla") {
+                if matches!(
+                    ident.as_str(),
+                    "rgb"
+                        | "rgba"
+                        | "hsl"
+                        | "hsla"
+                        | "hwb"
+                        | "lab"
+                        | "lch"
+                        | "oklab"
+                        | "oklch"
+                        | "color"
+                ) {
                     if let Some(func_end) = find_balanced_call_end(value, j) {
                         let ends_at_token_boundary =
                             !is_css_identifier_continuation(bytes, func_end);
@@ -1195,6 +1207,37 @@ mod tests {
         assert!(literals.contains("red"));
         assert!(literals.contains("rgb(255 255 255)"));
         assert!(literals.contains("rgba(0, 0, 0, 0.5)"));
+    }
+
+    #[tokio::test]
+    async fn parse_css_document_extracts_complete_modern_color_calls() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = Uri::from_str("file:///modern.css").unwrap();
+        let text = r#"
+            .button {
+                background: linear-gradient(oklch(60% 0.2 30), color(srgb 0 0 1));
+                color: rgb(from red calc(r * 0.5) g b);
+                border-color: hwb(0 0% 0%);
+                outline-color: oklab(0.6 0.1 0.1);
+                box-shadow: 0 0 4px lab(50% 20 30), 0 0 2px lch(50% 30 40);
+                fill: var(--fill, oklch(60% 0.2 30));
+                content: "color(srgb 1 0 0)";
+            }
+        "#;
+        parse_css_document(text, &uri, &manager).await.unwrap();
+        let occurrences = manager.get_document_literal_colors(&uri).await;
+        assert_eq!(occurrences.len(), 7, "{occurrences:?}");
+        for occurrence in &occurrences {
+            assert_eq!(
+                occurrence.range.start,
+                offset_to_position(text, text.find(&occurrence.text).unwrap()),
+            );
+        }
+        let literals: HashSet<_> = occurrences.into_iter().map(|occ| occ.text).collect();
+        assert!(literals.contains("oklch(60% 0.2 30)"));
+        assert!(literals.contains("color(srgb 0 0 1)"));
+        assert!(literals.contains("rgb(from red calc(r * 0.5) g b)"));
+        assert!(!literals.contains("red"));
     }
 
     #[tokio::test]

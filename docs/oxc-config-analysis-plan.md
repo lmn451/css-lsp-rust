@@ -234,12 +234,14 @@ than the umbrella crate:
 - `oxc_span`
 - `oxc_ast_visit`
 
-All Oxc crates are pinned to exactly `0.144.0` because the project publishes
+All Oxc crates are pinned to exactly `0.157.0` because the project publishes
 frequent coordinated releases.
 
-At implementation time, `oxc_parser 0.144.0` declares Rust 1.95.0 and uses
-Rust edition 2024 internally. The project now declares Rust 1.95 as its MSRV and
-checks all targets and features with that toolchain in CI.
+The initial implementation used `oxc_parser 0.144.0` with Rust 1.95.0. The
+dependency migration now uses Oxc 0.157.0, which requires Rust 1.97.0 and uses
+Rust edition 2024 internally. The project declares Rust 1.97 as its MSRV and
+checks all targets and features with that toolchain in CI. See
+[dependency migrations](dependency-migrations.md) for the upstream changes.
 
 ## Phase 0: dependency and feasibility spike
 
@@ -534,7 +536,7 @@ Avoid turning the server into a general-purpose JavaScript indexer. Every extrac
 | Ecosystem maturity | Newer, rapidly evolving, frequent coordinated releases | Older, broad adoption, extensive production history | Oxc requires exact version pinning and upgrade discipline |
 | Vite ecosystem direction | Oxc is part of VoidZero; Rolldown uses Oxc and Vite uses Rolldown for config bundling by default | SWC remains widely used across JS tooling | Oxc offers strategic alignment, not functional necessity |
 | License | MIT | Apache-2.0 | Both are compatible; neither decides the choice |
-| Current latest metadata | `oxc_parser 0.144.0`, Rust 1.95 | `swc_ecma_parser 44.0.0`, MSRV not declared in crate metadata | Oxc forces an explicit MSRV decision |
+| Initial evaluation metadata | `oxc_parser 0.144.0`, Rust 1.95 | `swc_ecma_parser 44.0.0`, MSRV not declared in crate metadata | Oxc forces an explicit MSRV decision |
 
 ### Why Oxc was chosen before SWC
 
@@ -630,7 +632,7 @@ Completed gates:
 
 ## Validation evidence
 
-Final branch evidence on macOS aarch64:
+Initial implementation evidence on macOS aarch64, before the dependency migration:
 
 - stable and Rust 1.95: formatting, strict Clippy, all targets, all features,
   release build, and the complete test suite pass;
@@ -657,7 +659,7 @@ level objectives. They establish the baseline to compare future Oxc upgrades.
 
 ## Resolved decisions
 
-1. The MSRV is Rust 1.95 and is enforced in CI.
+1. The MSRV is Rust 1.97 after the Oxc 0.157 migration and is enforced in CI.
 2. The measured 14.7% macOS aarch64 binary increase is accepted.
 3. Generated provenance stays internal and is rendered from exact config URIs;
    the public `CssVariable` struct is unchanged.

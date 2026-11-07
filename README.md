@@ -55,8 +55,9 @@ dramatically easier to embed in editor extensions and CI sandboxes.
 ### Core language features
 
 - **CSS parsing** of variable definitions, `var()` usages, and literal color
-  occurrences (hex, `rgb()`, `rgba()`, `hsl()`, `hsla()`, named colors, plus
-  chain resolution through `var()` aliases).
+  occurrences (hex, named colors, RGB, HSL, HWB, Lab, LCH, OKLab, OKLCH,
+  relative colors, and `color()` in sRGB or XYZ), plus chain resolution
+  through `var()` aliases.
 - **HTML parsing** of `<style>` blocks, `class="…"` / `classname="…"`
   attributes, and inline `style="…"` attributes with full DOM tree tracking.
 - **JS / TS / JSX / TSX** support via CSS-in-JS extraction from string
@@ -128,7 +129,7 @@ independently of `--lookup-files` and statically analyzed.
 
 ```bash
 # Install from crates.io
-# Building from source requires Rust 1.95 or newer.
+# Building from source requires Rust 1.97 or newer.
 cargo install css-variable-lsp
 
 # …or download a release binary for your platform

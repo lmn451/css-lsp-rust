@@ -213,7 +213,7 @@ fn extract_config_variables(
     let parsed = Parser::new(&allocator, text, source_type).parse();
 
     let diagnostic_count = parsed.diagnostics.len();
-    if diagnostic_count > 0 && (parsed.panicked || parsed.program.body.is_empty()) {
+    if diagnostic_count > 0 && (parsed.fatal_error || parsed.program.body.is_empty()) {
         tracing::debug!(
             uri = ?uri,
             errors = diagnostic_count,
@@ -642,10 +642,11 @@ impl AssignedBindingCollector {
     }
 
     fn record_member_assignment(&mut self, member: &MemberExpression<'_>) {
-        if self
-            .tracked_member_property
-            .is_some_and(|property| member.static_property_name() != Some(property))
-        {
+        if self.tracked_member_property.is_some_and(|property| {
+            !member
+                .static_property_name()
+                .is_some_and(|name| name == property)
+        }) {
             return;
         }
         self.record_member_root(member.object());
@@ -667,13 +668,15 @@ impl AssignedBindingCollector {
         if let Some(member) = callee.as_member_expression() {
             if member
                 .static_property_name()
-                .is_some_and(|name| MUTATORS.contains(&name))
+                .is_some_and(|name| MUTATORS.iter().any(|mutator| name == *mutator))
             {
                 self.record_member_root(member.object());
                 return;
             }
 
-            if member.static_property_name() == Some("assign")
+            if member
+                .static_property_name()
+                .is_some_and(|name| name == "assign")
                 && matches!(
                     unwrap_expression(member.object()),
                     Expression::Identifier(identifier) if identifier.name.as_str() == "Object"
@@ -1266,7 +1269,9 @@ impl<'s> DefineConfigImportCollector<'s> {
         };
 
         if let Some(member) = init.as_member_expression() {
-            if member.static_property_name() == Some("defineConfig")
+            if member
+                .static_property_name()
+                .is_some_and(|name| name == "defineConfig")
                 && is_require_expression(member.object(), self.module_source)
             {
                 if let BindingPattern::BindingIdentifier(local) = &declarator.id {
@@ -1304,9 +1309,7 @@ impl<'s> DefineConfigImportCollector<'s> {
 
 impl<'a> Visit<'a> for DefineConfigImportCollector<'_> {
     fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
-        if declaration.import_kind.is_type()
-            || declaration.source.value.as_str() != self.module_source
-        {
+        if declaration.import_kind.is_type() || declaration.source.value != self.module_source {
             return;
         }
         let Some(specifiers) = declaration.specifiers.as_ref() else {
@@ -1714,7 +1717,7 @@ fn is_require_expression(expression: &Expression<'_>, module_source: &str) -> bo
     call.is_require_call()
         && matches!(
             call.arguments.first(),
-            Some(Argument::StringLiteral(source)) if source.value.as_str() == module_source
+            Some(Argument::StringLiteral(source)) if source.value == module_source
         )
 }
 
@@ -1735,7 +1738,10 @@ fn is_define_config_callee(
     let Some(member) = callee.as_member_expression() else {
         return false;
     };
-    if member.static_property_name() != Some("defineConfig") {
+    if !member
+        .static_property_name()
+        .is_some_and(|name| name == "defineConfig")
+    {
         return false;
     }
     matches!(
@@ -1800,7 +1806,7 @@ fn literal_static_string_span(expression: &Expression<'_>, source: &str) -> Opti
         Expression::StringLiteral(literal) => {
             let span = literal_content_span(literal.span);
             let raw = source.get(span.start as usize..span.end as usize)?;
-            (raw == literal.value.as_str()).then_some(span)
+            (literal.value == raw).then_some(span)
         }
         Expression::TemplateLiteral(template)
             if template.expressions.is_empty() && template.quasis.len() == 1 =>
@@ -2944,6 +2950,53 @@ mod tests {
         .unwrap();
 
         assert_eq!(manager.get_variables("--font-satisfies").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn static_names_preserve_escaped_strings_and_reject_lone_surrogates() {
+        for name in ["astro.config.cjs", "astro.config.cts"] {
+            let manager = CssVariableManager::new(Config::default());
+            let uri = test_uri(name);
+            parse_config_document(
+                r#"
+                    const configure = require("astro/config")["define\u0043onfig"];
+                    module.exports = configure({
+                        "fonts": [{ "css\u0056ariable": "--font-escaped-key" }],
+                        "fonts\uD800": [{ cssVariable: "--font-invalid-key" }],
+                    });
+                "#,
+                &uri,
+                &manager,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                manager.get_variables("--font-escaped-key").await.len(),
+                1,
+                "{name}"
+            );
+            assert!(
+                manager.get_variables("--font-invalid-key").await.is_empty(),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fatal_parse_preserves_the_last_valid_analysis() {
+        let manager = CssVariableManager::new(Config::default());
+        let uri = test_uri("astro.config.ts");
+        parse_config_document(
+            r#"export default { fonts: [{ cssVariable: "--font-before-fatal" }] };"#,
+            &uri,
+            &manager,
+        )
+        .await
+        .unwrap();
+        parse_config_document("export default {", &uri, &manager)
+            .await
+            .unwrap();
+        assert_eq!(manager.get_variables("--font-before-fatal").await.len(), 1);
     }
 
     #[tokio::test]

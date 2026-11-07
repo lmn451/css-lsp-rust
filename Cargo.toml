@@ -2,7 +2,7 @@
 name = "css-variable-lsp"
 version = "0.3.8"
 edition = "2021"
-rust-version = "1.95"
+rust-version = "1.97"
 authors = ["lmn451"]
 description = "A fast, Rust-based Language Server Protocol implementation for CSS Variables"
 license = "GPL-3.0"
@@ -36,21 +36,21 @@ path = "src/main.rs"
 [dependencies]
 # LSP framework
 tower-lsp-server = "0.23"
-ls-types = "0.0"
+ls-types = "0.0.6"
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 
 # Filesystem and globbing
-globset = "0.4"
-walkdir = "2.4"
+globset = "0.4.21"
+walkdir = "2.5"
 
 # Color parsing
-csscolorparser = "0.6"
+csscolorparser = "0.9"
 
 # Path handling
 pathdiff = "0.2"
@@ -59,13 +59,14 @@ url = "2.5"
 # Logging (optional, for debugging)
 tracing = "0.1"
 tracing-subscriber = "0.3"
-regex = "1.10"
-oxc_allocator = "=0.144.0"
-oxc_ast = "=0.144.0"
-oxc_ast_visit = "=0.144.0"
-oxc_parser = "=0.144.0"
-oxc_span = "=0.144.0"
+regex = "1.13.1"
+# Keep the Oxc parser, AST, visitors, allocator, and spans on the same release.
+oxc_allocator = "=0.157.0"
+oxc_ast = "=0.157.0"
+oxc_ast_visit = "=0.157.0"
+oxc_parser = "=0.157.0"
+oxc_span = "=0.157.0"
 
 [dev-dependencies]
-futures = "0.3"
-tower = { version = "0.4", features = ["util"] }
+futures = "0.3.34"
+tower = { version = "0.5", features = ["util"] }
