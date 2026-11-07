@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Upgrade Tokio past the AsyncFd safety advisory and remove the old rand/phf build dependency chain.
 - Preserve configuration recovery and exact JavaScript property-name comparisons with Oxc's updated parser and string APIs.
+- Wait for document analysis and workspace scans before answering indexed queries, preventing incomplete rename edits and missing resolved colors immediately after opening files.
 
 ## [0.3.8] - 2026-11-02
 

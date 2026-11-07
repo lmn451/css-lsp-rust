@@ -104,16 +104,35 @@ removes rand 0.8.5 and phf 0.11 entirely. The same query of all 156 updated
 registry packages returned no known affected packages. This is a database
 snapshot, not a guarantee about future advisories.
 
+## Query consistency
+
+Document and workspace mutations now hold a lifecycle write guard until their
+index updates and unsaved-buffer restoration finish. Requests that read the
+index hold read guards, so an immediate rename or color query sees complete
+analysis after preceding notifications. Read requests can still run together;
+cancellation drops a queued read without blocking subsequent work. Initialization,
+configuration changes, and workspace-folder changes use the same guard so a
+scan cannot expose an empty or partially rebuilt index.
+
+A deterministic regression pauses `didOpen` after publishing text but before
+parsing it. On the previous implementation, rename completed in that window
+with incomplete references. It now waits and returns both the definition and
+nested fallback edits; the color query resolves the fallback variable. Another
+regression queues a query behind a workspace scan and checks that it sees the
+authoritative unsaved buffer after disk scanning. Neither regression relies
+on sleeps or retries.
+
 ## Validation
 
 Local validation used stable Rust 1.97.1 on macOS aarch64. Formatting,
 `cargo check --locked --all-targets --all-features`, strict Clippy with all
 targets and features, and `cargo build --locked --release` passed. The complete
-`cargo test --locked --all-features` run passed 281 tests: 209 library, 5 binary,
+`cargo test --locked --all-features` run passed 283 tests: 211 library, 5 binary,
 38 diagnostics integration, 16 workflow integration, 4 Issue #16 guards, and
 9 issue proof tests. This includes the new modern-color/range, escaped-name/
 surrogate, and fatal-parse regressions, plus existing JS/TS Unicode and CRLF
-range coverage. The release binary's version and real stdio initialize,
+range coverage, document/query ordering, scan restoration, and queued-query
+cancellation. The release binary's version and real stdio initialize,
 shutdown, and exit were smoke tested.
 
 The asset-name validator passed; generated platform archives were not built.
