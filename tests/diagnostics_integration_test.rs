@@ -1374,6 +1374,97 @@ async fn test_literal_color_diagnostic_and_quick_fixes() {
         .any(|title| title == "Replace with var(--white)"));
 }
 
+async fn literal_color_replacement_edits(
+    service: &mut LspService<CssVariableLsp>,
+    uri: &Uri,
+    diagnostics: Vec<ls_types::Diagnostic>,
+    range: Range,
+) -> Vec<String> {
+    let request = Request::build("textDocument/codeAction")
+        .id(100)
+        .params(serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": range,
+            "context": { "diagnostics": diagnostics }
+        }))
+        .finish();
+    let result = send_request_for_result(service, request).await.unwrap();
+    let actions: CodeActionResponse = serde_json::from_value(result).unwrap();
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            ls_types::CodeActionOrCommand::CodeAction(action) => action.edit,
+            _ => None,
+        })
+        .filter_map(|edit| edit.changes?.remove(uri))
+        .flatten()
+        .filter(|edit| edit.range == range)
+        .map(|edit| edit.new_text)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_literal_color_quick_fix_excludes_transitive_alias_of_edited_variable() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+    let uri = Uri::from_str("file:///cycle.css").unwrap();
+    let text = concat!(
+        ":root {\n",
+        "  --base: #fff;\n",
+        "  --alias: var(--base);\n",
+        "  --indirect: var(--alias);\n",
+        "  --paper: #fff;\n",
+        "  --surface: var(--paper);\n",
+        "}\n",
+    );
+    open_document(&mut service, uri.clone(), "css", text, 1).await;
+    let range = Range::new(
+        ls_types::Position::new(1, 10),
+        ls_types::Position::new(1, 14),
+    );
+    let published = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+    let diagnostics: Vec<_> = published
+        .diagnostics
+        .into_iter()
+        .filter(|diagnostic| diagnostic.range == range)
+        .collect();
+    let mut edits = literal_color_replacement_edits(&mut service, &uri, diagnostics, range).await;
+    edits.sort();
+    assert_eq!(edits, ["var(--paper)", "var(--surface)"]);
+}
+
+#[tokio::test]
+async fn test_literal_color_quick_fix_excludes_edited_name_even_if_representative_is_elsewhere() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+    let theme_uri = Uri::from_str("file:///theme.css").unwrap();
+    let uri = Uri::from_str("file:///card.css").unwrap();
+    open_document(
+        &mut service,
+        theme_uri,
+        "css",
+        "#theme { --accent: #fff; --paper: #fff; }",
+        1,
+    )
+    .await;
+    open_document(
+        &mut service,
+        uri.clone(),
+        "css",
+        ".card { --accent: #fff; }",
+        1,
+    )
+    .await;
+    let range = Range::new(
+        ls_types::Position::new(0, 18),
+        ls_types::Position::new(0, 22),
+    );
+    let published = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+    let edits =
+        literal_color_replacement_edits(&mut service, &uri, published.diagnostics, range).await;
+    assert_eq!(edits, ["var(--paper)"]);
+}
+
 #[tokio::test]
 async fn test_literal_color_completion_returns_exact_matches_only() {
     let (mut service, mut diagnostics_rx) = setup_service().await;

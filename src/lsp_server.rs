@@ -1951,30 +1951,24 @@ async fn validate_document_text_with(
         });
     }
 
-    for occurrence in manager.get_document_literal_colors(uri).await {
-        let all_replacements = manager
-            .get_variables_by_color_key(&occurrence.normalized_color)
-            .await;
-
-        // Filter out replacement variables where this color is in their own value.
-        // This prevents suggesting replacing #ffd166 with --accent-2 when editing
-        // the definition: --accent-2: #ffd166;
-        let replacements: Vec<_> = all_replacements
+    let occurrences = manager.get_document_literal_colors(uri).await;
+    let document_variables = if occurrences.is_empty() {
+        Vec::new()
+    } else {
+        manager.get_document_variables(uri).await
+    };
+    for occurrence in occurrences {
+        // Code actions insert a name, not a reference to a particular declaration.
+        let edited_property = document_variables
             .iter()
-            .filter(|var| {
-                // Keep if the variable is in a different file
-                if !same_document(&var.uri, uri) {
-                    return true;
-                }
-                // Keep if no value_range available (can't determine overlap)
-                let Some(value_range) = &var.value_range else {
-                    return true;
-                };
-                // Filter out if occurrence is within this variable's value range
-                !range_contains(value_range, &occurrence.range)
+            .find(|var| {
+                var.value_range
+                    .is_some_and(|range| range_contains(&range, &occurrence.range))
             })
-            .cloned()
-            .collect();
+            .map(|var| var.name.as_str());
+        let replacements = manager
+            .get_variables_by_color_key_avoiding(&occurrence.normalized_color, edited_property)
+            .await;
 
         if replacements.is_empty() {
             continue;
