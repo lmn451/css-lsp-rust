@@ -1375,6 +1375,22 @@ async fn test_literal_color_diagnostic_and_quick_fixes() {
 }
 
 #[tokio::test]
+async fn test_literal_color_completion_excludes_current_declaration() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Uri::from_str("file:///colors.scss").unwrap();
+    let text = ":root { --accent: #fff; --white: #fff; }";
+    open_document(&mut service, uri.clone(), "scss", text, 1).await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+
+    let completion_uri = Uri::from_str("file:///colors%2Escss").unwrap();
+    let labels = completion_labels(&mut service, completion_uri, position_of(text, "#fff")).await;
+    assert!(!labels.contains(&"--accent".to_string()));
+    assert!(labels.contains(&"--white".to_string()));
+}
+
+#[tokio::test]
 async fn test_literal_color_completion_returns_exact_matches_only() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;
