@@ -41,6 +41,7 @@ use crate::document_kind::{
     apply_config_patch, build_lookup_extension_map, resolve_document_kind, ClientConfigPatch,
     DocumentKind,
 };
+use crate::document_uri::{document_uri_key, same_document};
 use crate::manager::CssVariableManager;
 use crate::parsers::{parse_css_document, parse_html_document, parse_js_document};
 use crate::path_display::{format_uri_for_display, to_normalized_fs_path, PathDisplayOptions};
@@ -430,7 +431,7 @@ impl CssVariableLsp {
             for name in changed_names {
                 if let Some(uris) = index.get(name) {
                     for uri in uris {
-                        if exclude_uri != Some(uri) {
+                        if !exclude_uri.is_some_and(|excluded| same_document(excluded, uri)) {
                             affected_uris.insert(uri.clone());
                         }
                     }
@@ -442,7 +443,7 @@ impl CssVariableLsp {
         if revalidate_color_occurrences {
             let color_uris = self.color_occurrence_uris.read().await;
             for uri in color_uris.iter() {
-                if exclude_uri != Some(uri) {
+                if !exclude_uri.is_some_and(|excluded| same_document(excluded, uri)) {
                     affected_uris.insert(uri.clone());
                 }
             }
@@ -594,9 +595,22 @@ impl CssVariableLsp {
         }
     }
 
+    /// Resolve aliases to the client's open-buffer URI without changing protocol spelling.
+    async fn resolve_document_uri(&self, uri: Uri) -> Uri {
+        let docs = self.document_map.read().await;
+        if docs.contains_key(&uri) {
+            return uri;
+        }
+        let key = document_uri_key(&uri);
+        docs.keys()
+            .find(|open_uri| document_uri_key(open_uri) == key)
+            .cloned()
+            .unwrap_or(uri)
+    }
+
     async fn is_document_open(&self, uri: &Uri) -> bool {
         let docs = self.document_map.read().await;
-        docs.contains_key(uri)
+        docs.contains_key(uri) || docs.keys().any(|open_uri| same_document(open_uri, uri))
     }
 }
 
@@ -822,6 +836,7 @@ impl LanguageServer for CssVariableLsp {
         let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         let version = i64::from(params.text_document.version);
         let uri = params.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let text = params.text_document.text;
         let language_id = params.text_document.language_id;
 
@@ -863,6 +878,7 @@ impl LanguageServer for CssVariableLsp {
         let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         let version = i64::from(params.text_document.version);
         let uri = params.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let changes = params.content_changes;
 
         // Reject stale/duplicate notifications before touching the in-memory text.
@@ -919,6 +935,7 @@ impl LanguageServer for CssVariableLsp {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let _document_lifecycle_guard = self.document_lifecycle_lock.write().await;
         let uri = params.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
 
         let old_names = self.manager.get_document_variable_names(&uri).await;
         let old_colors = self.manager.get_document_resolved_color_keys(&uri).await;
@@ -1073,7 +1090,13 @@ impl LanguageServer for CssVariableLsp {
         }
 
         if !removed_paths.is_empty() {
-            let open_uris: HashSet<Uri> = self.document_map.read().await.keys().cloned().collect();
+            let open_uris: HashSet<Uri> = self
+                .document_map
+                .read()
+                .await
+                .keys()
+                .map(document_uri_key)
+                .collect();
             let stale_uris: HashSet<Uri> = self
                 .manager
                 .get_document_uris()
@@ -1108,6 +1131,7 @@ impl LanguageServer for CssVariableLsp {
     ) -> tower_lsp_server::jsonrpc::Result<Option<CompletionResponse>> {
         let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let position = params.text_document_position.position;
 
         let text = {
@@ -1243,6 +1267,7 @@ impl LanguageServer for CssVariableLsp {
     async fn hover(&self, params: HoverParams) -> tower_lsp_server::jsonrpc::Result<Option<Hover>> {
         let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position_params.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let position = params.text_document_position_params.position;
 
         let text = {
@@ -1270,7 +1295,7 @@ impl LanguageServer for CssVariableLsp {
             None => return Ok(None),
         };
         let hover_usage = usages.iter().find(|usage| {
-            if usage.uri != uri {
+            if !same_document(&usage.uri, &uri) {
                 return false;
             }
             let start = position_to_offset(&text, usage.range.start).unwrap_or(0);
@@ -1409,6 +1434,7 @@ impl LanguageServer for CssVariableLsp {
     ) -> tower_lsp_server::jsonrpc::Result<Option<GotoDefinitionResponse>> {
         let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position_params.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let position = params.text_document_position_params.position;
 
         let text = {
@@ -1443,6 +1469,7 @@ impl LanguageServer for CssVariableLsp {
     ) -> tower_lsp_server::jsonrpc::Result<Option<CodeActionResponse>> {
         let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let text = {
             let docs = self.document_map.read().await;
             docs.get(&uri).cloned()
@@ -1487,6 +1514,7 @@ impl LanguageServer for CssVariableLsp {
     ) -> tower_lsp_server::jsonrpc::Result<Option<Vec<Location>>> {
         let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let position = params.text_document_position.position;
 
         let text = {
@@ -1526,6 +1554,7 @@ impl LanguageServer for CssVariableLsp {
         }
 
         let uri = params.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let text = {
             let docs = self.document_map.read().await;
             docs.get(&uri).cloned()
@@ -1612,6 +1641,7 @@ impl LanguageServer for CssVariableLsp {
     ) -> tower_lsp_server::jsonrpc::Result<Option<PrepareRenameResponse>> {
         let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let position = params.position;
 
         let text = {
@@ -1637,6 +1667,7 @@ impl LanguageServer for CssVariableLsp {
     ) -> tower_lsp_server::jsonrpc::Result<Option<WorkspaceEdit>> {
         let _document_lifecycle_guard = self.document_lifecycle_lock.read().await;
         let uri = params.text_document_position.text_document.uri;
+        let uri = self.resolve_document_uri(uri).await;
         let position = params.text_document_position.position;
         let new_name = params.new_name;
 
@@ -1932,7 +1963,7 @@ async fn validate_document_text_with(
             .iter()
             .filter(|var| {
                 // Keep if the variable is in a different file
-                if var.uri != *uri {
+                if !same_document(&var.uri, uri) {
                     return true;
                 }
                 // Keep if no value_range available (can't determine overlap)
