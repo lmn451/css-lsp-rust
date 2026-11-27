@@ -1499,6 +1499,48 @@ async fn test_literal_color_quick_fix_excludes_edited_name_even_if_representativ
 }
 
 #[tokio::test]
+async fn test_literal_color_completion_excludes_current_declaration() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let uri = Uri::from_str("file:///colors.scss").unwrap();
+    let text = ":root { --accent: #fff; --white: #fff; }";
+    open_document(&mut service, uri.clone(), "scss", text, 1).await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &uri).await;
+
+    let completion_uri = Uri::from_str("file:///colors%2Escss").unwrap();
+    let labels = completion_labels(&mut service, completion_uri, position_of(text, "#fff")).await;
+    assert!(!labels.contains(&"--accent".to_string()));
+    assert!(labels.contains(&"--white".to_string()));
+}
+
+#[tokio::test]
+async fn test_literal_color_completion_excludes_current_variable_name() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let theme_uri = Uri::from_str("file:///theme.scss").unwrap();
+    open_document(
+        &mut service,
+        theme_uri.clone(),
+        "scss",
+        "#theme { --accent: #fff; --white: #fff; }",
+        1,
+    )
+    .await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &theme_uri).await;
+
+    let card_uri = Uri::from_str("file:///card.scss").unwrap();
+    let card_text = ".card { --accent: #fff; }";
+    open_document(&mut service, card_uri.clone(), "scss", card_text, 1).await;
+    let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &card_uri).await;
+
+    let labels = completion_labels(&mut service, card_uri, position_of(card_text, "#fff")).await;
+    assert!(!labels.contains(&"--accent".to_string()));
+    assert!(labels.contains(&"--white".to_string()));
+}
+
+#[tokio::test]
 async fn test_literal_color_completion_returns_exact_matches_only() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;

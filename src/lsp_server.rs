@@ -1170,7 +1170,15 @@ impl LanguageServer for CssVariableLsp {
 
         if !in_var_context {
             if let Some(color_key) = self.literal_color_under_cursor(&uri, position).await {
-                let variables = self.manager.get_variables_by_color_key(&color_key).await;
+                let edited_variable_name = self
+                    .manager
+                    .get_document_variables(&uri)
+                    .await
+                    .into_iter()
+                    .find(|var| range_contains_position(&var.range, position))
+                    .map(|var| var.name);
+                let mut variables = self.manager.get_variables_by_color_key(&color_key).await;
+                variables.retain(|var| edited_variable_name.as_ref() != Some(&var.name));
                 let items = variables
                     .into_iter()
                     .map(|var| {
