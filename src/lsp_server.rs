@@ -265,18 +265,19 @@ pub struct CssVariableLsp {
     color_occurrence_uris: Arc<RwLock<HashSet<Uri>>>,
 }
 
-fn parse_diagnostic_severities(settings: &serde_json::Value) -> HashMap<String, String> {
+fn parse_diagnostic_severities(settings: &serde_json::Value) -> Option<HashMap<String, String>> {
     let section = settings
         .get("cssVariables")
         .or_else(|| settings.get("cssVariableLsp"))
         .unwrap_or(settings);
-    section
-        .get("diagnosticSeverities")
-        .and_then(|value| value.as_object())
-        .into_iter()
-        .flatten()
-        .filter_map(|(code, value)| Some((code.clone(), value.as_str()?.to_owned())))
-        .collect()
+    Some(
+        section
+            .get("diagnosticSeverities")?
+            .as_object()?
+            .iter()
+            .filter_map(|(code, value)| Some((code.clone(), value.as_str()?.to_owned())))
+            .collect(),
+    )
 }
 
 impl CssVariableLsp {
@@ -633,7 +634,8 @@ impl LanguageServer for CssVariableLsp {
             .await;
 
         if let Some(settings) = params.initialization_options.as_ref() {
-            *self.diagnostic_severities.write().await = parse_diagnostic_severities(settings);
+            *self.diagnostic_severities.write().await =
+                parse_diagnostic_severities(settings).unwrap_or_default();
         }
 
         let has_workspace_folders = params
@@ -787,7 +789,7 @@ impl LanguageServer for CssVariableLsp {
         // - a flat object matching Config fields
         // - or a namespaced object { "cssVariableLsp": { ... } }
         let settings = params.settings;
-        *self.diagnostic_severities.write().await = parse_diagnostic_severities(&settings);
+        let overrides = parse_diagnostic_severities(&settings);
         let patch_settings = settings.get("cssVariableLsp").cloned().unwrap_or(settings);
         let patch = serde_json::from_value::<ClientConfigPatch>(patch_settings);
 
@@ -804,6 +806,9 @@ impl LanguageServer for CssVariableLsp {
             }
         };
 
+        if let Some(overrides) = overrides {
+            *self.diagnostic_severities.write().await = overrides;
+        }
         let mut config = self.live_config.read().await.clone();
         let prev_lookup_files = config.lookup_files.clone();
         let prev_ignore_globs = config.ignore_globs.clone();
