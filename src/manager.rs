@@ -309,7 +309,7 @@ impl CssVariableManager {
     /// Resolve a variable name to a normalized color key using cascade ordering and var() chains.
     pub async fn resolve_variable_color_key(&self, name: &str) -> Option<NormalizedColorKey> {
         let vars = self.variables.read().await;
-        resolve_variable_color_key_from_map(name, &vars)
+        resolve_variable_color_key_from_map(name, &vars, None)
     }
 
     /// Get all variables (for completion)
@@ -351,6 +351,15 @@ impl CssVariableManager {
 
     /// Get all variables whose resolved color exactly matches the normalized color key.
     pub async fn get_variables_by_color_key(&self, key: &NormalizedColorKey) -> Vec<CssVariable> {
+        self.get_variables_by_color_key_avoiding(key, None).await
+    }
+
+    /// Look up exact color matches without following a reference to the edited property.
+    pub(crate) async fn get_variables_by_color_key_avoiding(
+        &self,
+        key: &NormalizedColorKey,
+        edited_property: Option<&str>,
+    ) -> Vec<CssVariable> {
         let names = {
             let index = self.color_variables.read().await;
             index.get(key).cloned().unwrap_or_default()
@@ -358,6 +367,12 @@ impl CssVariableManager {
         let vars = self.variables.read().await;
         let mut matches = Vec::new();
         for name in names {
+            if edited_property.is_some()
+                && resolve_variable_color_key_from_map(&name, &vars, edited_property).as_ref()
+                    != Some(key)
+            {
+                continue;
+            }
             if let Some(definitions) = vars.get(&name) {
                 let mut definitions = definitions.clone();
                 sort_by_cascade(&mut definitions);
@@ -376,7 +391,7 @@ impl CssVariableManager {
         let vars = self.variables.read().await;
         names
             .into_iter()
-            .filter_map(|name| resolve_variable_color_key_from_map(&name, &vars))
+            .filter_map(|name| resolve_variable_color_key_from_map(&name, &vars, None))
             .collect()
     }
 
@@ -504,7 +519,7 @@ impl CssVariableManager {
 
         let mut color_variables: HashMap<NormalizedColorKey, HashSet<String>> = HashMap::new();
         for name in snapshot.keys() {
-            if let Some(key) = resolve_variable_color_key_from_map(name, &snapshot) {
+            if let Some(key) = resolve_variable_color_key_from_map(name, &snapshot, None) {
                 color_variables.entry(key).or_default().insert(name.clone());
             }
         }
@@ -556,15 +571,15 @@ fn extract_var_reference(value: &str) -> Option<String> {
 fn resolve_variable_color_key_from_map(
     name: &str,
     variables: &HashMap<String, Vec<CssVariable>>,
+    edited_property: Option<&str>,
 ) -> Option<NormalizedColorKey> {
     let mut seen = HashSet::new();
     let mut current = name.to_string();
 
     loop {
-        if seen.contains(&current) {
+        if edited_property == Some(current.as_str()) || !seen.insert(current.clone()) {
             return None;
         }
-        seen.insert(current.clone());
 
         let mut definitions = variables.get(&current)?.clone();
         if definitions.is_empty() {
