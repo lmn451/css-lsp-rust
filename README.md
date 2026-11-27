@@ -266,13 +266,20 @@ css-variable-lsp --undefined-var-fallback=off
 
 ### Editor configuration
 
-Most clients can pass settings via `workspace/didChangeConfiguration`.
+Most clients can pass settings via `workspace/didChangeConfiguration`. The optional
+`diagnosticSeverities` object maps full diagnostic codes to `error`, `warning`,
+`info`, `hint`, or `off`; absent or invalid values preserve default behavior.
+Changes revalidate open documents so cleared diagnostics are published.
 The server accepts the same camelCase keys, either flat or namespaced
 under `cssVariableLsp`:
 
 ```jsonc
 {
   "cssVariableLsp": {
+    "diagnosticSeverities": {
+      "css-variable-lsp.undefined-variable": "warning",
+      "css-variable-lsp.literal-color-replaceable": "off"
+    },
     "lookupFiles":         ["**/*.css", "**/*.scss"],
     "ignoreGlobs":         ["**/node_modules/**", "**/dist/**"],
     "enableColorProvider": true,
