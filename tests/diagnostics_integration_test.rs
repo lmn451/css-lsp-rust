@@ -1304,6 +1304,39 @@ async fn test_save_notifications_keep_server_responsive() {
 }
 
 #[tokio::test]
+async fn test_literal_color_diagnostics_refresh_when_matching_variable_is_opened() {
+    let (mut service, mut diagnostics_rx) = setup_service().await;
+    initialize(&mut service).await;
+
+    let consumer_uri = Uri::from_str("file:///color-consumer.scss").unwrap();
+    let variables_uri = Uri::from_str("file:///color-variables.scss").unwrap();
+    open_document(
+        &mut service,
+        consumer_uri.clone(),
+        "scss",
+        ".card { color: #fff; }",
+        1,
+    )
+    .await;
+
+    let initial = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
+    assert!(initial.diagnostics.is_empty());
+
+    open_document(
+        &mut service,
+        variables_uri,
+        "scss",
+        ":root { --paper: #fff; }",
+        1,
+    )
+    .await;
+
+    let refreshed = next_publish_diagnostics_for(&mut diagnostics_rx, &consumer_uri).await;
+    assert_eq!(refreshed.diagnostics.len(), 1);
+    assert!(refreshed.diagnostics[0].message.contains("--paper"));
+}
+
+#[tokio::test]
 async fn test_literal_color_diagnostic_and_quick_fixes() {
     let (mut service, mut diagnostics_rx) = setup_service().await;
     initialize(&mut service).await;

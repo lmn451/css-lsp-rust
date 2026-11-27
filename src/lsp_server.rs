@@ -1976,12 +1976,11 @@ async fn validate_document_text_with(
             .cloned()
             .collect();
 
+        // Track literal occurrences even when no matching variable exists yet.
+        has_literal_colors = true;
         if replacements.is_empty() {
             continue;
         }
-
-        // Track that this document has literal color occurrences
-        has_literal_colors = true;
 
         let replacement_data: Vec<_> = replacements
             .iter()
