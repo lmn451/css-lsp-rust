@@ -7,6 +7,7 @@ pub mod color;
 pub mod completion_context;
 pub mod config_analysis;
 pub mod document_kind;
+mod document_uri;
 pub mod dom_tree;
 pub mod flags;
 pub mod lsp_server;

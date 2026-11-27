@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::color::{color_from_key, normalize_color, parse_color, NormalizedColorKey};
+use crate::document_uri::{document_uri_key, same_document};
 use crate::dom_tree::DomTree;
 use crate::specificity::sort_by_cascade;
 use crate::types::{Config, CssVariable, CssVariableUsage, LiteralColorOccurrence};
@@ -58,6 +59,7 @@ impl CssVariableManager {
     /// Returning `false` for equal or older versions lets LSP notification handlers
     /// discard duplicate and stale changes before mutating their text snapshots.
     pub async fn accept_document_version(&self, uri: &Uri, version: i64) -> bool {
+        let uri = &document_uri_key(uri);
         let mut versions = self.document_versions.write().await;
         if versions.get(uri).is_some_and(|current| version <= *current) {
             return false;
@@ -68,12 +70,14 @@ impl CssVariableManager {
 
     /// Forget the version associated with a document that is no longer open.
     pub async fn clear_document_version(&self, uri: &Uri) {
+        let uri = &document_uri_key(uri);
         let mut versions = self.document_versions.write().await;
         versions.remove(uri);
     }
 
     /// Return the latest accepted version for an open document.
     pub async fn get_document_version(&self, uri: &Uri) -> Option<i64> {
+        let uri = &document_uri_key(uri);
         let versions = self.document_versions.read().await;
         versions.get(uri).copied()
     }
@@ -94,7 +98,7 @@ impl CssVariableManager {
 
         let new_documents: HashSet<_> = variables
             .iter()
-            .map(|variable| variable.uri.clone())
+            .map(|variable| document_uri_key(&variable.uri))
             .filter(|uri| !tracked.contains(uri))
             .collect();
         if max_documents > 0 && tracked.len() + new_documents.len() > max_documents {
@@ -121,7 +125,11 @@ impl CssVariableManager {
         uri: &Uri,
         variables: Vec<CssVariable>,
     ) -> Result<(), String> {
-        if variables.iter().any(|variable| &variable.uri != uri) {
+        let uri = &document_uri_key(uri);
+        if variables
+            .iter()
+            .any(|variable| !same_document(&variable.uri, uri))
+        {
             return Err("Replacement variables must belong to the target document".to_string());
         }
 
@@ -136,7 +144,7 @@ impl CssVariableManager {
 
         let mut vars = self.variables.write().await;
         for definitions in vars.values_mut() {
-            definitions.retain(|variable| &variable.uri != uri);
+            definitions.retain(|variable| !same_document(&variable.uri, uri));
         }
         vars.retain(|_, definitions| !definitions.is_empty());
 
@@ -177,6 +185,7 @@ impl CssVariableManager {
         variables: Vec<CssVariable>,
         usages: Vec<CssVariableUsage>,
     ) -> Result<bool, String> {
+        let uri = &document_uri_key(uri);
         let versions = self.document_versions.write().await;
         if versions.get(uri).copied() != Some(version) {
             return Ok(false);
@@ -193,8 +202,11 @@ impl CssVariableManager {
         variables: Vec<CssVariable>,
         usages: Vec<CssVariableUsage>,
     ) -> Result<(), String> {
-        if variables.iter().any(|variable| &variable.uri != uri)
-            || usages.iter().any(|usage| &usage.uri != uri)
+        let uri = &document_uri_key(uri);
+        if variables
+            .iter()
+            .any(|variable| !same_document(&variable.uri, uri))
+            || usages.iter().any(|usage| !same_document(&usage.uri, uri))
         {
             return Err("Replacement analysis must belong to the target document".to_string());
         }
@@ -214,12 +226,12 @@ impl CssVariableManager {
         let mut stored_usages = self.usages.write().await;
 
         for definitions in vars.values_mut() {
-            definitions.retain(|variable| &variable.uri != uri);
+            definitions.retain(|variable| !same_document(&variable.uri, uri));
         }
         vars.retain(|_, definitions| !definitions.is_empty());
 
         for document_usages in stored_usages.values_mut() {
-            document_usages.retain(|usage| &usage.uri != uri);
+            document_usages.retain(|usage| !same_document(&usage.uri, uri));
         }
         stored_usages.retain(|_, document_usages| !document_usages.is_empty());
 
@@ -246,13 +258,14 @@ impl CssVariableManager {
 
     /// Add a variable usage
     pub async fn add_usage(&self, usage: CssVariableUsage) {
+        let uri = document_uri_key(&usage.uri);
         let max_documents = self.config.read().await.max_documents;
         let mut tracked = self.tracked_documents.write().await;
-        if !tracked.contains(&usage.uri) {
+        if !tracked.contains(&uri) {
             if max_documents > 0 && tracked.len() >= max_documents {
                 return;
             }
-            tracked.insert(usage.uri.clone());
+            tracked.insert(uri);
         }
 
         let mut usages = self.usages.write().await;
@@ -267,7 +280,7 @@ impl CssVariableManager {
         let mut literal_colors = self.literal_colors.write().await;
         let line = occurrence.range.start.line;
         literal_colors
-            .entry(occurrence.uri.clone())
+            .entry(document_uri_key(&occurrence.uri))
             .or_default()
             .entry(line)
             .or_default()
@@ -314,6 +327,7 @@ impl CssVariableManager {
 
     /// Get literal color occurrences in a specific document.
     pub async fn get_document_literal_colors(&self, uri: &Uri) -> Vec<LiteralColorOccurrence> {
+        let uri = &document_uri_key(uri);
         let literal_colors = self.literal_colors.read().await;
         literal_colors
             .get(uri)
@@ -327,6 +341,7 @@ impl CssVariableManager {
         uri: &Uri,
         position: Position,
     ) -> Vec<LiteralColorOccurrence> {
+        let uri = &document_uri_key(uri);
         let literal_colors = self.literal_colors.read().await;
         literal_colors
             .get(uri)
@@ -376,6 +391,8 @@ impl CssVariableManager {
             return;
         }
 
+        let uris: HashSet<_> = uris.iter().map(document_uri_key).collect();
+
         // This order must match add_variable: tracked_documents before variables.
         let mut tracked = self.tracked_documents.write().await;
         let mut vars = self.variables.write().await;
@@ -386,12 +403,12 @@ impl CssVariableManager {
         tracked.retain(|uri| !uris.contains(uri));
 
         for var_list in vars.values_mut() {
-            var_list.retain(|variable| !uris.contains(&variable.uri));
+            var_list.retain(|variable| !uris.contains(&document_uri_key(&variable.uri)));
         }
         vars.retain(|_, var_list| !var_list.is_empty());
 
         for usage_list in usages.values_mut() {
-            usage_list.retain(|usage| !uris.contains(&usage.uri));
+            usage_list.retain(|usage| !uris.contains(&document_uri_key(&usage.uri)));
         }
         usages.retain(|_, usage_list| !usage_list.is_empty());
 
@@ -424,7 +441,7 @@ impl CssVariableManager {
             uris.extend(dom_trees.keys().cloned());
         }
 
-        uris
+        uris.into_iter().map(|uri| document_uri_key(&uri)).collect()
     }
 
     /// Get all variables defined in a specific document
@@ -432,7 +449,7 @@ impl CssVariableManager {
         let vars = self.variables.read().await;
         vars.values()
             .flatten()
-            .filter(|v| &v.uri == uri)
+            .filter(|v| same_document(&v.uri, uri))
             .cloned()
             .collect()
     }
@@ -449,7 +466,7 @@ impl CssVariableManager {
         usages
             .values()
             .flatten()
-            .filter(|u| &u.uri == uri)
+            .filter(|u| same_document(&u.uri, uri))
             .cloned()
             .collect()
     }
@@ -457,11 +474,12 @@ impl CssVariableManager {
     /// Set DOM tree for a document
     pub async fn set_dom_tree(&self, uri: Uri, dom_tree: DomTree) {
         let mut dom_trees = self.dom_trees.write().await;
-        dom_trees.insert(uri, dom_tree);
+        dom_trees.insert(document_uri_key(&uri), dom_tree);
     }
 
     /// Get DOM tree for a document
     pub async fn get_dom_tree(&self, uri: &Uri) -> Option<DomTree> {
+        let uri = &document_uri_key(uri);
         let dom_trees = self.dom_trees.read().await;
         dom_trees.get(uri).cloned()
     }
@@ -609,6 +627,77 @@ mod tests {
             range: Range::new(Position::new(0, 0), Position::new(0, text.len() as u32)),
             usage_context: context.to_string(),
             normalized_color: crate::color::normalized_color_key(color).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn equivalent_file_uris_share_manager_state() {
+        let literal = "file:///C:/workspace/bang!.css";
+        let encoded = "file:///C%3a/workspace/bang%21.css";
+        for (first, second) in [(literal, encoded), (encoded, literal)] {
+            let manager = CssVariableManager::new(Config {
+                max_documents: 1,
+                ..Config::default()
+            });
+            let first_uri = Uri::from_str(first).unwrap();
+            let second_uri = Uri::from_str(second).unwrap();
+            assert!(manager.accept_document_version(&first_uri, 2).await);
+            assert!(!manager.accept_document_version(&second_uri, 1).await);
+            assert_eq!(manager.get_document_version(&second_uri).await, Some(2));
+            manager
+                .add_variable(create_test_variable("--old", "red", ":root", first))
+                .await
+                .unwrap();
+            manager
+                .add_usage(create_test_usage("--old", ".card", first))
+                .await;
+            manager
+                .add_literal_color(create_literal_color("#55cbb9", first, "#55cbb9", ":root"))
+                .await;
+            assert_eq!(
+                manager.get_document_literal_colors(&second_uri).await.len(),
+                1
+            );
+            assert_eq!(
+                manager
+                    .get_literal_colors_at_position(&second_uri, Position::new(0, 0))
+                    .await
+                    .len(),
+                1
+            );
+            assert!(manager
+                .replace_document_analysis_at_version(
+                    &second_uri,
+                    2,
+                    vec![create_test_variable("--new", "blue", ":root", second)],
+                    vec![create_test_usage("--new", ".card", second)],
+                )
+                .await
+                .unwrap());
+            assert!(manager.get_variables("--old").await.is_empty());
+            assert!(manager.get_usages("--old").await.is_empty());
+            assert_eq!(manager.get_document_variables(&first_uri).await.len(), 1);
+            assert_eq!(manager.get_document_usages(&first_uri).await.len(), 1);
+            assert_eq!(manager.get_document_uris().await.len(), 1);
+            manager
+                .replace_document_variables(
+                    &first_uri,
+                    vec![create_test_variable("--latest", "green", ":root", second)],
+                )
+                .await
+                .unwrap();
+            assert!(manager.get_variables("--new").await.is_empty());
+            assert_eq!(manager.get_variables("--latest").await[0].uri, second_uri);
+            manager.clear_document_version(&second_uri).await;
+            assert_eq!(manager.get_document_version(&first_uri).await, None);
+            manager.remove_document(&first_uri).await;
+            assert!(manager.get_document_uris().await.is_empty());
+            assert!(manager.get_all_variables().await.is_empty());
+            assert!(manager.get_usages("--new").await.is_empty());
+            assert!(manager
+                .get_document_literal_colors(&second_uri)
+                .await
+                .is_empty());
         }
     }
 

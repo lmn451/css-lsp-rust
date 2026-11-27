@@ -1647,6 +1647,105 @@ fn workspace_fixture(name: &str, variable: &str) -> (std::path::PathBuf, Uri) {
 }
 
 #[tokio::test]
+async fn test_workspace_scan_and_equivalent_did_open_do_not_suggest_self() {
+    let (root, root_uri) = workspace_fixture("uri-identity", "--unrelated");
+    let text = ":root { --issue34: #55cbb9; }";
+    let path = root.join("bang!.css");
+    std::fs::write(&path, text).unwrap();
+    let scanned_uri = Uri::from_file_path(&path).unwrap();
+    // Use the other spelling regardless of which spelling disk discovery produces.
+    let alternative = if scanned_uri.as_str().contains("%21") {
+        scanned_uri.as_str().replace("%21", "!")
+    } else {
+        scanned_uri.as_str().replace("!", "%21")
+    };
+    let editor_uri = Uri::from_str(&alternative).unwrap();
+    assert_ne!(scanned_uri, editor_uri);
+    let (mut service, mut rx) = setup_service().await;
+    initialize_with_root(&mut service, Some(&root_uri), None, None, false).await;
+    assert_eq!(workspace_symbols(&mut service, "--issue34").await.len(), 1);
+
+    open_document(&mut service, editor_uri.clone(), "css", text, 1).await;
+    let diagnostics = next_publish_diagnostics_for(&mut rx, &editor_uri).await;
+    assert!(
+        diagnostics.diagnostics.is_empty(),
+        "equivalent scan/editor URIs must not suggest the declaration itself: {:?}",
+        diagnostics.diagnostics
+    );
+    let symbols = workspace_symbols(&mut service, "--issue34").await;
+    assert_eq!(
+        symbols.len(),
+        1,
+        "one physical file must have one definition"
+    );
+    assert_eq!(symbols[0].location.uri, editor_uri);
+
+    // Notifications using the disk spelling must still find the authoritative buffer.
+    change_document(
+        &mut service,
+        scanned_uri.clone(),
+        2,
+        ":root { --issue34: #55cbb9; --unsaved: #abcdef; }",
+    )
+    .await;
+    assert!(next_publish_diagnostics_for(&mut rx, &editor_uri)
+        .await
+        .diagnostics
+        .is_empty());
+    send_notification(
+        &mut service,
+        "workspace/didChangeWatchedFiles",
+        serde_json::json!({
+            "changes": [{ "uri": scanned_uri, "type": 2 }]
+        }),
+    )
+    .await;
+    assert!(next_publish_diagnostics_for(&mut rx, &editor_uri)
+        .await
+        .diagnostics
+        .is_empty());
+    assert_eq!(workspace_symbols(&mut service, "--unsaved").await.len(), 1);
+    send_notification(
+        &mut service,
+        "workspace/didChangeConfiguration",
+        serde_json::json!({
+            "settings": { "ignore_globs": ["**/unused/**"] }
+        }),
+    )
+    .await;
+    assert!(next_publish_diagnostics_for(&mut rx, &editor_uri)
+        .await
+        .diagnostics
+        .is_empty());
+    assert_eq!(workspace_symbols(&mut service, "--issue34").await.len(), 1);
+    assert_eq!(workspace_symbols(&mut service, "--unsaved").await.len(), 1);
+    close_document(&mut service, scanned_uri).await;
+    assert!(workspace_symbols(&mut service, "--unsaved")
+        .await
+        .is_empty());
+    assert_eq!(workspace_symbols(&mut service, "--issue34").await.len(), 1);
+
+    let other_uri = Uri::from_str("file:///uri-identity-other.css").unwrap();
+    open_document(
+        &mut service,
+        other_uri.clone(),
+        "css",
+        ".card { color: #55cbb9; }",
+        1,
+    )
+    .await;
+    let diagnostics = next_publish_diagnostics_for(&mut rx, &other_uri).await;
+    assert_eq!(diagnostics.diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics.diagnostics[0].code,
+        Some(ls_types::NumberOrString::String(
+            "css-variable-lsp.literal-color-replaceable".to_string()
+        ))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn test_initialize_scans_root_uri_without_workspace_folders() {
     let (root, root_uri) = workspace_fixture("root-uri", "--root-color");
     let (request_tx, mut request_rx) = mpsc::unbounded_channel();
