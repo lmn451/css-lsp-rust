@@ -247,6 +247,7 @@ pub struct CssVariableLsp {
     /// Keeps queries consistent with complete document and workspace updates.
     document_lifecycle_lock: Arc<RwLock<()>>,
     runtime_config: RuntimeConfig,
+    diagnostic_severities: Arc<RwLock<HashMap<String, String>>>,
     workspace_folder_paths: Arc<RwLock<Vec<PathBuf>>>,
     root_folder_path: Arc<RwLock<Option<PathBuf>>>,
     root_folder_uri: Arc<RwLock<Option<Uri>>>,
@@ -264,6 +265,21 @@ pub struct CssVariableLsp {
     color_occurrence_uris: Arc<RwLock<HashSet<Uri>>>,
 }
 
+fn parse_diagnostic_severities(settings: &serde_json::Value) -> Option<HashMap<String, String>> {
+    let section = settings
+        .get("cssVariables")
+        .or_else(|| settings.get("cssVariableLsp"))
+        .unwrap_or(settings);
+    Some(
+        section
+            .get("diagnosticSeverities")?
+            .as_object()?
+            .iter()
+            .filter_map(|(code, value)| Some((code.clone(), value.as_str()?.to_owned())))
+            .collect(),
+    )
+}
+
 impl CssVariableLsp {
     pub fn new(client: Client, runtime_config: RuntimeConfig) -> Self {
         let config = Config::from_runtime(&runtime_config);
@@ -274,6 +290,7 @@ impl CssVariableLsp {
             manager: Arc::new(CssVariableManager::new(config)),
             document_map: Arc::new(RwLock::new(HashMap::new())),
             runtime_config,
+            diagnostic_severities: Arc::new(RwLock::new(HashMap::new())),
             document_lifecycle_lock: Arc::new(RwLock::new(())),
             workspace_folder_paths: Arc::new(RwLock::new(Vec::new())),
             root_folder_path: Arc::new(RwLock::new(None)),
@@ -378,6 +395,7 @@ impl CssVariableLsp {
             self.manager.as_ref(),
             &self.usage_regex,
             self.runtime_config.undefined_var_fallback,
+            self.diagnostic_severities.read().await.clone(),
             has_related_info,
             uri,
             text,
@@ -403,6 +421,7 @@ impl CssVariableLsp {
                 self.manager.as_ref(),
                 &self.usage_regex,
                 self.runtime_config.undefined_var_fallback,
+                self.diagnostic_severities.read().await.clone(),
                 has_related_info,
                 &uri,
                 &text,
@@ -467,6 +486,7 @@ impl CssVariableLsp {
                 self.manager.as_ref(),
                 &self.usage_regex,
                 self.runtime_config.undefined_var_fallback,
+                self.diagnostic_severities.read().await.clone(),
                 has_related_info,
                 &uri,
                 &text,
@@ -612,6 +632,11 @@ impl LanguageServer for CssVariableLsp {
                 &format!("CSS Variable LSP (Rust) v{} initializing...", VERSION),
             )
             .await;
+
+        if let Some(settings) = params.initialization_options.as_ref() {
+            *self.diagnostic_severities.write().await =
+                parse_diagnostic_severities(settings).unwrap_or_default();
+        }
 
         let has_workspace_folders = params
             .capabilities
@@ -763,12 +788,10 @@ impl LanguageServer for CssVariableLsp {
         // We accept either:
         // - a flat object matching Config fields
         // - or a namespaced object { "cssVariableLsp": { ... } }
-        let settings = params
-            .settings
-            .get("cssVariableLsp")
-            .cloned()
-            .unwrap_or(params.settings);
-        let patch = serde_json::from_value::<ClientConfigPatch>(settings);
+        let settings = params.settings;
+        let overrides = parse_diagnostic_severities(&settings);
+        let patch_settings = settings.get("cssVariableLsp").cloned().unwrap_or(settings);
+        let patch = serde_json::from_value::<ClientConfigPatch>(patch_settings);
 
         let patch = match patch {
             Ok(patch) => patch,
@@ -783,6 +806,9 @@ impl LanguageServer for CssVariableLsp {
             }
         };
 
+        if let Some(overrides) = overrides {
+            *self.diagnostic_severities.write().await = overrides;
+        }
         let mut config = self.live_config.read().await.clone();
         let prev_lookup_files = config.lookup_files.clone();
         let prev_ignore_globs = config.ignore_globs.clone();
@@ -1852,6 +1878,7 @@ async fn validate_document_text_with(
     manager: &CssVariableManager,
     usage_regex: &Regex,
     undefined_var_fallback: UndefinedVarFallbackMode,
+    diagnostic_severities: HashMap<String, String>,
     has_related_info: bool,
     uri: &Uri,
     text: &str,
@@ -1991,6 +2018,36 @@ async fn validate_document_text_with(
             })),
         });
     }
+
+    diagnostics.retain_mut(|diagnostic| {
+        let code = diagnostic.code.as_ref().and_then(|code| match code {
+            ls_types::NumberOrString::String(value) => Some(value.as_str()),
+            ls_types::NumberOrString::Number(_) => None,
+        });
+        let Some(override_value) = code.and_then(|code| diagnostic_severities.get(code)) else {
+            return true;
+        };
+        match override_value.as_str() {
+            "off" => false,
+            "error" => {
+                diagnostic.severity = Some(DiagnosticSeverity::ERROR);
+                true
+            }
+            "warning" => {
+                diagnostic.severity = Some(DiagnosticSeverity::WARNING);
+                true
+            }
+            "info" => {
+                diagnostic.severity = Some(DiagnosticSeverity::INFORMATION);
+                true
+            }
+            "hint" => {
+                diagnostic.severity = Some(DiagnosticSeverity::HINT);
+                true
+            }
+            _ => true,
+        }
+    });
 
     // Update usage maps
     {

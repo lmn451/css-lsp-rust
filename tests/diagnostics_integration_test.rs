@@ -1396,6 +1396,12 @@ async fn test_literal_color_completion_returns_exact_matches_only() {
     open_document(&mut service, index_uri.clone(), "scss", text, 1).await;
     let _ = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
 
+    send_notification(&mut service, "workspace/didChangeConfiguration", serde_json::json!({
+        "settings": { "cssVariables": { "diagnosticSeverities": { "css-variable-lsp.literal-color-replaceable": "off" } } }
+    })).await;
+    let diagnostics = next_publish_diagnostics_for(&mut diagnostics_rx, &index_uri).await;
+    assert!(diagnostics.diagnostics.is_empty());
+
     let color_position = position_of(text, "#fff");
     let labels = completion_labels(&mut service, index_uri.clone(), color_position).await;
     assert!(labels.contains(&"--white".to_string()));
