@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-11-27
+
 ### Added
 - Parse OKLab, OKLCH, relative colors, and sRGB/XYZ `color()` values, including full literal-color ranges in compound CSS values.
 
@@ -15,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update direct dependencies to current stable releases and align the test service with Tower 0.5.
 
 ### Fixed
+- Treat equivalent file URIs as one document so workspace scans and editor updates do not suggest a CSS variable as a replacement for itself. Preserve client URI spelling and keep distinct files separate.
 - Upgrade Tokio past the AsyncFd safety advisory and remove the old rand/phf build dependency chain.
 - Preserve configuration recovery and exact JavaScript property-name comparisons with Oxc's updated parser and string APIs.
 - Wait for document analysis and workspace scans before answering indexed queries, preventing incomplete rename edits and missing resolved colors immediately after opening files.
